@@ -2,6 +2,7 @@ package git
 
 import (
 	"strings"
+	"time"
 )
 
 type Parser struct{}
@@ -76,4 +77,31 @@ func (p *Parser) ParseStatus(output string) (*StatusResult, error) {
 	}
 
 	return result, nil
+}
+
+func (p *Parser) ParseCommits(output string) ([]Commit, error) {
+	var commits []Commit
+
+	lines := strings.Split(output, "\n")
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+
+		parts := strings.Split(line, "|")
+		if len(parts) < 4 {
+			continue
+		}
+
+		date, _ := time.Parse("2006-01-02 15:04:05 -0700", parts[3])
+
+		commits = append(commits, Commit{
+			Hash:    parts[0],
+			Message: parts[1],
+			Author:  parts[2],
+			Date:    date,
+		})
+	}
+
+	return commits, nil
 }

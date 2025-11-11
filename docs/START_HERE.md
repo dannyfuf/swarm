@@ -199,9 +199,9 @@ From [DECISIONS.md](DECISIONS.md) ADR-002:
 
 ```
 ai_working/
-├── fintoc-rails/                   # Base repo
-├── fintoc-rails__wt__main/         # Worktree for main
-├── fintoc-rails__wt__feature_foo/  # Worktree for feature/foo
+├── my-project/                   # Base repo
+├── my-project__wt__main/         # Worktree for main
+├── my-project__wt__feature_foo/  # Worktree for feature/foo
 └── .swarm-state.json               # State file
 ```
 

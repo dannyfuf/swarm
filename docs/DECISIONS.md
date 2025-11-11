@@ -78,9 +78,9 @@ Reconsider if:
 Use **Pattern A: Flat sibling cluster**
 ```
 ai_working/
-├── fintoc-rails/
-├── fintoc-rails__wt__main/
-├── fintoc-rails__wt__feature_foo/
+├── my-project/
+├── my-project__wt__main/
+├── my-project__wt__feature_foo/
 ```
 
 ### Rationale
@@ -101,8 +101,8 @@ ai_working/
 **Pattern B: Subfolder**
 ```
 ai_working/
-├── fintoc-rails/
-└── fintoc-rails.worktrees/
+├── my-project/
+└── my-project.worktrees/
     ├── main/
     └── feature_foo/
 ```
@@ -112,7 +112,7 @@ ai_working/
 **Pattern C: Nested under repo**
 ```
 ai_working/
-└── fintoc-rails/
+└── my-project/
     ├── .git/
     └── .swarm/worktrees/
         ├── main/
@@ -297,7 +297,7 @@ Reconsider if:
 ### Session Naming
 
 Format: `<repo-slug>--wt--<worktree-slug>`
-Example: `fintoc-rails--wt--feature_payments-refactor`
+Example: `my-project--wt--feature_payments-refactor`
 
 **Rationale:**
 - Unique per worktree
@@ -442,17 +442,17 @@ func CheckRemovalSafety(wt *Worktree, opts RemoveOptions) (*SafetyResult, error)
 ### User Experience
 
 ```bash
-$ swarm remove fintoc-rails feature/foo
+$ swarm remove my-project feature/foo
 
 ⚠️  Cannot remove worktree:
   • Worktree has uncommitted changes
 
 View changes: cd /path/to/worktree && git status
-Remove anyway: swarm remove fintoc-rails feature/foo --force
+Remove anyway: swarm remove my-project feature/foo --force
 
-$ swarm remove fintoc-rails feature/foo --force
-✓ Removed worktree fintoc-rails__wt__feature_foo
-✓ Killed tmux session fintoc-rails--wt--feature_foo
+$ swarm remove my-project feature/foo --force
+✓ Removed worktree my-project__wt__feature_foo
+✓ Killed tmux session my-project--wt--feature_foo
 ```
 
 ### Consequences

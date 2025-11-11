@@ -1,0 +1,14 @@
+{
+  "windows": [
+    {
+      "name": "editor",
+      "command": "nvim .",
+      "panes": []
+    },
+    {
+      "name": "shell",
+      "command": "",
+      "panes": []
+    }
+  ]
+}

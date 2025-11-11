@@ -10,17 +10,22 @@ Swarm manages Git worktrees with dedicated tmux sessions, designed for workflows
 # Build
 make install
 
+# Launch interactive TUI (default)
+swarm
+
+# Or use CLI commands directly:
+
 # Create a new worktree
-swarm create fintoc-rails feature/payments-refactor --from main
+swarm create my-project feature/new-feature --from main
 
 # Open in tmux session
-swarm open fintoc-rails feature/payments-refactor
+swarm open my-project feature/new-feature
 
 # List all worktrees
 swarm list --all
 
 # Remove when done
-swarm remove fintoc-rails feature/payments-refactor
+swarm remove my-project feature/new-feature
 ```
 
 ## Features
@@ -28,13 +33,14 @@ swarm remove fintoc-rails feature/payments-refactor
 ✨ **Core Features:**
 - 🌳 Git worktree lifecycle management (create, list, remove, prune)
 - 💻 Automatic tmux session creation and attachment
+- 🎨 Interactive TUI for browsing and managing worktrees (default interface)
 - 🔍 Repository discovery across `ai_working/`
 - 🛡️ Safety checks before removal (uncommitted changes, unpushed commits)
 - 💾 State persistence with reconciliation
 - ⚙️ Configurable directory patterns and defaults
+- 🎯 Session management (kill sessions without removing worktrees)
 
 🚀 **Coming Soon** (Phase 2-3):
-- 🎨 Interactive TUI for browsing and managing worktrees
 - 🔄 Session restoration (`revive` command)
 - 🪝 Extensibility hooks for custom workflows
 - 📊 Health checks and orphan detection
@@ -137,9 +143,9 @@ swarm create <repo> <branch> --no-session
 
 **Example:**
 ```bash
-swarm create fintoc-rails feature/payments-refactor --from main
-# Created: ai_working/fintoc-rails__wt__feature_payments-refactor
-# Tmux session: fintoc-rails--wt--feature_payments-refactor
+swarm create my-project feature/payments-refactor --from main
+# Created: ai_working/my-project__wt__feature_payments-refactor
+# Tmux session: my-project--wt--feature_payments-refactor
 ```
 
 ### Opening Worktrees
@@ -157,7 +163,7 @@ swarm open <repo> <branch> --create
 
 **Example:**
 ```bash
-swarm open fintoc-rails feature/payments-refactor
+swarm open my-project feature/payments-refactor
 # Attaches to tmux session
 # Inside tmux: window 1 = nvim, window 2 = shell, window 3 = tests
 ```
@@ -175,14 +181,14 @@ swarm list --all
 swarm list --all --json
 
 # Filter by repo
-swarm list --repo fintoc-rails
+swarm list --repo my-project
 ```
 
 **Example output:**
 ```
-fintoc-rails
-  ✓ main                     /path/to/fintoc-rails
-  ✓ feature_payments-refactor /path/to/fintoc-rails__wt__feature_payments-refactor
+my-project
+  ✓ main                     /path/to/my-project
+  ✓ feature_payments-refactor /path/to/my-project__wt__feature_payments-refactor
     [MODIFIED] [UNPUSHED]
     Last opened: 2 hours ago
 
@@ -210,13 +216,63 @@ swarm remove <repo> <branch> --keep-branch
 
 **Example:**
 ```bash
-swarm remove fintoc-rails feature/payments-refactor
+swarm remove my-project feature/payments-refactor
 # ⚠️  Cannot remove worktree:
 #   • Worktree has uncommitted changes
 #
 # View changes: cd /path/to/worktree && git status
-# Remove anyway: swarm remove fintoc-rails feature/payments-refactor --force
+# Remove anyway: swarm remove my-project feature/payments-refactor --force
 ```
+
+### Interactive TUI
+
+The TUI is now the default interface when running `swarm` without arguments.
+
+```bash
+# Launch TUI
+swarm
+
+# Or explicitly
+swarm tui
+```
+
+**Features:**
+- Browse all repositories and worktrees in a three-pane layout
+- Navigate with arrow keys or vim-style (j/k/h/l)
+- Press Enter to select and view worktree details
+- Auto-selection: first worktree automatically selected when entering a repo
+- Open worktrees in tmux sessions directly from the TUI
+- Remove worktrees with safety checks
+- View git status badges (modified, unpushed, merged)
+
+**Keyboard shortcuts:**
+- `↑/↓` or `j/k` - Navigate
+- `Enter` - Select/Open
+- `o` - Open worktree in tmux
+- `d` - Delete worktree (with confirmation)
+- `c` - Copy path/branch name
+- `r` - Refresh
+- `q` or `Ctrl+C` - Quit
+
+### Session Management
+
+```bash
+# List all tmux sessions
+swarm sessions
+
+# Kill a specific session (preserves worktree)
+swarm kill-session <repo> <branch>
+```
+
+**Example:**
+```bash
+# Kill session but keep the worktree
+swarm kill-session my-project feature/payments-refactor
+# ✓ Killed tmux session for my-project/feature/payments-refactor
+# Worktree preserved at: /path/to/worktree
+```
+
+This is useful for cleaning up sessions without destroying work.
 
 ### Other Commands
 
@@ -224,12 +280,6 @@ swarm remove fintoc-rails feature/payments-refactor
 # Prune stale worktree references
 swarm prune <repo>
 swarm prune --all
-
-# List tmux sessions
-swarm sessions
-
-# Kill specific session
-swarm kill-session <repo> <branch>
 
 # Validate environment
 swarm doctor
@@ -248,9 +298,9 @@ swarm info /path/to/worktree
 
 ```
 ai_working/
-├── fintoc-rails/                          # Base repo
-├── fintoc-rails__wt__main/                # Worktree for main
-├── fintoc-rails__wt__feature_foo/         # Worktree for feature/foo
+├── my-project/                          # Base repo
+├── my-project__wt__main/                # Worktree for main
+├── my-project__wt__feature_foo/         # Worktree for feature/foo
 ├── underworld-tf/
 ├── underworld-tf__wt__feature_bar/
 └── .swarm-state.json                      # State file
@@ -266,8 +316,8 @@ ai_working/
 Format: `<repo-slug>--wt--<worktree-slug>`
 
 Examples:
-- `fintoc-rails--wt--main`
-- `fintoc-rails--wt--feature_payments-refactor`
+- `my-project--wt--main`
+- `my-project--wt--feature_payments-refactor`
 - `underworld-tf--wt--bugfix_auth-issue`
 
 ## Architecture

@@ -57,7 +57,7 @@ type Discovery interface {
 
 // Repo represents a base repository
 type Repo struct {
-    Name          string    // e.g., "fintoc-rails"
+    Name          string    // e.g., "my-project"
     Path          string    // absolute path
     DefaultBranch string    // "main", "master", etc.
     LastScanned   time.Time

@@ -136,11 +136,11 @@ swarm/
 ### Create Worktree Flow
 
 ```
-User: swarm create fintoc-rails feature/foo --from main
+User: swarm create my-project feature/foo --from main
   │
   ├─> cmd.create.Execute()
   │     │
-  │     ├─> repo.Discovery.FindRepo("fintoc-rails")
+  │     ├─> repo.Discovery.FindRepo("my-project")
   │     │     └─> Scans $AI_WORKING_DIR for matching repo
   │     │
   │     ├─> worktree.Manager.Create(repo, branch, base)
@@ -159,17 +159,17 @@ User: swarm create fintoc-rails feature/foo --from main
   │     └─> tmux.Session.Create(name, path, layout)
   │           └─> tmux.Client.NewSession(name, path)
   │
-  └─> Success: "Created worktree fintoc-rails__wt__feature_foo"
+  └─> Success: "Created worktree my-project__wt__feature_foo"
 ```
 
 ### Open Worktree Flow
 
 ```
-User: swarm open fintoc-rails feature/foo
+User: swarm open my-project feature/foo
   │
   ├─> cmd.open.Execute()
   │     │
-  │     ├─> repo.Discovery.FindRepo("fintoc-rails")
+  │     ├─> repo.Discovery.FindRepo("my-project")
   │     │
   │     ├─> worktree.Manager.Find(repo, "feature/foo")
   │     │     ├─> git.Client.WorktreeList(repo)
@@ -189,7 +189,7 @@ User: swarm open fintoc-rails feature/foo
 ### Remove Worktree Flow (with safety checks)
 
 ```
-User: swarm remove fintoc-rails feature/foo
+User: swarm remove my-project feature/foo
   │
   ├─> cmd.remove.Execute()
   │     │
@@ -223,18 +223,18 @@ Location: `$AI_WORKING_DIR/.swarm-state.json`
   "version": 1,
   "updated_at": "2025-11-10T14:30:00Z",
   "repos": {
-    "fintoc-rails": {
-      "path": "/Users/danny/amplifier/ai_working/fintoc-rails",
+    "my-project": {
+      "path": "/Users/danny/amplifier/ai_working/my-project",
       "default_branch": "main",
       "last_scanned": "2025-11-10T14:29:55Z",
       "worktrees": {
         "feature_payments-refactor": {
           "slug": "feature_payments-refactor",
           "branch": "feature/payments-refactor",
-          "path": "/Users/danny/amplifier/ai_working/fintoc-rails__wt__feature_payments-refactor",
+          "path": "/Users/danny/amplifier/ai_working/my-project__wt__feature_payments-refactor",
           "created_at": "2025-11-10T10:00:00Z",
           "last_opened_at": "2025-11-10T14:25:00Z",
-          "tmux_session": "fintoc-rails--wt--feature_payments-refactor"
+          "tmux_session": "my-project--wt--feature_payments-refactor"
         }
       }
     }
@@ -273,10 +273,10 @@ defer lock.Unlock()
 **Pattern A (Default):** Flat sibling cluster
 ```
 ai_working/
-├── fintoc-rails/              # Base repo
-├── fintoc-rails__wt__main/    # Worktree for main
-├── fintoc-rails__wt__feature_foo/
-└── fintoc-rails__wt__bugfix_bar/
+├── my-project/              # Base repo
+├── my-project__wt__main/    # Worktree for main
+├── my-project__wt__feature_foo/
+└── my-project__wt__bugfix_bar/
 ```
 
 **Benefits:**
@@ -308,7 +308,7 @@ func GenerateSlug(branch string) string {
 
 ```
 Format: <repo-slug>--wt--<worktree-slug>
-Example: fintoc-rails--wt--feature_payments-refactor
+Example: my-project--wt--feature_payments-refactor
 
 Rules:
 - Alphanumeric + hyphens + underscores only

@@ -195,10 +195,10 @@ func GenerateSlug(branch string) string {
 **Success Criteria:**
 ```bash
 # These work end-to-end:
-swarm create fintoc-rails feature/test --from main
-swarm list fintoc-rails
-swarm open fintoc-rails feature/test
-swarm remove fintoc-rails feature/test
+swarm create my-project feature/test --from main
+swarm list my-project
+swarm open my-project feature/test
+swarm remove my-project feature/test
 ```
 
 **Module Order:**
@@ -483,7 +483,7 @@ go test -v -run TestGenerateSlug/with_slash
 **4. Check git output directly:**
 ```bash
 # See what git commands return
-git -C ~/amplifier/ai_working/fintoc-rails worktree list --porcelain
+git -C ~/amplifier/ai_working/my-project worktree list --porcelain
 ```
 
 ---

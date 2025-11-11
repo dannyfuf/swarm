@@ -11,6 +11,7 @@ type Worktree struct {
 	CreatedAt    time.Time
 	LastOpenedAt time.Time
 	TmuxSession  string
+	IsOrphaned   bool // True if directory is missing but still in state
 }
 
 // CreateOptions for creating a worktree
