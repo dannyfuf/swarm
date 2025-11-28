@@ -114,3 +114,85 @@ func (s *Store) RemoveWorktree(repoName, slug string) error {
 
 	return s.Save(state)
 }
+
+// GetCurrentSelection returns the current selection state
+func (s *Store) GetCurrentSelection() (*SelectionState, error) {
+	state, err := s.Load()
+	if err != nil {
+		return nil, err
+	}
+	return &state.Selection, nil
+}
+
+// SetSelectedRepo sets the currently selected repo
+func (s *Store) SetSelectedRepo(repoName string) error {
+	state, err := s.Load()
+	if err != nil {
+		return err
+	}
+	state.Selection.SelectedRepo = repoName
+	state.Selection.SelectedWorktree = "" // Clear worktree selection
+	state.Selection.SelectedWindow = ""   // Clear window selection
+	return s.Save(state)
+}
+
+// SetSelectedWorktree sets the currently selected worktree
+func (s *Store) SetSelectedWorktree(slug string) error {
+	state, err := s.Load()
+	if err != nil {
+		return err
+	}
+	state.Selection.SelectedWorktree = slug
+	state.Selection.SelectedWindow = "" // Clear window selection
+	return s.Save(state)
+}
+
+// SetSelectedWindow sets the currently selected window
+func (s *Store) SetSelectedWindow(windowName string) error {
+	state, err := s.Load()
+	if err != nil {
+		return err
+	}
+	state.Selection.SelectedWindow = windowName
+	return s.Save(state)
+}
+
+// AddWindowToWorktree adds a window reference to a worktree
+func (s *Store) AddWindowToWorktree(repoName, slug, windowName string) error {
+	state, err := s.Load()
+	if err != nil {
+		return err
+	}
+
+	if state.Repos[repoName] == nil || state.Repos[repoName].Worktrees[slug] == nil {
+		return fmt.Errorf("worktree not found: %s/%s", repoName, slug)
+	}
+
+	wt := state.Repos[repoName].Worktrees[slug]
+	wt.Windows = append(wt.Windows, windowName)
+
+	return s.Save(state)
+}
+
+// RemoveWindowFromWorktree removes a window reference from a worktree
+func (s *Store) RemoveWindowFromWorktree(repoName, slug, windowName string) error {
+	state, err := s.Load()
+	if err != nil {
+		return err
+	}
+
+	if state.Repos[repoName] == nil || state.Repos[repoName].Worktrees[slug] == nil {
+		return fmt.Errorf("worktree not found: %s/%s", repoName, slug)
+	}
+
+	wt := state.Repos[repoName].Worktrees[slug]
+	var filtered []string
+	for _, w := range wt.Windows {
+		if w != windowName {
+			filtered = append(filtered, w)
+		}
+	}
+	wt.Windows = filtered
+
+	return s.Save(state)
+}
