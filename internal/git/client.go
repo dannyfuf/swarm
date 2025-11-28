@@ -111,3 +111,65 @@ func (c *Client) DefaultBranch(repoPath string) (string, error) {
 
 	return "", fmt.Errorf("could not determine default branch")
 }
+
+// Clone clones a repository to the specified path
+func (c *Client) Clone(url, targetPath string) error {
+	cmd := exec.Command("git", "clone", url, targetPath)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git clone failed: %w\nOutput: %s", err, output)
+	}
+	return nil
+}
+
+// RebaseWithMain rebases the current branch with the main branch
+func (c *Client) RebaseWithMain(worktreePath, mainBranch string) error {
+	// First fetch latest changes
+	cmd := exec.Command("git", "-C", worktreePath, "fetch", "origin", mainBranch)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git fetch failed: %w\nOutput: %s", err, output)
+	}
+
+	// Then rebase
+	cmd = exec.Command("git", "-C", worktreePath, "rebase", fmt.Sprintf("origin/%s", mainBranch))
+	output, err = cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git rebase failed: %w\nOutput: %s", err, output)
+	}
+
+	return nil
+}
+
+// RemoveOrphanWorktrees removes worktrees that have missing directories
+func (c *Client) RemoveOrphanWorktrees(repoPath string) ([]string, error) {
+	// Get all worktrees
+	worktrees, err := c.WorktreeList(repoPath)
+	if err != nil {
+		return nil, err
+	}
+
+	var removed []string
+	for _, wt := range worktrees {
+		// Skip the main worktree (it's the repo path itself)
+		if wt.Path == repoPath {
+			continue
+		}
+
+		// Check if directory exists using stat
+		cmd := exec.Command("stat", wt.Path)
+		if cmd.Run() != nil {
+			// Directory doesn't exist, remove worktree
+			if err := c.WorktreeRemove(repoPath, wt.Path); err != nil {
+				// If remove fails, try prune
+				_ = c.WorktreePrune(repoPath)
+			}
+			removed = append(removed, wt.Path)
+		}
+	}
+
+	// Always prune at the end to clean up administrative files
+	_ = c.WorktreePrune(repoPath)
+
+	return removed, nil
+}

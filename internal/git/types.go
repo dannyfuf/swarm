@@ -33,3 +33,22 @@ type AddOptions struct {
 	BaseBranch string
 	NewBranch  bool
 }
+
+// RemoteRepo represents a remote repository
+type RemoteRepo struct {
+	Name          string
+	FullName      string // e.g., "owner/repo"
+	URL           string
+	Description   string
+	DefaultBranch string
+	Provider      string // "github" for now
+	IsPrivate     bool
+}
+
+// CloneOptions for Clone operation
+type CloneOptions struct {
+	URL          string
+	TargetPath   string
+	Depth        int // 0 = full clone
+	SingleBranch bool
+}
