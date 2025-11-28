@@ -46,13 +46,16 @@ install: build
 	@echo "Run 'swarm --help' to get started"
 
 # Test targets
-test:
-	@echo "Running unit tests..."
-	$(GO) test ./... $(GOFLAGS)
+test: test-unit ## Run all unit tests
+	@echo "✓ All unit tests passed!"
 
-test-integration:
+test-unit: ## Run unit tests only
+	@echo "Running unit tests..."
+	$(GO) test ./internal/... $(GOFLAGS) -short
+
+test-integration: ## Run integration tests (requires git + tmux)
 	@echo "Running integration tests (requires git + tmux)..."
-	$(GO) test -tags=integration ./... $(GOFLAGS)
+	$(GO) test -tags=integration ./tests/integration/... $(GOFLAGS)
 
 test-e2e:
 	@echo "Running end-to-end tests..."
@@ -62,14 +65,16 @@ test-e2e:
 		./test/e2e/run_all.sh; \
 	fi
 
-test-all: test test-integration test-e2e
+test-all: test-unit test-integration ## Run all tests
 
-coverage:
+test-coverage: ## Generate coverage report
 	@echo "Generating coverage report..."
-	$(GO) test ./... -coverprofile=coverage.out
+	$(GO) test ./internal/... -coverprofile=coverage.out
 	$(GO) tool cover -html=coverage.out -o coverage.html
 	@echo "Coverage report: coverage.html"
 	@$(GO) tool cover -func=coverage.out | grep total
+
+coverage: test-coverage
 
 # Code quality targets
 fmt:
@@ -111,10 +116,10 @@ doctor:
 	@echo "Tmux version:"
 	@tmux -V || echo "✗ Tmux not installed"
 	@echo ""
-	@echo "AI_WORKING_DIR:"
-	@if [ -n "$$AI_WORKING_DIR" ]; then \
-		echo "  ✓ $$AI_WORKING_DIR"; \
-		if [ -d "$$AI_WORKING_DIR" ]; then \
+	@echo "REPOS_DIR:"
+	@if [ -n "$$REPOS_DIR" ]; then \
+		echo "  ✓ $$REPOS_DIR"; \
+		if [ -d "$$REPOS_DIR" ]; then \
 			echo "  ✓ Directory exists"; \
 		else \
 			echo "  ✗ Directory does not exist"; \

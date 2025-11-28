@@ -84,14 +84,14 @@ Swarm uses layered configuration with the following precedence:
 
 1. **Environment variables** (highest priority)
 2. **User config** (`~/.config/swarm/config.yml`)
-3. **Project config** (`$AI_WORKING_DIR/.swarmrc`)
+3. **Project config** (`$REPOS_DIR/.swarmrc`)
 4. **Built-in defaults**
 
 ### Example config.yml
 
 ```yaml
 # Location of repositories (default: ~/amplifier/ai_working)
-ai_working_dir: ~/amplifier/ai_working
+repos_dir: ~/amplifier/ai_working
 
 # Default base branch for new worktrees
 default_base_branch: main
@@ -118,7 +118,7 @@ auto_prune_on_remove: true
 ### Environment Variables
 
 ```bash
-export AI_WORKING_DIR="$HOME/amplifier/ai_working"
+export REPOS_DIR="$HOME/amplifier/ai_working"
 export SWARM_DEFAULT_BASE_BRANCH="main"
 export SWARM_WORKTREE_PATTERN="patternA"
 ```
