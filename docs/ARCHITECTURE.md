@@ -141,7 +141,7 @@ User: swarm create my-project feature/foo --from main
   ├─> cmd.create.Execute()
   │     │
   │     ├─> repo.Discovery.FindRepo("my-project")
-  │     │     └─> Scans $AI_WORKING_DIR for matching repo
+  │     │     └─> Scans $REPOS_DIR for matching repo
   │     │
   │     ├─> worktree.Manager.Create(repo, branch, base)
   │     │     ├─> worktree.Slug.Generate(branch)
@@ -216,7 +216,7 @@ User: swarm remove my-project feature/foo
 
 ### State File Structure
 
-Location: `$AI_WORKING_DIR/.swarm-state.json`
+Location: `$REPOS_DIR/.swarm-state.json`
 
 ```json
 {
@@ -575,7 +575,7 @@ set -euo pipefail
 
 # Setup
 WORK_DIR=$(mktemp -d)
-export AI_WORKING_DIR="$WORK_DIR"
+export REPOS_DIR="$WORK_DIR"
 git init "$WORK_DIR/test-repo"
 
 # Test create

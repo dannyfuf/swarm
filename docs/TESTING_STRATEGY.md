@@ -155,7 +155,7 @@ func TestLoaderEnvOverride(t *testing.T) {
 }
 
 func TestValidateInvalidDir(t *testing.T) {
-    cfg := &Config{AIWorkingDir: "/nonexistent"}
+    cfg := &Config{ReposDir: "/nonexistent"}
     err := cfg.Validate()
 
     assert.Error(t, err)
@@ -431,7 +431,7 @@ func TestRepoDiscoveryWithWorktrees(t *testing.T) {
     setupTestRepo(t, filepath.Join(tmpDir, "repo1"))
     setupTestRepo(t, filepath.Join(tmpDir, "repo2"))
 
-    cfg := &config.Config{AIWorkingDir: tmpDir}
+    cfg := &config.Config{ReposDir: tmpDir}
     discovery := repo.NewDiscovery(cfg, git.NewClient())
     manager := worktree.NewManager(cfg, git.NewClient(), state.NewStore(tmpDir))
 
@@ -477,7 +477,7 @@ set -euo pipefail
 
 # Setup
 WORK_DIR=$(mktemp -d)
-export AI_WORKING_DIR="$WORK_DIR"
+export REPOS_DIR="$WORK_DIR"
 trap "rm -rf $WORK_DIR" EXIT
 
 # Initialize test repo
@@ -561,8 +561,8 @@ import (
 func TestCLIWorkflow(t *testing.T) {
     // Setup
     tmpDir := t.TempDir()
-    os.Setenv("AI_WORKING_DIR", tmpDir)
-    defer os.Unsetenv("AI_WORKING_DIR")
+    os.Setenv("REPOS_DIR", tmpDir)
+    defer os.Unsetenv("REPOS_DIR")
 
     // Create test repo
     repoPath := filepath.Join(tmpDir, "test-repo")
@@ -684,7 +684,7 @@ go test -tags=integration ./...
 go test -tags=integration ./internal/git/
 
 # With setup
-export AI_WORKING_DIR="/tmp/swarm-test"
+export REPOS_DIR="/tmp/swarm-test"
 go test -tags=integration ./...
 ```
 

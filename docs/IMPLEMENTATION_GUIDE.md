@@ -59,8 +59,8 @@ cd ~/amplifier/ai_working/swarm
 git status
 
 # Set environment variable for testing
-export AI_WORKING_DIR="$HOME/amplifier/ai_working"
-echo 'export AI_WORKING_DIR="$HOME/amplifier/ai_working"' >> ~/.bashrc
+export REPOS_DIR="$HOME/amplifier/ai_working"
+echo 'export REPOS_DIR="$HOME/amplifier/ai_working"' >> ~/.bashrc
 ```
 
 3. **IDE Setup (Optional but recommended):**
@@ -414,7 +414,7 @@ func TestWithTempRepo(t *testing.T) {
 ```go
 // Load with defaults
 cfg := DefaultConfig
-cfg.AIWorkingDir = os.Getenv("AI_WORKING_DIR")
+cfg.ReposDir = os.Getenv("REPOS_DIR")
 
 // Override from file
 if data, err := os.ReadFile(configFile); err == nil {

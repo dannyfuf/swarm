@@ -38,8 +38,8 @@ cd ~/amplifier/ai_working/swarm
 # Initialize Go module
 go mod init github.com/microsoft/amplifier/swarm
 
-# Set AI_WORKING_DIR for testing
-export AI_WORKING_DIR="$HOME/amplifier/ai_working"
+# Set REPOS_DIR for testing
+export REPOS_DIR="$HOME/amplifier/ai_working"
 ```
 
 ---
@@ -112,8 +112,8 @@ func Execute() error {
 
 func init() {
     // Global flags
-    rootCmd.PersistentFlags().String("ai-working-dir", "",
-        "Override AI_WORKING_DIR location")
+    rootCmd.PersistentFlags().String("repos-dir", "",
+        "Override REPOS_DIR location")
     rootCmd.PersistentFlags().Bool("dry-run", false,
         "Show what would be done without doing it")
 }
@@ -137,7 +137,7 @@ Available Commands:
   help        Help about any command
 
 Flags:
-      --ai-working-dir string   Override AI_WORKING_DIR location
+      --repos-dir string   Override REPOS_DIR location
       --dry-run                 Show what would be done without doing it
   -h, --help                    help for swarm
 
@@ -175,7 +175,7 @@ import (
 
 // Config represents merged configuration
 type Config struct {
-    AIWorkingDir          string
+    ReposDir          string
     DefaultBaseBranch     string
     WorktreePattern       string
     CreateSessionOnCreate bool
@@ -187,7 +187,7 @@ type Config struct {
 
 // Defaults
 var DefaultConfig = Config{
-    AIWorkingDir:          "", // Will be set from env or home dir
+    ReposDir:          "", // Will be set from env or home dir
     DefaultBaseBranch:     "main",
     WorktreePattern:       "patternA",
     CreateSessionOnCreate: true,
@@ -217,7 +217,7 @@ func NewLoader() *Loader {
     v := viper.New()
 
     // Set defaults
-    v.SetDefault("ai_working_dir", getDefaultAIWorkingDir())
+    v.SetDefault("repos_dir", getDefaultReposDir())
     v.SetDefault("default_base_branch", "main")
     v.SetDefault("worktree_pattern", "patternA")
     v.SetDefault("create_session_on_create", true)
@@ -249,7 +249,7 @@ func (l *Loader) Load() (*Config, error) {
 
     // Build Config struct
     cfg := &Config{
-        AIWorkingDir:          l.viper.GetString("ai_working_dir"),
+        ReposDir:          l.viper.GetString("repos_dir"),
         DefaultBaseBranch:     l.viper.GetString("default_base_branch"),
         WorktreePattern:       l.viper.GetString("worktree_pattern"),
         CreateSessionOnCreate: l.viper.GetBool("create_session_on_create"),
@@ -267,9 +267,9 @@ func (l *Loader) Load() (*Config, error) {
     return cfg, nil
 }
 
-func getDefaultAIWorkingDir() string {
+func getDefaultReposDir() string {
     // Check environment
-    if dir := os.Getenv("AI_WORKING_DIR"); dir != "" {
+    if dir := os.Getenv("REPOS_DIR"); dir != "" {
         return dir
     }
 
@@ -290,9 +290,9 @@ import (
 )
 
 func (c *Config) Validate() error {
-    // Check ai_working_dir exists
-    if _, err := os.Stat(c.AIWorkingDir); err != nil {
-        return errors.New("ai_working_dir does not exist or is not accessible")
+    // Check repos_dir exists
+    if _, err := os.Stat(c.ReposDir); err != nil {
+        return errors.New("repos_dir does not exist or is not accessible")
     }
 
     // Check worktree_pattern is valid
@@ -325,8 +325,8 @@ import (
 func TestLoaderDefaults(t *testing.T) {
     // Setup
     tmpDir := t.TempDir()
-    os.Setenv("AI_WORKING_DIR", tmpDir)
-    defer os.Unsetenv("AI_WORKING_DIR")
+    os.Setenv("REPOS_DIR", tmpDir)
+    defer os.Unsetenv("REPOS_DIR")
 
     // Execute
     loader := NewLoader()
@@ -334,7 +334,7 @@ func TestLoaderDefaults(t *testing.T) {
 
     // Verify
     require.NoError(t, err)
-    assert.Equal(t, tmpDir, cfg.AIWorkingDir)
+    assert.Equal(t, tmpDir, cfg.ReposDir)
     assert.Equal(t, "main", cfg.DefaultBaseBranch)
     assert.Equal(t, "patternA", cfg.WorktreePattern)
 }
@@ -342,10 +342,10 @@ func TestLoaderDefaults(t *testing.T) {
 func TestLoaderEnvOverride(t *testing.T) {
     // Setup
     tmpDir := t.TempDir()
-    os.Setenv("AI_WORKING_DIR", tmpDir)
+    os.Setenv("REPOS_DIR", tmpDir)
     os.Setenv("SWARM_DEFAULT_BASE_BRANCH", "develop")
     defer func() {
-        os.Unsetenv("AI_WORKING_DIR")
+        os.Unsetenv("REPOS_DIR")
         os.Unsetenv("SWARM_DEFAULT_BASE_BRANCH")
     }()
 
@@ -360,7 +360,7 @@ func TestLoaderEnvOverride(t *testing.T) {
 
 func TestValidateInvalidDir(t *testing.T) {
     cfg := &Config{
-        AIWorkingDir: "/nonexistent/path",
+        ReposDir: "/nonexistent/path",
     }
 
     err := cfg.Validate()
@@ -1091,9 +1091,9 @@ func NewDiscovery(cfg *config.Config, gitClient *git.Client) *Discovery {
 }
 
 func (d *Discovery) ScanAll() ([]Repo, error) {
-    entries, err := os.ReadDir(d.config.AIWorkingDir)
+    entries, err := os.ReadDir(d.config.ReposDir)
     if err != nil {
-        return nil, fmt.Errorf("reading ai_working_dir: %w", err)
+        return nil, fmt.Errorf("reading repos_dir: %w", err)
     }
 
     var repos []Repo
@@ -1107,7 +1107,7 @@ func (d *Discovery) ScanAll() ([]Repo, error) {
             continue
         }
 
-        repoPath := filepath.Join(d.config.AIWorkingDir, entry.Name())
+        repoPath := filepath.Join(d.config.ReposDir, entry.Name())
 
         // Check if it's a git repo
         gitDir := filepath.Join(repoPath, ".git")
@@ -1132,7 +1132,7 @@ func (d *Discovery) ScanAll() ([]Repo, error) {
 }
 
 func (d *Discovery) FindByName(name string) (*Repo, error) {
-    repoPath := filepath.Join(d.config.AIWorkingDir, name)
+    repoPath := filepath.Join(d.config.ReposDir, name)
 
     // Check if directory exists
     if _, err := os.Stat(repoPath); err != nil {
@@ -1205,7 +1205,7 @@ func TestScanAll(t *testing.T) {
     tmpDir := setupTestRepos(t)
 
     cfg := &config.Config{
-        AIWorkingDir:      tmpDir,
+        ReposDir:      tmpDir,
         DefaultBaseBranch: "main",
     }
     discovery := NewDiscovery(cfg, git.NewClient())
@@ -1223,7 +1223,7 @@ func TestFindByName(t *testing.T) {
     tmpDir := setupTestRepos(t)
 
     cfg := &config.Config{
-        AIWorkingDir: tmpDir,
+        ReposDir: tmpDir,
     }
     discovery := NewDiscovery(cfg, git.NewClient())
 

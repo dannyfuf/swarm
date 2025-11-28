@@ -37,7 +37,7 @@ Following the **"bricks and studs"** philosophy from `MODULAR_DESIGN_PHILOSOPHY.
 ### 1. repo (Repository Discovery)
 
 **Brick:** `internal/repo/`
-**Responsibility:** Discover and validate Git repositories in `$AI_WORKING_DIR`
+**Responsibility:** Discover and validate Git repositories in `$REPOS_DIR`
 
 **Public Contract (Studs):**
 ```go
@@ -45,7 +45,7 @@ package repo
 
 // Discovery scans for repositories
 type Discovery interface {
-    // ScanAll finds all repos under $AI_WORKING_DIR
+    // ScanAll finds all repos under $REPOS_DIR
     ScanAll() ([]Repo, error)
 
     // FindByName finds specific repo by name
@@ -71,7 +71,7 @@ type Repo struct {
 
 **Dependencies:**
 - Uses `git` module for branch detection
-- Uses `config` module for `AI_WORKING_DIR` location
+- Uses `config` module for `REPOS_DIR` location
 
 **Testing:**
 - Unit: Mock filesystem, test glob patterns
@@ -307,7 +307,7 @@ type Locker interface {
 ```
 
 **Implementation Notes:**
-- File path: `$AI_WORKING_DIR/.swarm-state.json`
+- File path: `$REPOS_DIR/.swarm-state.json`
 - Atomic writes: write to `.swarm-state.json.tmp` then rename
 - File locking with `gofrs/flock`
 - Reconciliation strategy (see ADR-004)
@@ -333,7 +333,7 @@ package config
 
 // Config represents merged configuration
 type Config struct {
-    AIWorkingDir         string
+    ReposDir         string
     DefaultBaseBranch    string
     WorktreePattern      string  // "patternA", "patternB", "patternC"
     CreateSessionOnCreate bool
@@ -357,14 +357,14 @@ type Loader interface {
 ```
 
 **Configuration Precedence:**
-1. Environment variables (e.g., `SWARM_AI_WORKING_DIR`)
+1. Environment variables (e.g., `SWARM_REPOS_DIR`)
 2. User config (`~/.config/swarm/config.yml`)
-3. Project config (`$AI_WORKING_DIR/.swarmrc`)
+3. Project config (`$REPOS_DIR/.swarmrc`)
 4. Built-in defaults
 
 **Example config.yml:**
 ```yaml
-ai_working_dir: ~/amplifier/ai_working
+repos_dir: ~/amplifier/ai_working
 default_base_branch: main
 worktree_pattern: patternA
 create_session_on_create: true

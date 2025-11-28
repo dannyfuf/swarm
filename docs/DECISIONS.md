@@ -156,7 +156,7 @@ Reconsider if:
 
 ### Decision
 
-Use **JSON file** (`$AI_WORKING_DIR/.swarm-state.json`) for state persistence.
+Use **JSON file** (`$REPOS_DIR/.swarm-state.json`) for state persistence.
 
 ### Rationale
 
