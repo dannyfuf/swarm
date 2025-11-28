@@ -8,21 +8,6 @@ import (
 
 type Client struct{}
 
-// Session represents a tmux session with details
-type Session struct {
-	Name     string
-	Path     string
-	Windows  []string
-	Attached bool
-}
-
-// Window represents a tmux window
-type WindowInfo struct {
-	Index  int
-	Name   string
-	Active bool
-}
-
 func NewClient() *Client {
 	return &Client{}
 }
@@ -175,4 +160,130 @@ func isInsideTmux() bool {
 	cmd := exec.Command("printenv", "TMUX")
 	output, err := cmd.Output()
 	return err == nil && len(output) > 0
+}
+
+// CreateWindow creates a new window with the naming convention
+func (c *Client) CreateWindow(sessionName string, wn WindowName, path string) (*Window, error) {
+	windowName := wn.Format()
+	cmd := exec.Command("tmux", "new-window", "-t", sessionName, "-n", windowName, "-c", path)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("creating window %q in session %q: %w\nOutput: %s", windowName, sessionName, err, output)
+	}
+
+	return &Window{
+		Name: wn,
+		Path: path,
+	}, nil
+}
+
+// DeleteWindow removes a window by name
+func (c *Client) DeleteWindow(sessionName, windowName string) error {
+	target := fmt.Sprintf("%s:%s", sessionName, windowName)
+	cmd := exec.Command("tmux", "kill-window", "-t", target)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("deleting window %q: %w\nOutput: %s", target, err, output)
+	}
+	return nil
+}
+
+// RenameWindow renames a window, preserving the repo:worktree: prefix
+func (c *Client) RenameWindow(sessionName, oldName, newName string) error {
+	// Parse old name to preserve prefix
+	parsed, err := ParseWindowName(oldName)
+	if err != nil {
+		return err
+	}
+
+	// Update only the name component
+	newWindowName := WindowName{
+		Repo:     parsed.Repo,
+		Worktree: parsed.Worktree,
+		Name:     newName,
+	}
+
+	target := fmt.Sprintf("%s:%s", sessionName, oldName)
+	cmd := exec.Command("tmux", "rename-window", "-t", target, newWindowName.Format())
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("renaming window %q to %q: %w\nOutput: %s", target, newWindowName.Format(), err, output)
+	}
+	return nil
+}
+
+// ListWindows lists windows, optionally filtered by prefix
+func (c *Client) ListWindows(sessionName string, prefixFilter string) ([]Window, error) {
+	cmd := exec.Command("tmux", "list-windows", "-t", sessionName,
+		"-F", "#{window_id}|#{window_name}|#{window_index}|#{window_active}|#{pane_current_path}")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		if strings.Contains(string(output), "no server running") {
+			return []Window{}, nil
+		}
+		if strings.Contains(string(output), "session not found") {
+			return nil, fmt.Errorf("session not found: %s", sessionName)
+		}
+		return nil, fmt.Errorf("listing windows in session %q: %w\nOutput: %s", sessionName, err, output)
+	}
+
+	var windows []Window
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+
+		parts := strings.Split(line, "|")
+		if len(parts) < 5 {
+			continue
+		}
+
+		windowName := parts[1]
+
+		// Apply prefix filter if specified
+		if prefixFilter != "" && !strings.HasPrefix(windowName, prefixFilter) {
+			continue
+		}
+
+		parsed, _ := ParseWindowName(windowName)
+		index := 0
+		fmt.Sscanf(parts[2], "%d", &index)
+
+		window := Window{
+			ID:     parts[0],
+			Index:  index,
+			Active: parts[3] == "1",
+			Path:   parts[4],
+		}
+		if parsed != nil {
+			window.Name = *parsed
+		}
+
+		windows = append(windows, window)
+	}
+
+	return windows, nil
+}
+
+// SelectWindow switches to a specific window
+func (c *Client) SelectWindow(sessionName, windowName string) error {
+	target := fmt.Sprintf("%s:%s", sessionName, windowName)
+	cmd := exec.Command("tmux", "select-window", "-t", target)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("selecting window %q: %w\nOutput: %s", target, err, output)
+	}
+	return nil
+}
+
+// SendToPane sends keys/command to a pane in a window
+func (c *Client) SendToPane(sessionName, windowName string, paneIndex int, command string) error {
+	target := fmt.Sprintf("%s:%s.%d", sessionName, windowName, paneIndex)
+	cmd := exec.Command("tmux", "send-keys", "-t", target, command, "Enter")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("sending to pane %q: %w\nOutput: %s", target, err, output)
+	}
+	return nil
 }

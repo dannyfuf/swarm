@@ -7,11 +7,11 @@ import (
 
 // Layout defines tmux window/pane structure
 type Layout struct {
-	Windows []Window
+	Windows []LayoutWindow
 }
 
-// Window represents a tmux window
-type Window struct {
+// LayoutWindow represents a tmux window configuration for layout
+type LayoutWindow struct {
 	Name    string
 	Command string // Initial command to run
 	Panes   []Pane
@@ -27,7 +27,7 @@ type Pane struct {
 // DefaultLayout returns standard 3-window layout
 func DefaultLayout() *Layout {
 	return &Layout{
-		Windows: []Window{
+		Windows: []LayoutWindow{
 			{
 				Name:    "editor",
 				Command: "nvim .",
