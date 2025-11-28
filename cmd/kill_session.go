@@ -37,7 +37,7 @@ func runKillSession(cmd *cobra.Command, args []string) error {
 
 	// Initialize dependencies
 	gitClient := git.NewClient()
-	stateStore := state.NewStore(cfg.AIWorkingDir)
+	stateStore := state.NewStore(cfg.ReposDir)
 	discovery := repo.NewDiscovery(cfg, gitClient)
 	wtManager := worktree.NewManager(cfg, gitClient, stateStore)
 	tmuxClient := tmux.NewClient()

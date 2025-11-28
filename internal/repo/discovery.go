@@ -23,9 +23,9 @@ func NewDiscovery(cfg *config.Config, gitClient *git.Client) *Discovery {
 }
 
 func (d *Discovery) ScanAll() ([]Repo, error) {
-	entries, err := os.ReadDir(d.config.AIWorkingDir)
+	entries, err := os.ReadDir(d.config.ReposDir)
 	if err != nil {
-		return nil, fmt.Errorf("reading ai_working_dir: %w", err)
+		return nil, fmt.Errorf("reading repos_dir: %w", err)
 	}
 
 	var repos []Repo
@@ -39,7 +39,7 @@ func (d *Discovery) ScanAll() ([]Repo, error) {
 			continue
 		}
 
-		repoPath := filepath.Join(d.config.AIWorkingDir, entry.Name())
+		repoPath := filepath.Join(d.config.ReposDir, entry.Name())
 
 		// Check if it's a git repo
 		gitDir := filepath.Join(repoPath, ".git")
@@ -64,7 +64,7 @@ func (d *Discovery) ScanAll() ([]Repo, error) {
 }
 
 func (d *Discovery) FindByName(name string) (*Repo, error) {
-	repoPath := filepath.Join(d.config.AIWorkingDir, name)
+	repoPath := filepath.Join(d.config.ReposDir, name)
 
 	// Check if directory exists
 	if _, err := os.Stat(repoPath); err != nil {

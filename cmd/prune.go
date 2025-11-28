@@ -44,7 +44,7 @@ func runPrune(cmd *cobra.Command, args []string) error {
 
 	// Initialize dependencies
 	gitClient := git.NewClient()
-	stateStore := state.NewStore(cfg.AIWorkingDir)
+	stateStore := state.NewStore(cfg.ReposDir)
 	discovery := repo.NewDiscovery(cfg, gitClient)
 	detector := worktree.NewOrphanDetector(gitClient, stateStore)
 

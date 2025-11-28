@@ -43,18 +43,8 @@ func (m *Manager) Create(r *repo.Repo, opts CreateOptions) (*Worktree, error) {
 	// Generate unique slug
 	slug := GenerateUniqueSlug(opts.Branch, existing)
 
-	// Determine worktree path based on pattern
-	var worktreePath string
-	switch m.config.WorktreePattern {
-	case "patternA":
-		worktreePath = filepath.Join(m.config.AIWorkingDir, fmt.Sprintf("%s__wt__%s", r.Name, slug))
-	case "patternB":
-		worktreePath = filepath.Join(r.Path, ".worktrees", slug)
-	case "patternC":
-		worktreePath = filepath.Join(m.config.AIWorkingDir, ".worktrees", r.Name, slug)
-	default:
-		worktreePath = filepath.Join(m.config.AIWorkingDir, fmt.Sprintf("%s__wt__%s", r.Name, slug))
-	}
+	// Determine worktree path - use pattern: repos_dir/repo__wt__slug
+	worktreePath := filepath.Join(m.config.ReposDir, fmt.Sprintf("%s__wt__%s", r.Name, slug))
 
 	// Create git worktree
 	gitOpts := git.AddOptions{
@@ -148,7 +138,7 @@ func (m *Manager) List(r *repo.Repo) ([]Worktree, error) {
 func (m *Manager) Remove(wt *Worktree, force bool) error {
 	// Remove from git
 	// Use the repo path (parent of worktree)
-	repoPath := filepath.Join(m.config.AIWorkingDir, wt.RepoName)
+	repoPath := filepath.Join(m.config.ReposDir, wt.RepoName)
 
 	if err := m.git.WorktreeRemove(repoPath, wt.Path); err != nil {
 		if !force {
