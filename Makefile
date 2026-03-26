@@ -120,7 +120,7 @@ doctor:
 			echo "  ✗ Directory does not exist"; \
 		fi \
 	else \
-		echo "  ✗ Not set (will default to ~/amplifier/ai_working)"; \
+		echo "  ✗ Not set (will default to ~/swarm/ai_working)"; \
 	fi
 	@echo ""
 	@echo "Build directory:"

@@ -42,7 +42,7 @@ export class ConfigService {
 
   private getDefaults(): Config {
     const home = process.env.HOME ?? ""
-    const aiWorkingDir = process.env.AI_WORKING_DIR ?? `${home}/amplifier/ai_working`
+    const aiWorkingDir = process.env.AI_WORKING_DIR ?? `${home}/swarm/ai_working`
 
     return {
       aiWorkingDir,

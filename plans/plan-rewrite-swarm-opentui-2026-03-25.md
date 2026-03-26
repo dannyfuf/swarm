@@ -679,7 +679,7 @@ export class ConfigService {
   private getDefaults(): Config {
     return {
       aiWorkingDir: process.env.AI_WORKING_DIR ??
-        `${process.env.HOME}/amplifier/ai_working`,
+        `${process.env.HOME}/swarm/ai_working`,
       defaultBaseBranch: "main",
       worktreePattern: "patternA",
       createSessionOnCreate: true,

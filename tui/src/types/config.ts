@@ -14,7 +14,7 @@ export type WorktreePattern = "patternA" | "patternB" | "patternC"
  * variables, and built-in defaults (in ascending priority order).
  */
 export interface Config {
-  /** Root directory containing all managed repositories (e.g. ~/amplifier/ai_working). */
+  /** Root directory containing all managed repositories (e.g. ~/swarm/ai_working). */
   aiWorkingDir: string
   /** Default branch to base new worktrees on (e.g. "main"). */
   defaultBaseBranch: string

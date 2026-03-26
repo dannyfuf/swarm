@@ -94,7 +94,7 @@ Configuration is loaded from three sources in ascending priority:
 
 ```yaml
 # Root directory containing managed repositories
-ai_working_dir: ~/amplifier/ai_working
+ai_working_dir: ~/swarm/ai_working
 
 # Default base branch for new worktrees
 default_base_branch: main
