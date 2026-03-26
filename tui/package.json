@@ -1,0 +1,28 @@
+{
+  "name": "swarm-tui",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "start": "bun run src/index.tsx",
+    "dev": "bun --watch run src/index.tsx",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "lint": "bunx biome check .",
+    "lint:fix": "bunx biome check --write .",
+    "build": "bun build src/index.tsx --outdir=dist --target=bun"
+  },
+  "dependencies": {
+    "@opentui/core": "latest",
+    "@opentui/react": "latest",
+    "react": ">=19.0.0",
+    "yaml": "^2.0.0",
+    "proper-lockfile": "^4.1.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "latest",
+    "@types/bun": "latest",
+    "@types/react": ">=19.0.0",
+    "@types/proper-lockfile": "latest",
+    "typescript": "latest"
+  }
+}
