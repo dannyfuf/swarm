@@ -13,6 +13,14 @@ export interface ShellResult {
   success: boolean
 }
 
+export type SyncCommandRunner = (command: string, args: string[], cwd?: string) => ShellResult
+
+export type AsyncCommandRunner = (
+  command: string,
+  args: string[],
+  cwd?: string,
+) => Promise<ShellResult>
+
 /**
  * Execute a command synchronously, blocking until completion.
  * Suitable for fast commands (git, tmux) that complete in milliseconds.

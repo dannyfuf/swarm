@@ -15,6 +15,10 @@ export interface WorktreeInfo {
   commit: string
   /** Whether the worktree is in detached HEAD state. */
   detached: boolean
+  /** Whether git considers this worktree prunable (stale directory, locked, etc.). */
+  prunable: boolean
+  /** Reason the worktree is prunable, if any. */
+  prunableReason: string | null
 }
 
 /** Aggregated result from `git status --porcelain`. */
