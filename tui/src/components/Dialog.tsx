@@ -5,17 +5,31 @@
  */
 
 import { useKeyboard } from "@opentui/react"
+import { useRef } from "react"
 
 interface DialogProps {
   title: string
   message: string
   onConfirm: () => void
   onCancel: () => void
+  confirmLabel?: string
+  cancelLabel?: string
 }
 
-export function Dialog({ title, message, onConfirm, onCancel }: DialogProps) {
+export function Dialog({
+  title,
+  message,
+  onConfirm,
+  onCancel,
+  confirmLabel = "Confirm",
+  cancelLabel = "Cancel",
+}: DialogProps) {
+  const confirmedRef = useRef(false)
+
   useKeyboard((key) => {
+    if (confirmedRef.current) return
     if (key.name === "enter" || key.name === "return") {
+      confirmedRef.current = true
       onConfirm()
     } else if (key.name === "escape") {
       onCancel()
@@ -23,7 +37,13 @@ export function Dialog({ title, message, onConfirm, onCancel }: DialogProps) {
   })
 
   return (
-    <box justifyContent="center" alignItems="center" width="100%" height="100%">
+    <box
+      justifyContent="center"
+      alignItems="center"
+      width="100%"
+      height="100%"
+      backgroundColor="#000000"
+    >
       <box
         border
         borderStyle="rounded"
@@ -42,8 +62,8 @@ export function Dialog({ title, message, onConfirm, onCancel }: DialogProps) {
           <text>{message}</text>
         </box>
         <box marginTop={1} flexDirection="row" justifyContent="flex-end" gap={2}>
-          <text fg="#888888">[Esc] Cancel</text>
-          <text fg="#00FF00">[Enter] Confirm</text>
+          <text fg="#888888">[Esc] {cancelLabel}</text>
+          <text fg="#00FF00">[Enter] {confirmLabel}</text>
         </box>
       </box>
     </box>

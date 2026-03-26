@@ -8,6 +8,8 @@ import { useKeyboard } from "@opentui/react"
 
 interface HelpDialogProps {
   onClose: () => void
+  title?: string
+  message?: string
 }
 
 const SHORTCUTS = [
@@ -15,17 +17,29 @@ const SHORTCUTS = [
   { key: "Tab / Shift+Tab", action: "Switch panel" },
   { key: "Enter", action: "Select / Confirm" },
   { key: "n", action: "New worktree" },
+  { key: "N", action: "New worktree + start" },
   { key: "o", action: "Open in tmux" },
   { key: "d", action: "Delete worktree" },
+  { key: "s", action: "Start container" },
+  { key: "x", action: "Stop container" },
+  { key: "i", action: "Build repo image" },
+  { key: "g", action: "Create config scaffold" },
+  { key: "y", action: "Copy container config path" },
+  { key: "v", action: "Inspect container" },
   { key: "r", action: "Refresh" },
   { key: "p", action: "Prune orphans" },
+  { key: "f", action: "Fetch repo" },
   { key: "c", action: "Copy path" },
   { key: "b", action: "Copy branch name" },
   { key: "?", action: "Show help" },
   { key: "q / Ctrl+C", action: "Quit" },
 ]
 
-export function HelpDialog({ onClose }: HelpDialogProps) {
+export function HelpDialog({
+  onClose,
+  title = "Keyboard Shortcuts",
+  message = "",
+}: HelpDialogProps) {
   useKeyboard((key) => {
     if (key.name === "escape" || key.name === "enter" || key.name === "return") {
       onClose()
@@ -33,7 +47,13 @@ export function HelpDialog({ onClose }: HelpDialogProps) {
   })
 
   return (
-    <box justifyContent="center" alignItems="center" width="100%" height="100%">
+    <box
+      justifyContent="center"
+      alignItems="center"
+      width="100%"
+      height="100%"
+      backgroundColor="#000000"
+    >
       <box
         border
         borderStyle="rounded"
@@ -45,9 +65,14 @@ export function HelpDialog({ onClose }: HelpDialogProps) {
       >
         <text>
           <span fg="#6366F1">
-            <strong>Keyboard Shortcuts</strong>
+            <strong>{title}</strong>
           </span>
         </text>
+        {message ? (
+          <box marginTop={1}>
+            <text>{message}</text>
+          </box>
+        ) : null}
         <box marginTop={1} flexDirection="column">
           {SHORTCUTS.map((shortcut) => (
             <box key={shortcut.key} flexDirection="row">

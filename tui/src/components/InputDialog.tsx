@@ -6,7 +6,7 @@
  */
 
 import { useKeyboard } from "@opentui/react"
-import { useCallback, useState } from "react"
+import { useCallback, useRef, useState } from "react"
 
 interface InputDialogProps {
   title: string
@@ -17,15 +17,19 @@ interface InputDialogProps {
 
 export function InputDialog({ title, placeholder, onSubmit, onCancel }: InputDialogProps) {
   const [value, setValue] = useState("")
+  const submittedRef = useRef(false)
 
   const handleSubmit = useCallback(() => {
+    if (submittedRef.current) return
     const trimmed = value.trim()
     if (trimmed) {
+      submittedRef.current = true
       onSubmit(trimmed)
     }
   }, [value, onSubmit])
 
   useKeyboard((key) => {
+    if (submittedRef.current) return
     if (key.name === "enter" || key.name === "return") {
       handleSubmit()
     } else if (key.name === "escape") {
@@ -34,7 +38,13 @@ export function InputDialog({ title, placeholder, onSubmit, onCancel }: InputDia
   })
 
   return (
-    <box justifyContent="center" alignItems="center" width="100%" height="100%">
+    <box
+      justifyContent="center"
+      alignItems="center"
+      width="100%"
+      height="100%"
+      backgroundColor="#000000"
+    >
       <box
         border
         borderStyle="rounded"
