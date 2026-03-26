@@ -1,7 +1,11 @@
 import { describe, expect, test } from "bun:test"
 import type { AppAction } from "../../state/actions.js"
 import { type AppState, appReducer, initialState } from "../../state/appReducer.js"
+import type { ActiveOperation } from "../../types/activity.js"
+import type { ContainerRuntimeStatus } from "../../types/container.js"
+import type { BrowsableRepo, RemoteRepo } from "../../types/github.js"
 import type { Repo } from "../../types/repo.js"
+import type { Status } from "../../types/status.js"
 import type { Worktree } from "../../types/worktree.js"
 
 const mockRepo: Repo = {
@@ -19,7 +23,40 @@ const mockWorktree: Worktree = {
   createdAt: new Date("2026-01-01"),
   lastOpenedAt: new Date("2026-01-02"),
   tmuxSession: "test-repo--wt--feature_auth",
+  container: {
+    primaryHostPort: 4301,
+    containerName: "test-container",
+    networkName: "test-network",
+    dataVolumeNames: ["test-volume"],
+    baseImageTag: "swarm/test:base",
+    dependencyImageTag: "swarm/test:deps-abc",
+    dependencyFingerprint: "abc",
+  },
   isOrphaned: false,
+}
+
+const firstActivity: ActiveOperation = {
+  id: "activity-1",
+  kind: "create-worktree",
+  label: "Creating worktree feature/auth...",
+  priority: "foreground",
+  scope: {
+    repoPath: mockRepo.path,
+    branch: mockWorktree.branch,
+  },
+  startedAt: new Date("2026-01-03T10:00:00Z"),
+}
+
+const secondActivity: ActiveOperation = {
+  id: "activity-2",
+  kind: "start-container",
+  label: "Starting container for feature/auth...",
+  priority: "foreground",
+  scope: {
+    repoPath: mockRepo.path,
+    worktreePath: mockWorktree.path,
+  },
+  startedAt: new Date("2026-01-03T10:01:00Z"),
 }
 
 describe("appReducer", () => {
@@ -32,6 +69,7 @@ describe("appReducer", () => {
     expect(initialState.inputMode).toBe("none")
     expect(initialState.showDialog).toBe(false)
     expect(initialState.loading).toBe(true)
+    expect(initialState.activeOperations).toEqual([])
   })
 
   test("SET_REPOS updates repos and clears loading", () => {
@@ -57,7 +95,7 @@ describe("appReducer", () => {
   })
 
   test("SET_STATUSES updates statuses map", () => {
-    const statuses = new Map([
+    const statuses = new Map<string, Status>([
       [
         "/path",
         {
@@ -71,6 +109,37 @@ describe("appReducer", () => {
     ])
     const state = appReducer(initialState, { type: "SET_STATUSES", statuses })
     expect(state.statuses).toBe(statuses)
+  })
+
+  test("SET_CONTAINER_STATUSES updates container statuses map", () => {
+    const statuses = new Map<string, ContainerRuntimeStatus>([
+      [
+        "/path",
+        {
+          state: "running",
+          health: "healthy",
+          primaryUrl: "http://127.0.0.1:4301",
+          message: "running",
+          warning: null,
+        },
+      ],
+    ])
+    const state = appReducer(initialState, { type: "SET_CONTAINER_STATUSES", statuses })
+    expect(state.containerStatuses).toBe(statuses)
+  })
+
+  test("APPEND_STATUS_DETAIL appends warning text to status message", () => {
+    const stateWithStatus: AppState = {
+      ...initialState,
+      statusMessage: "Started container",
+    }
+
+    const state = appReducer(stateWithStatus, {
+      type: "APPEND_STATUS_DETAIL",
+      message: "Warning: Dependency image is stale.",
+    })
+
+    expect(state.statusMessage).toBe("Started container Warning: Dependency image is stale.")
   })
 
   test("SELECT_REPO sets selected repo", () => {
@@ -234,8 +303,145 @@ describe("appReducer", () => {
     expect(state.loading).toBe(false)
   })
 
+  test("BEGIN_ACTIVITY adds the first tracked activity", () => {
+    const state = appReducer(initialState, { type: "BEGIN_ACTIVITY", activity: firstActivity })
+
+    expect(state.activeOperations).toEqual([firstActivity])
+  })
+
+  test("BEGIN_ACTIVITY keeps multiple concurrent activities", () => {
+    const stateWithFirst = appReducer(initialState, {
+      type: "BEGIN_ACTIVITY",
+      activity: firstActivity,
+    })
+
+    const state = appReducer(stateWithFirst, {
+      type: "BEGIN_ACTIVITY",
+      activity: secondActivity,
+    })
+
+    expect(state.activeOperations).toEqual([firstActivity, secondActivity])
+  })
+
+  test("END_ACTIVITY removes only the matching activity", () => {
+    const stateWithActivities: AppState = {
+      ...initialState,
+      activeOperations: [firstActivity, secondActivity],
+    }
+
+    const state = appReducer(stateWithActivities, { type: "END_ACTIVITY", id: firstActivity.id })
+
+    expect(state.activeOperations).toEqual([secondActivity])
+  })
+
+  test("SET_ERROR does not clear other active activities", () => {
+    const stateWithActivity: AppState = {
+      ...initialState,
+      activeOperations: [firstActivity],
+    }
+
+    const state = appReducer(stateWithActivity, {
+      type: "SET_ERROR",
+      message: "refresh failed",
+    })
+
+    expect(state.errorMessage).toBe("refresh failed")
+    expect(state.activeOperations).toEqual([firstActivity])
+  })
+
   test("returns same state for unknown action", () => {
     const state = appReducer(initialState, { type: "UNKNOWN" } as unknown as AppAction)
     expect(state).toBe(initialState)
+  })
+
+  test("SHOW_REPO_BROWSER sets showRepoBrowser to true", () => {
+    const state = appReducer(initialState, { type: "SHOW_REPO_BROWSER" })
+    expect(state.showRepoBrowser).toBe(true)
+  })
+
+  test("HIDE_REPO_BROWSER resets all repo browser state", () => {
+    const mockRemoteRepo: RemoteRepo = {
+      fullName: "owner/repo",
+      name: "repo",
+      cloneUrl: "https://github.com/owner/repo.git",
+      description: "Test",
+      isPrivate: false,
+      defaultBranch: "main",
+      updatedAt: "2026-01-01T00:00:00Z",
+    }
+    const mockBrowsableRepo: BrowsableRepo = {
+      remote: mockRemoteRepo,
+      availability: "available",
+    }
+    const stateWithBrowser: AppState = {
+      ...initialState,
+      showRepoBrowser: true,
+      remoteRepos: [mockBrowsableRepo],
+      remoteReposLoading: false,
+    }
+    const state = appReducer(stateWithBrowser, { type: "HIDE_REPO_BROWSER" })
+    expect(state.showRepoBrowser).toBe(false)
+    expect(state.remoteRepos).toEqual([])
+    expect(state.remoteReposLoading).toBe(false)
+  })
+
+  test("SET_REMOTE_REPOS sets repos and clears loading", () => {
+    const mockRemoteRepo: RemoteRepo = {
+      fullName: "owner/repo",
+      name: "repo",
+      cloneUrl: "https://github.com/owner/repo.git",
+      description: "Test",
+      isPrivate: false,
+      defaultBranch: "main",
+      updatedAt: "2026-01-01T00:00:00Z",
+    }
+    const mockBrowsableRepo: BrowsableRepo = {
+      remote: mockRemoteRepo,
+      availability: "available",
+    }
+    const stateWithLoading: AppState = {
+      ...initialState,
+      remoteReposLoading: true,
+    }
+    const state = appReducer(stateWithLoading, {
+      type: "SET_REMOTE_REPOS",
+      repos: [mockBrowsableRepo],
+    })
+    expect(state.remoteRepos).toEqual([mockBrowsableRepo])
+    expect(state.remoteReposLoading).toBe(false)
+  })
+
+  test("SET_REMOTE_REPOS_LOADING sets loading flag", () => {
+    const state = appReducer(initialState, { type: "SET_REMOTE_REPOS_LOADING" })
+    expect(state.remoteReposLoading).toBe(true)
+  })
+
+  test("SET_REMOTE_REPO_STATUS updates a single repo's availability", () => {
+    const mockRemoteRepo: RemoteRepo = {
+      fullName: "owner/repo",
+      name: "repo",
+      cloneUrl: "https://github.com/owner/repo.git",
+      description: "Test",
+      isPrivate: false,
+      defaultBranch: "main",
+      updatedAt: "2026-01-01T00:00:00Z",
+    }
+    const stateWithRepos: AppState = {
+      ...initialState,
+      remoteRepos: [
+        { remote: mockRemoteRepo, availability: "available" },
+        {
+          remote: { ...mockRemoteRepo, fullName: "owner/other", name: "other" },
+          availability: "installed",
+        },
+      ],
+    }
+    const state = appReducer(stateWithRepos, {
+      type: "SET_REMOTE_REPO_STATUS",
+      fullName: "owner/repo",
+      availability: "cloning",
+    })
+    expect(state.remoteRepos[0].availability).toBe("cloning")
+    expect(state.remoteRepos[1].availability).toBe("installed")
   })
 })

@@ -5,6 +5,9 @@
  * including panel focus, selection, dialogs, input mode, and messages.
  */
 
+import type { ActiveOperation } from "../types/activity.js"
+import type { ContainerRuntimeStatus } from "../types/container.js"
+import type { BrowsableRepo, RepoAvailability } from "../types/github.js"
 import type { Repo } from "../types/repo.js"
 import type { CheckResult } from "../types/safety.js"
 import type { Status } from "../types/status.js"
@@ -14,7 +17,7 @@ import type { Worktree } from "../types/worktree.js"
 export type Panel = "repos" | "worktrees" | "detail"
 
 /** Whether the user is in text input mode. */
-export type InputMode = "none" | "create"
+export type InputMode = "none" | "create" | "createAndStart"
 
 /** Which dialog is currently displayed. */
 export type DialogType = "none" | "delete" | "orphanCleanup" | "pruneOrphans" | "help"
@@ -24,6 +27,7 @@ export type AppAction =
   | { type: "SET_REPOS"; repos: Repo[] }
   | { type: "SET_WORKTREES"; worktrees: Worktree[] }
   | { type: "SET_STATUSES"; statuses: Map<string, Status> }
+  | { type: "SET_CONTAINER_STATUSES"; statuses: Map<string, ContainerRuntimeStatus> }
   | { type: "SELECT_REPO"; repo: Repo }
   | { type: "SELECT_WORKTREE"; worktree: Worktree }
   | { type: "SET_FOCUSED_PANEL"; panel: Panel }
@@ -34,6 +38,14 @@ export type AppAction =
   | { type: "CLOSE_DIALOG" }
   | { type: "SET_ERROR"; message: string }
   | { type: "SET_STATUS"; message: string }
+  | { type: "APPEND_STATUS_DETAIL"; message: string }
   | { type: "CLEAR_MESSAGES" }
   | { type: "SET_SAFETY_RESULT"; result: CheckResult; worktree: Worktree }
   | { type: "SET_LOADING"; loading: boolean }
+  | { type: "BEGIN_ACTIVITY"; activity: ActiveOperation }
+  | { type: "END_ACTIVITY"; id: string }
+  | { type: "SHOW_REPO_BROWSER" }
+  | { type: "HIDE_REPO_BROWSER" }
+  | { type: "SET_REMOTE_REPOS"; repos: BrowsableRepo[] }
+  | { type: "SET_REMOTE_REPOS_LOADING" }
+  | { type: "SET_REMOTE_REPO_STATUS"; fullName: string; availability: RepoAvailability }
