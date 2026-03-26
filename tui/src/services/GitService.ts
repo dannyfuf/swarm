@@ -11,7 +11,7 @@
 
 import type { AddOptions, BranchInfo, StatusResult, WorktreeInfo } from "../types/git.js"
 import { parseCommits, parseStatus, parseWorktreeList } from "../utils/git-parser.js"
-import { execSync } from "../utils/shell.js"
+import { exec, execSync } from "../utils/shell.js"
 
 export class GitService {
   /** List all worktrees for a repository. */
@@ -220,6 +220,165 @@ export class GitService {
   deleteBranch(repoPath: string, branch: string, force = false): void {
     const flag = force ? "-D" : "-d"
     const result = execSync("git", ["-C", repoPath, "branch", flag, branch])
+    if (!result.success) {
+      throw new Error(`git branch ${flag} ${branch} failed: ${result.stderr}`)
+    }
+  }
+
+  // --- Async methods for non-blocking operations ---
+
+  /** List all worktrees for a repository (async). */
+  async worktreeListAsync(repoPath: string): Promise<WorktreeInfo[]> {
+    const result = await exec("git", ["-C", repoPath, "worktree", "list", "--porcelain"])
+    if (!result.success) {
+      throw new Error(`git worktree list failed: ${result.stderr}`)
+    }
+    return parseWorktreeList(result.stdout)
+  }
+
+  /** Add a new worktree (async). */
+  async worktreeAddAsync(repoPath: string, opts: AddOptions): Promise<void> {
+    const args = ["-C", repoPath, "worktree", "add"]
+
+    if (opts.newBranch) {
+      args.push("-b", opts.branch, opts.path)
+      if (opts.baseBranch) {
+        args.push(opts.baseBranch)
+      }
+    } else {
+      args.push(opts.path, opts.branch)
+    }
+
+    const result = await exec("git", args)
+    if (!result.success) {
+      throw new Error(`git worktree add failed: ${result.stderr}`)
+    }
+  }
+
+  /** Remove a worktree by path (async). */
+  async worktreeRemoveAsync(repoPath: string, worktreePath: string): Promise<void> {
+    const result = await exec("git", ["-C", repoPath, "worktree", "remove", worktreePath])
+    if (!result.success) {
+      throw new Error(`git worktree remove failed: ${result.stderr}`)
+    }
+  }
+
+  /** Force-remove a worktree by path (async). */
+  async worktreeRemoveForceAsync(repoPath: string, worktreePath: string): Promise<void> {
+    const result = await exec("git", [
+      "-C",
+      repoPath,
+      "worktree",
+      "remove",
+      "--force",
+      worktreePath,
+    ])
+    if (!result.success) {
+      throw new Error(`git worktree remove --force failed: ${result.stderr}`)
+    }
+  }
+
+  /** Prune stale worktree entries (async). */
+  async worktreePruneAsync(repoPath: string): Promise<void> {
+    const result = await exec("git", ["-C", repoPath, "worktree", "prune"])
+    if (!result.success) {
+      throw new Error(`git worktree prune failed: ${result.stderr}`)
+    }
+  }
+
+  /** Check if a branch exists in the repository (async). */
+  async branchExistsAsync(repoPath: string, branch: string): Promise<boolean> {
+    const result = await exec("git", [
+      "-C",
+      repoPath,
+      "rev-parse",
+      "--verify",
+      `refs/heads/${branch}`,
+    ])
+    return result.success
+  }
+
+  /** Get comprehensive information about a branch (async). */
+  async getBranchInfoAsync(repoPath: string, branch: string): Promise<BranchInfo> {
+    const info: BranchInfo = {
+      name: branch,
+      exists: false,
+      hasCommits: false,
+      commitCount: 0,
+      isMerged: false,
+      upstream: "",
+      lastCommit: null,
+    }
+
+    if (!(await this.branchExistsAsync(repoPath, branch))) {
+      return info
+    }
+    info.exists = true
+
+    const countResult = await exec("git", [
+      "-C",
+      repoPath,
+      "rev-list",
+      "--count",
+      `refs/heads/${branch}`,
+    ])
+    if (countResult.success) {
+      info.commitCount = Number.parseInt(countResult.stdout, 10) || 0
+      info.hasCommits = info.commitCount > 0
+    }
+
+    const upstreamResult = await exec("git", [
+      "-C",
+      repoPath,
+      "rev-parse",
+      "--abbrev-ref",
+      `${branch}@{upstream}`,
+    ])
+    if (upstreamResult.success) {
+      info.upstream = upstreamResult.stdout.trim()
+    }
+
+    const logResult = await exec("git", [
+      "-C",
+      repoPath,
+      "log",
+      "-1",
+      "--pretty=format:%H|%s|%an|%ad",
+      "--date=iso",
+      `refs/heads/${branch}`,
+    ])
+    if (logResult.success && logResult.stdout) {
+      const commits = parseCommits(logResult.stdout)
+      if (commits.length > 0) {
+        info.lastCommit = commits[0]
+      }
+    }
+
+    info.isMerged = await this.isMergedAsync(repoPath, branch)
+
+    return info
+  }
+
+  /** Check if a branch is merged into the default branch (async). */
+  async isMergedAsync(repoPath: string, branch: string): Promise<boolean> {
+    const defaultBr = this.defaultBranch(repoPath)
+    const result = await exec("git", [
+      "-C",
+      repoPath,
+      "branch",
+      "--contains",
+      `refs/heads/${branch}`,
+    ])
+    if (!result.success) return false
+
+    const branches = result.stdout.split("\n").map((line) => line.replace(/^\*?\s+/, "").trim())
+    return branches.includes(defaultBr)
+  }
+
+  /** Delete a branch (async). */
+  async deleteBranchAsync(repoPath: string, branch: string, force = false): Promise<void> {
+    const flag = force ? "-D" : "-d"
+    const result = await exec("git", ["-C", repoPath, "branch", flag, branch])
     if (!result.success) {
       throw new Error(`git branch ${flag} ${branch} failed: ${result.stderr}`)
     }
