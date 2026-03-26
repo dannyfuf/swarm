@@ -11,6 +11,7 @@
 import { readFile, rename, unlink, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import lockfile from "proper-lockfile"
+import type { WorktreeContainerMetadata } from "../types/container.js"
 import type { RepoState, State, WorktreeState } from "../types/state.js"
 
 const STATE_FILENAME = ".swarm-state.json"
@@ -116,6 +117,29 @@ export class StateService {
     await this.save(state)
   }
 
+  /** Update persisted container metadata for a worktree. */
+  async updateWorktreeContainer(
+    repoName: string,
+    slug: string,
+    container: WorktreeContainerMetadata | undefined,
+  ): Promise<void> {
+    const state = await this.load()
+    const repoState = state.repos[repoName]
+    const worktreeState = repoState?.worktrees[slug]
+
+    if (!repoState || !worktreeState) {
+      throw new Error(`Cannot update container metadata for unknown worktree: ${repoName}/${slug}`)
+    }
+
+    if (container) {
+      worktreeState.container = container
+    } else {
+      delete worktreeState.container
+    }
+
+    await this.save(state)
+  }
+
   /** Get worktree states for a specific repo. */
   async getRepoWorktrees(repoName: string): Promise<Record<string, WorktreeState>> {
     const state = await this.load()
@@ -141,31 +165,95 @@ export class StateService {
   }
 
   private deserialize(content: string): State {
-    const raw = JSON.parse(content)
+    const raw = JSON.parse(content) as Partial<State>
 
-    // Reconstitute Date objects from JSON strings
-    if (raw.updatedAt) {
-      raw.updatedAt = new Date(raw.updatedAt)
+    const repos = isRecord(raw.repos) ? raw.repos : {}
+
+    const state: State = {
+      version: typeof raw.version === "number" ? raw.version : STATE_VERSION,
+      updatedAt: raw.updatedAt ? new Date(String(raw.updatedAt)) : new Date(),
+      repos: {},
     }
 
-    for (const repoState of Object.values(raw.repos ?? {}) as RepoState[]) {
-      if (repoState.lastScanned) {
-        repoState.lastScanned = new Date(repoState.lastScanned as unknown as string)
+    for (const [repoName, repoValue] of Object.entries(repos)) {
+      if (!isRecord(repoValue)) continue
+
+      const worktrees = isRecord(repoValue.worktrees) ? repoValue.worktrees : {}
+      const repoState: RepoState = {
+        path: typeof repoValue.path === "string" ? repoValue.path : "",
+        defaultBranch:
+          typeof repoValue.defaultBranch === "string" ? repoValue.defaultBranch : "main",
+        lastScanned: repoValue.lastScanned ? new Date(String(repoValue.lastScanned)) : new Date(),
+        worktrees: {},
       }
-      for (const wt of Object.values(repoState.worktrees ?? {}) as WorktreeState[]) {
-        if (wt.createdAt) {
-          wt.createdAt = new Date(wt.createdAt as unknown as string)
+
+      for (const [slug, worktreeValue] of Object.entries(worktrees)) {
+        if (!isRecord(worktreeValue)) continue
+
+        const worktreeState: WorktreeState = {
+          slug: typeof worktreeValue.slug === "string" ? worktreeValue.slug : slug,
+          branch: typeof worktreeValue.branch === "string" ? worktreeValue.branch : "",
+          path: typeof worktreeValue.path === "string" ? worktreeValue.path : "",
+          createdAt: worktreeValue.createdAt
+            ? new Date(String(worktreeValue.createdAt))
+            : new Date(),
+          lastOpenedAt: worktreeValue.lastOpenedAt
+            ? new Date(String(worktreeValue.lastOpenedAt))
+            : new Date(),
+          tmuxSession:
+            typeof worktreeValue.tmuxSession === "string" ? worktreeValue.tmuxSession : "",
+          container: parseContainerMetadata(worktreeValue.container),
         }
-        if (wt.lastOpenedAt) {
-          wt.lastOpenedAt = new Date(wt.lastOpenedAt as unknown as string)
-        }
+
+        repoState.worktrees[slug] = worktreeState
       }
+
+      state.repos[repoName] = repoState
     }
 
-    return raw as State
+    return state
   }
 }
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error && "code" in error
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null
+}
+
+function parseContainerMetadata(value: unknown): WorktreeContainerMetadata | undefined {
+  if (!isRecord(value)) return undefined
+
+  const primaryHostPort = value.primaryHostPort
+  const containerName = value.containerName
+  const networkName = value.networkName
+  const dataVolumeNames = value.dataVolumeNames
+  const baseImageTag = value.baseImageTag
+  const dependencyImageTag = value.dependencyImageTag
+  const dependencyFingerprint = value.dependencyFingerprint
+
+  if (
+    typeof primaryHostPort !== "number" ||
+    typeof containerName !== "string" ||
+    typeof networkName !== "string" ||
+    !Array.isArray(dataVolumeNames) ||
+    dataVolumeNames.some((entry) => typeof entry !== "string") ||
+    typeof baseImageTag !== "string" ||
+    typeof dependencyImageTag !== "string" ||
+    typeof dependencyFingerprint !== "string"
+  ) {
+    return undefined
+  }
+
+  return {
+    primaryHostPort,
+    containerName,
+    networkName,
+    dataVolumeNames,
+    baseImageTag,
+    dependencyImageTag,
+    dependencyFingerprint,
+  }
 }
