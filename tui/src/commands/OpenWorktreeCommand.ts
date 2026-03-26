@@ -1,8 +1,8 @@
 /**
  * Command to open a worktree in a tmux session.
  *
- * Creates a tmux session if it doesn't exist, applies the default layout,
- * then attaches/switches to it. Updates the lastOpenedAt timestamp.
+ * Creates a tmux session if it doesn't exist, then attaches/switches to it.
+ * Updates the lastOpenedAt timestamp.
  */
 
 import type { TmuxService } from "../services/TmuxService.js"
@@ -24,10 +24,7 @@ export class OpenWorktreeCommand implements Command {
       const sessionName = this.worktree.tmuxSession
 
       if (!this.tmuxService.hasSession(sessionName)) {
-        // Create new session and apply default layout
         this.tmuxService.createSession(sessionName, this.worktree.path)
-        const layout = this.tmuxService.defaultLayout()
-        this.tmuxService.applyLayout(sessionName, layout)
       }
 
       // Attach or switch to the session

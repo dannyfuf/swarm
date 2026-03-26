@@ -5,6 +5,7 @@
  * tmux session and deletes the branch if it's been merged.
  */
 
+import type { ContainerRuntimeService } from "../services/ContainerRuntimeService.js"
 import type { GitService } from "../services/GitService.js"
 import type { TmuxService } from "../services/TmuxService.js"
 import type { WorktreeService } from "../services/WorktreeService.js"
@@ -15,6 +16,7 @@ import type { Command, CommandResult } from "./Command.js"
 export class DeleteWorktreeCommand implements Command {
   constructor(
     private readonly worktreeService: WorktreeService,
+    private readonly containerRuntimeService: ContainerRuntimeService,
     private readonly gitService: GitService,
     private readonly tmuxService: TmuxService,
     private readonly repo: Repo,
@@ -24,10 +26,14 @@ export class DeleteWorktreeCommand implements Command {
 
   async execute(): Promise<CommandResult> {
     try {
+      if (this.worktree.container) {
+        await this.containerRuntimeService.removeEnvironment(this.worktree)
+      }
+
       // Kill the tmux session if it exists
-      if (this.tmuxService.hasSession(this.worktree.tmuxSession)) {
+      if (await this.tmuxService.hasSessionAsync(this.worktree.tmuxSession)) {
         try {
-          this.tmuxService.killSession(this.worktree.tmuxSession)
+          await this.tmuxService.killSessionAsync(this.worktree.tmuxSession)
         } catch {
           // Ignore tmux kill errors
         }
@@ -38,8 +44,8 @@ export class DeleteWorktreeCommand implements Command {
 
       // Try to delete the branch if it's merged
       try {
-        if (this.gitService.isMerged(this.repo.path, this.worktree.branch)) {
-          this.gitService.deleteBranch(this.repo.path, this.worktree.branch)
+        if (await this.gitService.isMergedAsync(this.repo.path, this.worktree.branch)) {
+          await this.gitService.deleteBranchAsync(this.repo.path, this.worktree.branch)
         }
       } catch {
         // Branch deletion is best-effort

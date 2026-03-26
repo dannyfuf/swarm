@@ -21,7 +21,7 @@ export class CreateWorktreeCommand implements Command {
 
   async execute(): Promise<CommandResult> {
     try {
-      const branchInfo = this.gitService.getBranchInfo(this.repo.path, this.branchName)
+      const branchInfo = await this.gitService.getBranchInfoAsync(this.repo.path, this.branchName)
 
       const opts: CreateOptions = {
         branch: this.branchName,
