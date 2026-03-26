@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import { testRender } from "@opentui/react/test-utils"
 import { WorktreeList } from "../../components/WorktreeList.js"
+import type { ContainerRuntimeStatus } from "../../types/container.js"
 import type { Status } from "../../types/status.js"
 import type { Worktree } from "../../types/worktree.js"
 
@@ -44,6 +45,7 @@ describe("WorktreeList", () => {
         <WorktreeList
           worktrees={mockWorktrees}
           statuses={new Map()}
+          containerStatuses={new Map()}
           selectedIndex={0}
           focused={true}
           onSelect={noop}
@@ -65,6 +67,7 @@ describe("WorktreeList", () => {
         <WorktreeList
           worktrees={mockWorktrees}
           statuses={new Map()}
+          containerStatuses={new Map()}
           selectedIndex={0}
           focused={true}
           onSelect={noop}
@@ -99,6 +102,7 @@ describe("WorktreeList", () => {
         <WorktreeList
           worktrees={mockWorktrees}
           statuses={statuses}
+          containerStatuses={new Map()}
           selectedIndex={0}
           focused={true}
           onSelect={noop}
@@ -122,6 +126,7 @@ describe("WorktreeList", () => {
         <WorktreeList
           worktrees={[]}
           statuses={new Map()}
+          containerStatuses={new Map()}
           selectedIndex={0}
           focused={true}
           onSelect={noop}
@@ -135,5 +140,40 @@ describe("WorktreeList", () => {
     const frame = testSetup.captureCharFrame()
 
     expect(frame).toContain("No worktrees")
+  })
+
+  test("shows container runtime badge", async () => {
+    const containerStatuses = new Map<string, ContainerRuntimeStatus>([
+      [
+        "/repos/test__wt__feature_auth",
+        {
+          state: "running",
+          health: "healthy",
+          primaryUrl: "http://127.0.0.1:4301",
+          message: "running",
+          warning: null,
+        },
+      ],
+    ])
+
+    testSetup = await testRender(
+      <box width={50} height={20} flexDirection="column">
+        <WorktreeList
+          worktrees={mockWorktrees}
+          statuses={new Map()}
+          containerStatuses={containerStatuses}
+          selectedIndex={0}
+          focused={true}
+          onSelect={noop}
+          onChange={noop}
+        />
+      </box>,
+      { width: 50, height: 20 },
+    )
+
+    await testSetup.renderOnce()
+    const frame = testSetup.captureCharFrame()
+
+    expect(frame).toContain("[UP]")
   })
 })

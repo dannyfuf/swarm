@@ -6,6 +6,7 @@
 
 import type { SelectOption } from "@opentui/core"
 import { useMemo } from "react"
+import type { ContainerRuntimeStatus } from "../types/container.js"
 import type { Status } from "../types/status.js"
 import { getBadges } from "../types/status.js"
 import type { Worktree } from "../types/worktree.js"
@@ -13,13 +14,18 @@ import type { Worktree } from "../types/worktree.js"
 interface WorktreeListProps {
   worktrees: Worktree[]
   statuses: Map<string, Status>
+  containerStatuses: Map<string, ContainerRuntimeStatus>
   selectedIndex: number
   focused: boolean
   onSelect: (index: number, option: SelectOption | null) => void
   onChange: (index: number, option: SelectOption | null) => void
 }
 
-function formatWorktreeName(wt: Worktree, status: Status | undefined): string {
+function formatWorktreeName(
+  wt: Worktree,
+  status: Status | undefined,
+  containerStatus: ContainerRuntimeStatus | undefined,
+): string {
   let name = wt.branch || wt.slug
 
   if (wt.isOrphaned) {
@@ -34,12 +40,27 @@ function formatWorktreeName(wt: Worktree, status: Status | undefined): string {
     }
   }
 
+  if (containerStatus) {
+    const containerBadge =
+      containerStatus.state === "running"
+        ? "[UP]"
+        : containerStatus.state === "stopped"
+          ? "[DOWN]"
+          : containerStatus.state === "failed"
+            ? "[FAIL]"
+            : containerStatus.state === "not-created"
+              ? "[NOENV]"
+              : "[ENV?]"
+    name = `${name} ${containerBadge}`
+  }
+
   return name
 }
 
 export function WorktreeList({
   worktrees,
   statuses,
+  containerStatuses,
   selectedIndex,
   focused,
   onSelect,
@@ -48,11 +69,11 @@ export function WorktreeList({
   const options = useMemo(
     () =>
       worktrees.map((wt) => ({
-        name: formatWorktreeName(wt, statuses.get(wt.path)),
+        name: formatWorktreeName(wt, statuses.get(wt.path), containerStatuses.get(wt.path)),
         description: wt.slug,
         value: wt,
       })),
-    [worktrees, statuses],
+    [worktrees, statuses, containerStatuses],
   )
 
   if (worktrees.length === 0) {
