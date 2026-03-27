@@ -2,11 +2,13 @@
  * RepoBrowser component - full-screen overlay for browsing and cloning GitHub repos.
  *
  * Handles its own keyboard: Tab to switch focus, Enter to clone, Esc to close.
+ * Uses theme colors and styled availability badges.
  */
 
 import type { SelectOption } from "@opentui/core"
 import { useKeyboard } from "@opentui/react"
 import { useCallback, useMemo, useRef, useState } from "react"
+import { badgeSymbols, borders, colors, spacing } from "../theme.js"
 import type { BrowsableRepo, RemoteRepo } from "../types/github.js"
 import { Spinner, useSpinnerFrame } from "./Spinner.js"
 
@@ -96,34 +98,36 @@ export function RepoBrowser({ repos, loading, onClone, onClose }: RepoBrowserPro
       alignItems="center"
       width="100%"
       height="100%"
-      backgroundColor="#000000"
+      backgroundColor={colors.bg}
     >
       <box
         border
-        borderStyle="rounded"
-        borderColor="#6366F1"
-        width={70}
+        borderStyle={borders.dialog}
+        borderColor={colors.borderFocused}
+        width={spacing.repoBrowserWidth}
         flexDirection="column"
-        paddingX={2}
-        paddingY={1}
+        paddingX={spacing.dialogPaddingX}
+        paddingY={spacing.dialogPaddingY}
       >
         <text>
-          <span fg="#6366F1">
-            <strong>Download Repository</strong>
+          <span fg={colors.accent}>
+            <strong>Clone Repository</strong>
           </span>
         </text>
 
         <box marginTop={1} flexDirection="row" gap={1}>
-          <text fg="#888888">Search:</text>
+          <text>
+            <span fg={colors.textSecondary}>Search:</span>
+          </text>
           <input
             value={filter}
             onChange={setFilter}
             placeholder="owner/repo"
             focused={inputFocused}
-            width={50}
-            backgroundColor="#1a1a2e"
-            textColor="#FFFFFF"
-            focusedBackgroundColor="#2a2a4e"
+            width={spacing.repoBrowserWidth - spacing.dialogPaddingX * 2 - 12}
+            backgroundColor={colors.bgSurface}
+            textColor={colors.textPrimary}
+            focusedBackgroundColor={colors.bgOverlay}
           />
         </box>
 
@@ -131,7 +135,9 @@ export function RepoBrowser({ repos, loading, onClone, onClose }: RepoBrowserPro
           {loading ? (
             <box flexDirection="row" gap={1}>
               <Spinner frame={frame} />
-              <text fg="#888888">Loading repositories...</text>
+              <text>
+                <span fg={colors.textSecondary}>Loading repositories...</span>
+              </text>
             </box>
           ) : (
             <select
@@ -146,18 +152,35 @@ export function RepoBrowser({ repos, loading, onClone, onClose }: RepoBrowserPro
           )}
         </box>
 
-        {filteredRepos.length === 0 && !loading && (
+        {filteredRepos.length === 0 && !loading ? (
           <box marginTop={1}>
-            <text fg="#888888">
-              {filter ? "No matching repositories found" : "No repositories available"}
+            <text>
+              <span fg={colors.textMuted}>
+                {filter ? "No matching repositories found" : "No repositories available"}
+              </span>
             </text>
           </box>
-        )}
+        ) : null}
 
         <box marginTop={1} flexDirection="row" justifyContent="flex-end" gap={2}>
-          <text fg="#888888">[Esc] Close</text>
-          <text fg="#888888">[Tab] Switch focus</text>
-          <text fg="#00FF00">[Enter] Clone</text>
+          <text>
+            <span fg={colors.accent} bg={colors.bgHighlight}>
+              {" Esc "}
+            </span>
+            <span fg={colors.textSecondary}>{" Close"}</span>
+          </text>
+          <text>
+            <span fg={colors.accent} bg={colors.bgHighlight}>
+              {" Tab "}
+            </span>
+            <span fg={colors.textSecondary}>{" Switch"}</span>
+          </text>
+          <text>
+            <span fg={colors.success} bg={colors.bgHighlight}>
+              {" Enter "}
+            </span>
+            <span fg={colors.success}>{" Clone"}</span>
+          </text>
         </box>
       </box>
     </box>
@@ -165,12 +188,8 @@ export function RepoBrowser({ repos, loading, onClone, onClose }: RepoBrowserPro
 }
 
 function formatRepoEntry(r: BrowsableRepo): string {
-  const badge =
-    r.availability === "installed"
-      ? " [INSTALLED]"
-      : r.availability === "cloning"
-        ? " [CLONING...]"
-        : ""
-
-  return `${r.remote.fullName}${badge}`
+  if (r.availability === "installed")
+    return `${r.remote.fullName}  ${badgeSymbols.installed} installed`
+  if (r.availability === "cloning") return `${r.remote.fullName}  ${badgeSymbols.cloning} cloning`
+  return r.remote.fullName
 }
