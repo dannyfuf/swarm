@@ -1,10 +1,13 @@
 /**
- * Panel component - a bordered container with a title.
+ * Panel component - a bordered container with a title embedded in the border.
  *
- * Highlights border color when focused (blue vs gray).
+ * Uses the `<box title>` prop for space-efficient title rendering.
+ * Highlights border color and adds subtle background when focused.
  */
 
 import type { ReactNode } from "react"
+import { memo } from "react"
+import { borders, colors, spacing } from "../theme.js"
 
 interface PanelProps {
   title: string
@@ -12,27 +15,20 @@ interface PanelProps {
   children: ReactNode
 }
 
-export function Panel({ title, focused, children }: PanelProps) {
-  const borderColor = focused ? "#4455FF" : "#555555"
-  const titleColor = "#6366F1"
-
+export const Panel = memo(function Panel({ title, focused, children }: PanelProps) {
   return (
     <box
       border
-      borderStyle="rounded"
-      borderColor={borderColor}
+      borderStyle={borders.panel}
+      borderColor={focused ? colors.borderFocused : colors.borderDefault}
+      backgroundColor={focused ? colors.bgSurface : undefined}
+      title={`  ${title}  `}
+      titleAlignment="left"
       flexGrow={1}
       flexDirection="column"
-      paddingX={1}
+      paddingX={spacing.panelPaddingX}
     >
-      <text>
-        <span fg={titleColor}>
-          <strong>{title}</strong>
-        </span>
-      </text>
-      <box flexGrow={1} flexDirection="column" marginTop={1}>
-        {children}
-      </box>
+      {children}
     </box>
   )
-}
+})
