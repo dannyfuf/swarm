@@ -1,32 +1,32 @@
 /**
- * Reusable ASCII spinner primitives for activity overlays.
+ * Reusable Braille-dot spinner primitives for activity overlays.
+ *
+ * Uses a single shared interval via `useSpinnerFrame` hook.
  */
 
-import { useEffect, useState } from "react"
-
-const SPINNER_FRAMES = ["|", "/", "-", "\\"] as const
-const SPINNER_INTERVAL_MS = 80
+import { memo, useEffect, useState } from "react"
+import { colors, spinnerFrames, spinnerIntervalMs } from "../theme.js"
 
 interface SpinnerProps {
   frame: string
 }
 
-export function Spinner({ frame }: SpinnerProps) {
-  return <text fg="#6366F1">{frame}</text>
-}
+export const Spinner = memo(function Spinner({ frame }: SpinnerProps) {
+  return <text fg={colors.accent}>{frame}</text>
+})
 
 export function useSpinnerFrame(): string {
   const [frameIndex, setFrameIndex] = useState(0)
 
   useEffect(() => {
     const intervalId = globalThis.setInterval(() => {
-      setFrameIndex((current) => (current + 1) % SPINNER_FRAMES.length)
-    }, SPINNER_INTERVAL_MS)
+      setFrameIndex((current) => (current + 1) % spinnerFrames.length)
+    }, spinnerIntervalMs)
 
     return () => {
       globalThis.clearInterval(intervalId)
     }
   }, [])
 
-  return SPINNER_FRAMES[frameIndex]
+  return spinnerFrames[frameIndex] ?? spinnerFrames[0]
 }

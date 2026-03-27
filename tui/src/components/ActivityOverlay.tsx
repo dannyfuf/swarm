@@ -1,7 +1,12 @@
 /**
  * Passive overlay that shows concurrent long-running activities.
+ *
+ * Displays up to 3 activity cards with Braille-dot spinners,
+ * styled with theme colors. Positioned top-right as floating cards.
  */
 
+import { memo } from "react"
+import { borders, colors } from "../theme.js"
 import type { ActiveOperation } from "../types/activity.js"
 import { Spinner, useSpinnerFrame } from "./Spinner.js"
 
@@ -12,7 +17,7 @@ interface ActivityOverlayProps {
   activities: ActiveOperation[]
 }
 
-export function ActivityOverlay({ activities }: ActivityOverlayProps) {
+export const ActivityOverlay = memo(function ActivityOverlay({ activities }: ActivityOverlayProps) {
   const frame = useSpinnerFrame()
 
   if (activities.length === 0) {
@@ -31,26 +36,37 @@ export function ActivityOverlay({ activities }: ActivityOverlayProps) {
         <box
           key={activity.id}
           border
-          borderStyle="rounded"
-          borderColor="#6366F1"
+          borderStyle={borders.activity}
+          borderColor={colors.borderDefault}
+          backgroundColor={colors.bgSurface}
           paddingX={1}
           flexDirection="row"
           gap={1}
         >
           <Spinner frame={frame} />
-          <text>{truncateActivityLabel(activity.label)}</text>
+          <text>
+            <span fg={colors.textSecondary}>{truncateActivityLabel(activity.label)}</span>
+          </text>
         </box>
       ))}
       {hiddenCount > 0 ? (
-        <box border borderStyle="rounded" borderColor="#4B5563" paddingX={1}>
-          <text fg="#888888">
-            +{hiddenCount} more task{hiddenCount === 1 ? "" : "s"}
+        <box
+          border
+          borderStyle={borders.activity}
+          borderColor={colors.borderMuted}
+          backgroundColor={colors.bgSurface}
+          paddingX={1}
+        >
+          <text>
+            <span fg={colors.textMuted}>
+              +{hiddenCount} more task{hiddenCount === 1 ? "" : "s"}
+            </span>
           </text>
         </box>
       ) : null}
     </box>
   )
-}
+})
 
 function truncateActivityLabel(label: string): string {
   if (label.length <= MAX_LABEL_LENGTH) {
