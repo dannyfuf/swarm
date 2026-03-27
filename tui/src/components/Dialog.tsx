@@ -2,10 +2,12 @@
  * Dialog component - a centered modal with title, message, and confirm/cancel.
  *
  * Handles its own keyboard: Enter to confirm, Esc to cancel.
+ * Uses theme colors and styled key badges for actions.
  */
 
 import { useKeyboard } from "@opentui/react"
 import { useRef } from "react"
+import { borders, colors, spacing } from "../theme.js"
 
 interface DialogProps {
   title: string
@@ -36,34 +38,49 @@ export function Dialog({
     }
   })
 
+  const isDestructive = confirmLabel === "Delete"
+  const confirmColor = isDestructive ? colors.error : colors.success
+
   return (
     <box
       justifyContent="center"
       alignItems="center"
       width="100%"
       height="100%"
-      backgroundColor="#000000"
+      backgroundColor={colors.bg}
     >
       <box
         border
-        borderStyle="rounded"
-        borderColor="#6366F1"
-        width={50}
+        borderStyle={borders.dialog}
+        borderColor={colors.borderFocused}
+        width={spacing.dialogWidth}
         flexDirection="column"
-        paddingX={2}
-        paddingY={1}
+        paddingX={spacing.dialogPaddingX}
+        paddingY={spacing.dialogPaddingY}
       >
         <text>
-          <span fg="#6366F1">
+          <span fg={colors.accent}>
             <strong>{title}</strong>
           </span>
         </text>
         <box marginTop={1}>
-          <text>{message}</text>
+          <text>
+            <span fg={colors.textPrimary}>{message}</span>
+          </text>
         </box>
         <box marginTop={1} flexDirection="row" justifyContent="flex-end" gap={2}>
-          <text fg="#888888">[Esc] {cancelLabel}</text>
-          <text fg="#00FF00">[Enter] {confirmLabel}</text>
+          <text>
+            <span fg={colors.accent} bg={colors.bgHighlight}>
+              {" Esc "}
+            </span>
+            <span fg={colors.textSecondary}>{` ${cancelLabel}`}</span>
+          </text>
+          <text>
+            <span fg={confirmColor} bg={colors.bgHighlight}>
+              {" Enter "}
+            </span>
+            <span fg={confirmColor}>{` ${confirmLabel}`}</span>
+          </text>
         </box>
       </box>
     </box>
