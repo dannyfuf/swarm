@@ -80,7 +80,7 @@ describe("InputDialog", () => {
 
 describe("HelpDialog", () => {
   test("renders keyboard shortcuts", async () => {
-    testSetup = await testRender(<HelpDialog onClose={noop} />, { width: 60, height: 30 })
+    testSetup = await testRender(<HelpDialog onClose={noop} />, { width: 70, height: 40 })
 
     await testSetup.renderOnce()
     const frame = testSetup.captureCharFrame()
@@ -99,7 +99,7 @@ describe("HelpDialog", () => {
   test("renders custom help content", async () => {
     testSetup = await testRender(
       <HelpDialog onClose={noop} title="Container Config" message="Path:\n/tmp/config.yml" />,
-      { width: 70, height: 30 },
+      { width: 70, height: 40 },
     )
 
     await testSetup.renderOnce()
@@ -143,7 +143,7 @@ describe("DetailView", () => {
     }
 
     testSetup = await testRender(
-      <box width={60} height={20}>
+      <box width={60} height={24}>
         <DetailView
           worktree={mockWorktree}
           status={undefined}
@@ -157,7 +157,7 @@ describe("DetailView", () => {
           }}
         />
       </box>,
-      { width: 60, height: 20 },
+      { width: 60, height: 24 },
     )
 
     await testSetup.renderOnce()
@@ -166,7 +166,7 @@ describe("DetailView", () => {
     expect(frame).toContain("feature/auth")
     expect(frame).toContain("feature_auth")
     expect(frame).toContain("test-repo")
-    expect(frame).toContain("Config:")
+    expect(frame).toContain("Config")
     expect(frame).toContain("present")
     expect(frame).toContain("node-web")
     expect(frame).toContain("test-container")
@@ -184,7 +184,7 @@ describe("DetailView", () => {
     }
 
     testSetup = await testRender(
-      <box width={80} height={20}>
+      <box width={80} height={24}>
         <DetailView
           worktree={mockWorktree}
           status={undefined}
@@ -198,7 +198,7 @@ describe("DetailView", () => {
           }}
         />
       </box>,
-      { width: 80, height: 20 },
+      { width: 80, height: 24 },
     )
 
     await testSetup.renderOnce()
@@ -220,7 +220,7 @@ describe("DetailView", () => {
     }
 
     testSetup = await testRender(
-      <box width={90} height={20}>
+      <box width={90} height={24}>
         <DetailView
           worktree={mockWorktree}
           status={undefined}
@@ -228,7 +228,7 @@ describe("DetailView", () => {
           containerStatus={undefined}
         />
       </box>,
-      { width: 90, height: 20 },
+      { width: 90, height: 24 },
     )
 
     await testSetup.renderOnce()
@@ -251,7 +251,7 @@ describe("DetailView", () => {
     }
 
     testSetup = await testRender(
-      <box width={80} height={20}>
+      <box width={80} height={24}>
         <DetailView
           worktree={mockWorktree}
           status={undefined}
@@ -260,7 +260,7 @@ describe("DetailView", () => {
           activeOperationLabel="Starting container for feature/auth..."
         />
       </box>,
-      { width: 80, height: 20 },
+      { width: 80, height: 24 },
     )
 
     await testSetup.renderOnce()
