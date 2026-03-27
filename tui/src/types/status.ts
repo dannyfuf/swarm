@@ -5,6 +5,8 @@
  * Represents computed worktree health and the visual badges shown in the list.
  */
 
+import { colors } from "../theme.js"
+
 /** Computed health status for a worktree (TTL-cached). */
 export interface Status {
   hasChanges: boolean
@@ -17,7 +19,7 @@ export interface Status {
 
 /** A visual badge displayed next to a worktree in the list. */
 export interface Badge {
-  /** Single-character symbol (e.g. "●", "↑", "✓", "⚠"). */
+  /** Single-character symbol (e.g. "●", "↑", "✓", "✗"). */
   symbol: string
   /** ANSI/hex color for rendering. */
   color: string
@@ -27,26 +29,26 @@ export interface Badge {
 
 /**
  * Returns the ordered list of badges for a given status.
- * Badge order matches the Go implementation:
- * 1. Uncommitted changes (yellow ●)
- * 2. Unpushed commits (cyan ↑)
- * 3. Merged (green ✓)
- * 4. Orphaned (red ⚠)
+ * Badge order:
+ * 1. Uncommitted changes (warning ●)
+ * 2. Unpushed commits (info ↑)
+ * 3. Merged (success ✓)
+ * 4. Orphaned (error ✗)
  */
 export function getBadges(status: Status): Badge[] {
   const badges: Badge[] = []
 
   if (status.hasChanges) {
-    badges.push({ symbol: "●", color: "#FFFF00", hint: "uncommitted changes" })
+    badges.push({ symbol: "●", color: colors.warning, hint: "uncommitted changes" })
   }
   if (status.hasUnpushed) {
-    badges.push({ symbol: "↑", color: "#00FFFF", hint: "unpushed commits" })
+    badges.push({ symbol: "↑", color: colors.info, hint: "unpushed commits" })
   }
   if (status.branchMerged === true) {
-    badges.push({ symbol: "✓", color: "#00FF00", hint: "merged" })
+    badges.push({ symbol: "✓", color: colors.success, hint: "merged" })
   }
   if (status.isOrphaned) {
-    badges.push({ symbol: "⚠", color: "#FF0000", hint: "orphaned" })
+    badges.push({ symbol: "✗", color: colors.error, hint: "orphaned" })
   }
 
   return badges

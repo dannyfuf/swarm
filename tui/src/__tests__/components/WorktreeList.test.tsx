@@ -61,7 +61,7 @@ describe("WorktreeList", () => {
     expect(frame).toContain("feature/auth")
   })
 
-  test("shows GONE tag for orphaned worktrees", async () => {
+  test("shows gone indicator for orphaned worktrees", async () => {
     testSetup = await testRender(
       <box width={50} height={20} flexDirection="column">
         <WorktreeList
@@ -80,7 +80,9 @@ describe("WorktreeList", () => {
     await testSetup.renderOnce()
     const frame = testSetup.captureCharFrame()
 
-    expect(frame).toContain("[GONE]")
+    // Orphaned worktrees now show "✗ gone" instead of "[GONE]"
+    expect(frame).toContain("gone")
+    expect(frame).toContain("✗")
   })
 
   test("shows badges when status has changes", async () => {
@@ -174,6 +176,7 @@ describe("WorktreeList", () => {
     await testSetup.renderOnce()
     const frame = testSetup.captureCharFrame()
 
-    expect(frame).toContain("[UP]")
+    // Container running now shows "▲" instead of "[UP]"
+    expect(frame).toContain("▲")
   })
 })

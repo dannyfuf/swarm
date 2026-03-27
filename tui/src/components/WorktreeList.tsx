@@ -1,11 +1,13 @@
 /**
  * WorktreeList component - scrollable list of worktrees with status badges.
  *
- * Shows `[GONE]` tag for orphaned worktrees. Uses OpenTUI `<select>` for navigation.
+ * Shows `✗ gone` tag for orphaned worktrees. Uses Unicode badge symbols
+ * from theme for container and git status indicators.
  */
 
 import type { SelectOption } from "@opentui/core"
-import { useMemo } from "react"
+import { memo, useMemo } from "react"
+import { badgeSymbols, colors } from "../theme.js"
 import type { ContainerRuntimeStatus } from "../types/container.js"
 import type { Status } from "../types/status.js"
 import { getBadges } from "../types/status.js"
@@ -29,35 +31,40 @@ function formatWorktreeName(
   let name = wt.branch || wt.slug
 
   if (wt.isOrphaned) {
-    name = `${name} [GONE]`
+    name = `${name}  ${badgeSymbols.orphaned} gone`
   }
 
   if (status) {
     const badges = getBadges(status)
     if (badges.length > 0) {
-      const badgeStr = badges.map((b) => b.symbol).join("")
-      name = `${name} ${badgeStr}`
+      name = `${name}  ${badges.map((b) => b.symbol).join(" ")}`
     }
   }
 
   if (containerStatus) {
-    const containerBadge =
-      containerStatus.state === "running"
-        ? "[UP]"
-        : containerStatus.state === "stopped"
-          ? "[DOWN]"
-          : containerStatus.state === "failed"
-            ? "[FAIL]"
-            : containerStatus.state === "not-created"
-              ? "[NOENV]"
-              : "[ENV?]"
-    name = `${name} ${containerBadge}`
+    const symbol = getContainerSymbol(containerStatus.state)
+    name = `${name}  ${symbol}`
   }
 
   return name
 }
 
-export function WorktreeList({
+function getContainerSymbol(state: string): string {
+  switch (state) {
+    case "running":
+      return badgeSymbols.containerUp
+    case "stopped":
+      return badgeSymbols.containerDown
+    case "failed":
+      return badgeSymbols.containerFail
+    case "not-created":
+      return badgeSymbols.containerNone
+    default:
+      return "?"
+  }
+}
+
+export const WorktreeList = memo(function WorktreeList({
   worktrees,
   statuses,
   containerStatuses,
@@ -78,8 +85,10 @@ export function WorktreeList({
 
   if (worktrees.length === 0) {
     return (
-      <text fg="#888888">
-        <em>No worktrees</em>
+      <text>
+        <span fg={colors.textMuted}>
+          <em>No worktrees</em>
+        </span>
       </text>
     )
   }
@@ -95,4 +104,4 @@ export function WorktreeList({
       style={{ flexGrow: 1 }}
     />
   )
-}
+})
