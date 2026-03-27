@@ -6,7 +6,7 @@
  */
 
 import type { SelectOption } from "@opentui/core"
-import { useRenderer } from "@opentui/react"
+import { useRenderer, useTerminalDimensions } from "@opentui/react"
 import { useCallback, useEffect, useMemo, useState } from "react"
 import { BuildContainerImageCommand } from "./commands/BuildContainerImageCommand.js"
 import { CheckRemovalSafetyCommand } from "./commands/CheckRemovalSafetyCommand.js"
@@ -801,12 +801,22 @@ export function App() {
     [state.activeOperations, state.selectedWorktree],
   )
 
+  // --- Responsive layout ---
+
+  const { width: termWidth } = useTerminalDimensions()
+  const isNarrow = termWidth < 100
+  const isWide = termWidth >= 160
+
+  const repoWidth = isNarrow ? "30%" : isWide ? "20%" : "25%"
+  const worktreeWidth = isNarrow ? "40%" : "35%"
+  const detailWidth = isNarrow ? "30%" : isWide ? "45%" : "40%"
+
   // --- Render ---
 
   if (state.loading) {
     return (
       <box width="100%" height="100%" justifyContent="center" alignItems="center">
-        <text fg="#6366F1">Loading repositories...</text>
+        <text fg="#6366f1">Loading repositories...</text>
       </box>
     )
   }
@@ -816,7 +826,7 @@ export function App() {
       {/* Main content area: 3-panel layout */}
       <box flexGrow={1} flexDirection="row">
         {/* Left panel: Repos */}
-        <box width="25%" flexDirection="column">
+        <box width={repoWidth} flexDirection="column">
           <Panel title="Repositories" focused={state.focusedPanel === "repos"}>
             <RepoList
               repos={state.repos}
@@ -831,7 +841,7 @@ export function App() {
         </box>
 
         {/* Center panel: Worktrees */}
-        <box width="35%" flexDirection="column">
+        <box width={worktreeWidth} flexDirection="column">
           <Panel title="Worktrees" focused={state.focusedPanel === "worktrees"}>
             <WorktreeList
               worktrees={state.worktrees}
@@ -850,7 +860,7 @@ export function App() {
         </box>
 
         {/* Right panel: Detail */}
-        <box width="40%" flexDirection="column">
+        <box width={detailWidth} flexDirection="column">
           <Panel title="Detail" focused={state.focusedPanel === "detail"}>
             <DetailView
               worktree={state.selectedWorktree}
