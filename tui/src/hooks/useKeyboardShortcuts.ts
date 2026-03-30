@@ -17,11 +17,19 @@ interface KeyboardOptions {
   dispatch: React.Dispatch<AppAction>
   onOpenWorktree: () => void
   onDeleteWorktree: () => void
+  onStartContainer: () => void
+  onStopContainer: () => void
+  onCreateAndStartWorktree: () => void
+  onBuildContainerImage: () => void
+  onEnsureContainerConfig: () => void
   onRefresh: () => void
   onPrune: () => void
   onCopy: () => void
   onCopyBranch: () => void
+  onCopyContainerConfigPath: () => void
   onHelp: () => void
+  onInspectContainer: () => void
+  onOpenRepoBrowser: () => void
 }
 
 export function useKeyboardShortcuts(opts: KeyboardOptions) {
@@ -30,7 +38,7 @@ export function useKeyboardShortcuts(opts: KeyboardOptions) {
   useKeyboard((key) => {
     // Dialog and input components handle their own keyboard events.
     // Skip global shortcuts to avoid duplicate handling.
-    if (opts.state.showDialog || opts.state.inputMode !== "none") {
+    if (opts.state.showDialog || opts.state.inputMode !== "none" || opts.state.showRepoBrowser) {
       return
     }
 
@@ -49,7 +57,11 @@ export function useKeyboardShortcuts(opts: KeyboardOptions) {
         }
         break
       case "n":
-        opts.dispatch({ type: "SET_INPUT_MODE", mode: "create" })
+        if (key.shift) {
+          opts.onCreateAndStartWorktree()
+        } else {
+          opts.dispatch({ type: "SET_INPUT_MODE", mode: "create" })
+        }
         break
       case "o":
       case "enter":
@@ -62,6 +74,18 @@ export function useKeyboardShortcuts(opts: KeyboardOptions) {
       case "r":
         opts.onRefresh()
         break
+      case "s":
+        opts.onStartContainer()
+        break
+      case "x":
+        opts.onStopContainer()
+        break
+      case "i":
+        opts.onBuildContainerImage()
+        break
+      case "g":
+        opts.onEnsureContainerConfig()
+        break
       case "p":
         opts.onPrune()
         break
@@ -71,8 +95,17 @@ export function useKeyboardShortcuts(opts: KeyboardOptions) {
       case "b":
         opts.onCopyBranch()
         break
+      case "y":
+        opts.onCopyContainerConfigPath()
+        break
       case "?":
         opts.onHelp()
+        break
+      case "v":
+        opts.onInspectContainer()
+        break
+      case "f":
+        opts.onOpenRepoBrowser()
         break
     }
   })

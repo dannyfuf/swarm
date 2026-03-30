@@ -35,6 +35,10 @@ export interface Config {
   preferFzf: boolean
   /** Automatically prune orphaned state entries on worktree removal. */
   autoPruneOnRemove: boolean
+  /** Start of the stable host port allocation range for worktree containers. */
+  containerPortRangeStart: number
+  /** End of the stable host port allocation range for worktree containers. */
+  containerPortRangeEnd: number
 }
 
 /** Valid worktree pattern values for validation. */

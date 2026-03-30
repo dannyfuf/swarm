@@ -53,6 +53,8 @@ export class ConfigService {
       statusCacheTTL: 30_000,
       preferFzf: false,
       autoPruneOnRemove: true,
+      containerPortRangeStart: 4100,
+      containerPortRangeEnd: 4899,
     }
   }
 
@@ -105,6 +107,12 @@ export class ConfigService {
     if (typeof raw.auto_prune_on_remove === "boolean") {
       config.autoPruneOnRemove = raw.auto_prune_on_remove
     }
+    if (typeof raw.container_port_range_start === "number") {
+      config.containerPortRangeStart = raw.container_port_range_start
+    }
+    if (typeof raw.container_port_range_end === "number") {
+      config.containerPortRangeEnd = raw.container_port_range_end
+    }
 
     return config
   }
@@ -137,6 +145,14 @@ export class ConfigService {
     if (process.env.SWARM_AUTO_PRUNE_ON_REMOVE) {
       env.autoPruneOnRemove = process.env.SWARM_AUTO_PRUNE_ON_REMOVE === "true"
     }
+    if (process.env.SWARM_CONTAINER_PORT_RANGE_START) {
+      const port = Number.parseInt(process.env.SWARM_CONTAINER_PORT_RANGE_START, 10)
+      if (!Number.isNaN(port)) env.containerPortRangeStart = port
+    }
+    if (process.env.SWARM_CONTAINER_PORT_RANGE_END) {
+      const port = Number.parseInt(process.env.SWARM_CONTAINER_PORT_RANGE_END, 10)
+      if (!Number.isNaN(port)) env.containerPortRangeEnd = port
+    }
 
     return env
   }
@@ -146,6 +162,17 @@ export class ConfigService {
       throw new Error(
         `Invalid worktree pattern: "${config.worktreePattern}". ` +
           `Must be one of: ${VALID_WORKTREE_PATTERNS.join(", ")}`,
+      )
+    }
+    if (
+      !Number.isInteger(config.containerPortRangeStart) ||
+      !Number.isInteger(config.containerPortRangeEnd) ||
+      config.containerPortRangeStart <= 0 ||
+      config.containerPortRangeEnd <= 0 ||
+      config.containerPortRangeStart > config.containerPortRangeEnd
+    ) {
+      throw new Error(
+        "Invalid container port range. Ensure start/end are positive integers and start <= end.",
       )
     }
     // AIWorkingDir existence is validated at runtime when scanning repos,

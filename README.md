@@ -22,6 +22,7 @@ bun run start
 - Repository discovery across a configurable root directory
 - Safety checks before deletion (uncommitted changes, unpushed commits)
 - Git status badges (modified, unpushed, merged)
+- Per-worktree Docker environments with isolated container, network, volumes, and stable host port
 - Clipboard integration (copy path or branch name)
 - Configurable via YAML file and environment variables
 
@@ -47,6 +48,9 @@ bun run start
 
 # Launch with file watching (auto-restart on changes)
 bun run dev
+
+# Run directory-local container commands from a repo/worktree
+bun run start -- container status
 ```
 
 ### Keyboard Shortcuts
@@ -57,8 +61,15 @@ bun run dev
 | `Tab` / `Shift+Tab`   | Switch panel    |
 | `Enter`              | Select / Confirm  |
 | `n`                  | New worktree      |
+| `N`                  | New worktree + start container |
 | `o`                  | Open in tmux      |
 | `d`                  | Delete worktree   |
+| `s`                  | Start container   |
+| `x`                  | Stop container    |
+| `i`                  | Build repo image  |
+| `g`                  | Create config scaffold |
+| `y`                  | Copy container config path |
+| `v`                  | Inspect container |
 | `r`                  | Refresh           |
 | `p`                  | Prune orphans     |
 | `c`                  | Copy path         |
@@ -116,6 +127,10 @@ status_cache_ttl: 30s
 
 # Auto-prune orphaned state on worktree removal
 auto_prune_on_remove: true
+
+# Stable host port range for worktree containers
+container_port_range_start: 4100
+container_port_range_end: 4899
 ```
 
 ### Environment Variables
@@ -130,6 +145,91 @@ auto_prune_on_remove: true
 | `SWARM_TMUX_LAYOUT_SCRIPT`       | Path to custom tmux layout script      |
 | `SWARM_STATUS_CACHE_TTL`         | Cache TTL in milliseconds              |
 | `SWARM_AUTO_PRUNE_ON_REMOVE`     | `true` / `false`                       |
+| `SWARM_CONTAINER_PORT_RANGE_START` | First host port for containers      |
+| `SWARM_CONTAINER_PORT_RANGE_END`   | Last host port for containers       |
+
+## Container Environments
+
+Swarm can manage one Docker-backed development environment per worktree. Each environment gets:
+
+- A dedicated container
+- A dedicated Docker network
+- Dedicated named volumes for persistent dev data
+- One stable host-exposed app port from the configured range
+- Reusable repo base images plus dependency-keyed variant images
+
+Container config lives outside the repo under `~/.config/swarm/containers/<repo-name>--<path-hash>.yml`. In the TUI, `g` creates the starter file and `y` copies the expected container config path even before the file exists.
+
+### Example repo container config
+
+```yaml
+schema_version: 1
+repo_path: /Users/you/swarm/ai_working/my-app
+preset: node-web
+
+runtime:
+  base_image: node:22-bookworm-slim
+  packages:
+    - libvips-dev
+
+env:
+  file: .env.development
+  vars:
+    NODE_ENV: development
+
+build:
+  install: bun install
+
+setup:
+  command: bun run db:prepare
+
+processes:
+  app:
+    command: bun run dev -- --host 0.0.0.0 --port 3000
+    expose: true
+    internal_port: 3000
+  worker:
+    command: bun run worker
+```
+
+Rules:
+
+- `repo_path` must exactly match the managed repo path
+- `env.file` must be repo-relative
+- exactly one process may set `expose: true`
+- dependency changes produce stale-image warnings until you rebuild with `i` or `swarm container build`
+
+### CLI container commands
+
+Run these from inside a managed worktree unless noted otherwise:
+
+```bash
+# Start the selected worktree environment
+bun run start -- container up
+
+# Stop the current worktree environment
+bun run start -- container down
+
+# Rebuild the repo image set
+bun run start -- container build
+
+# Inspect live status and stale-image warnings
+bun run start -- container status
+
+# Show recent logs for the current worktree container
+bun run start -- container logs
+```
+
+### TUI container workflow
+
+1. Add the repo config file under `~/.config/swarm/containers/`
+2. Launch Swarm and select a repo/worktree
+3. Press `y` to copy the expected container config path, or `g` to create the scaffold in that location
+4. Press `i` to build images explicitly, or press `s` to start and auto-build when needed
+5. Press `N` to create a worktree and immediately start its container
+6. Press `v` to refresh live container status and inspect stale-image warnings
+7. Press `x` to stop the environment while preserving volumes
+8. Delete the worktree with `d` to remove the environment and data volumes completely
 
 ## Directory Layout
 

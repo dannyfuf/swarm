@@ -1,9 +1,14 @@
 /**
  * DetailView component - shows full details for the selected worktree.
  *
- * Displays branch, slug, path, repo, status badges, and timestamps.
+ * Organized into logical sections: Git Info, Container Info, Timestamps.
+ * Uses colored badges for status rendering.
  */
 
+import type { ReactNode } from "react"
+import { memo } from "react"
+import { colors, spacing } from "../theme.js"
+import type { ContainerConfigSummary, ContainerRuntimeStatus } from "../types/container.js"
 import type { Status } from "../types/status.js"
 import { getBadges } from "../types/status.js"
 import type { Worktree } from "../types/worktree.js"
@@ -11,80 +16,210 @@ import type { Worktree } from "../types/worktree.js"
 interface DetailViewProps {
   worktree: Worktree | null
   status: Status | undefined
+  containerStatus: ContainerRuntimeStatus | undefined
+  containerConfigSummary: ContainerConfigSummary | null
+  activeOperationLabel?: string | null
+}
+
+function SectionHeader({ label }: { label: string }) {
+  return (
+    <text>
+      <span fg={colors.accent}>
+        <strong>{label}</strong>
+      </span>
+    </text>
+  )
+}
+
+function DetailRow({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <box flexDirection="row">
+      <box width={14}>
+        <text>
+          <span fg={colors.textSecondary}>{label}</span>
+        </text>
+      </box>
+      <box flexGrow={1}>
+        {typeof children === "string" ? (
+          <text>
+            <span fg={colors.textPrimary}>{children}</span>
+          </text>
+        ) : (
+          children
+        )}
+      </box>
+    </box>
+  )
 }
 
 function formatDate(date: Date): string {
   return date.toLocaleString()
 }
 
-export function DetailView({ worktree, status }: DetailViewProps) {
+function formatConfigState(summary: ContainerConfigSummary): string {
+  switch (summary.state) {
+    case "missing":
+      return "missing"
+    case "present":
+      return "present"
+    case "invalid":
+      return "invalid"
+  }
+}
+
+function getContainerStateLabel(state: string): { label: string; color: string } {
+  switch (state) {
+    case "running":
+      return { label: "▲ running", color: colors.containerUp }
+    case "stopped":
+      return { label: "▽ stopped", color: colors.containerDown }
+    case "failed":
+      return { label: "✗ failed", color: colors.containerFail }
+    default:
+      return { label: state, color: colors.textSecondary }
+  }
+}
+
+export const DetailView = memo(function DetailView({
+  worktree,
+  status,
+  containerStatus,
+  containerConfigSummary,
+  activeOperationLabel,
+}: DetailViewProps) {
   if (!worktree) {
     return (
-      <text fg="#888888">
-        <em>Select a worktree to view details</em>
+      <text>
+        <span fg={colors.textMuted}>
+          <em>Select a worktree to view details</em>
+        </span>
       </text>
     )
   }
 
   const badges = status ? getBadges(status) : []
-  const badgeStr =
-    badges.length > 0 ? badges.map((b) => `${b.symbol} ${b.hint}`).join("  ") : "none"
+  const configStateLabel = containerConfigSummary
+    ? formatConfigState(containerConfigSummary)
+    : "loading"
+  const configPath =
+    containerConfigSummary?.resolvedPath ?? containerConfigSummary?.path ?? "loading"
 
   return (
-    <box flexDirection="column" gap={1}>
-      <text>
-        <span fg="#6366F1">
-          <strong>Branch:</strong>
-        </span>{" "}
-        {worktree.branch}
-      </text>
-      <text>
-        <span fg="#6366F1">
-          <strong>Slug:</strong>
-        </span>{" "}
-        {worktree.slug}
-      </text>
-      <text>
-        <span fg="#6366F1">
-          <strong>Path:</strong>
-        </span>{" "}
-        {worktree.path}
-      </text>
-      <text>
-        <span fg="#6366F1">
-          <strong>Repo:</strong>
-        </span>{" "}
-        {worktree.repoName}
-      </text>
-      <text>
-        <span fg="#6366F1">
-          <strong>Session:</strong>
-        </span>{" "}
-        {worktree.tmuxSession}
-      </text>
-      <text>
-        <span fg="#6366F1">
-          <strong>Status:</strong>
-        </span>{" "}
-        {badgeStr}
-      </text>
-      {worktree.isOrphaned && (
-        <text fg="#FF0000">
-          <strong>ORPHANED</strong>
+    <box flexDirection="column" gap={spacing.sectionGap}>
+      {/* Git section */}
+      <SectionHeader label="Git" />
+      <DetailRow label="Branch">{worktree.branch}</DetailRow>
+      <DetailRow label="Slug">{worktree.slug}</DetailRow>
+      <DetailRow label="Path">{worktree.path}</DetailRow>
+      <DetailRow label="Repo">{worktree.repoName}</DetailRow>
+      <DetailRow label="Session">{worktree.tmuxSession}</DetailRow>
+      <DetailRow label="Status">
+        {badges.length > 0 ? (
+          <text>
+            {badges.map((b, i) => (
+              <span key={b.hint}>
+                <span fg={b.color}>{b.symbol}</span>
+                <span fg={colors.textSecondary}>{` ${b.hint}`}</span>
+                {i < badges.length - 1 ? "  " : ""}
+              </span>
+            ))}
+          </text>
+        ) : (
+          <text>
+            <span fg={colors.textMuted}>none</span>
+          </text>
+        )}
+      </DetailRow>
+
+      {worktree.isOrphaned ? (
+        <text>
+          <span fg={colors.error}>
+            <strong>ORPHANED</strong>
+          </span>
         </text>
-      )}
-      <text>
-        <span fg="#6366F1">
-          <strong>Created:</strong>
-        </span>{" "}
-        {formatDate(worktree.createdAt)}
-      </text>
-      <text>
-        <span fg="#6366F1">
-          <strong>Last Opened:</strong>
-        </span>{" "}
-        {formatDate(worktree.lastOpenedAt)}
-      </text>
+      ) : null}
+
+      {/* Container section */}
+      <SectionHeader label="Container" />
+      <DetailRow label="Config">{configStateLabel}</DetailRow>
+      <DetailRow label="Config Path">{configPath}</DetailRow>
+      {containerConfigSummary?.state === "invalid" ? (
+        <text>
+          <span fg={colors.warning}>
+            <strong>Config Error:</strong> {containerConfigSummary.error}
+          </span>
+        </text>
+      ) : null}
+
+      <DetailRow label="State">
+        {containerStatus ? (
+          <text>
+            <span fg={getContainerStateLabel(containerStatus.state).color}>
+              {getContainerStateLabel(containerStatus.state).label}
+            </span>
+          </text>
+        ) : (
+          <text>
+            <span fg={colors.textMuted}>not-configured</span>
+          </text>
+        )}
+      </DetailRow>
+
+      {worktree.container ? (
+        <>
+          <DetailRow label="URL">
+            {containerStatus?.primaryUrl ?? worktree.container.primaryUrl ?? "n/a"}
+          </DetailRow>
+          <DetailRow label="Health">{containerStatus?.health ?? "unknown"}</DetailRow>
+          <DetailRow label="Project">{worktree.container.projectName}</DetailRow>
+          <DetailRow label="Service">{worktree.container.primaryService}</DetailRow>
+          <DetailRow label="Compose">
+            {worktree.container.composeFiles?.join(", ") || "n/a"}
+          </DetailRow>
+          <DetailRow label="Ports">
+            {formatPublishedPorts(worktree.container.publishedPorts ?? {})}
+          </DetailRow>
+          {containerStatus?.warning ? (
+            <text>
+              <span fg={colors.warning}>
+                <strong>Warning:</strong> {containerStatus.warning}
+              </span>
+            </text>
+          ) : null}
+        </>
+      ) : null}
+
+      {activeOperationLabel ? (
+        <text>
+          <span fg={colors.warning}>
+            <strong>Operation:</strong> {activeOperationLabel}
+          </span>
+        </text>
+      ) : null}
+
+      {/* Timestamps section */}
+      <SectionHeader label="Timestamps" />
+      <DetailRow label="Created">{formatDate(worktree.createdAt)}</DetailRow>
+      <DetailRow label="Last Opened">{formatDate(worktree.lastOpenedAt)}</DetailRow>
+
+      {/* Hint line */}
+      <box marginTop={1}>
+        <text>
+          <span fg={colors.accent} bg={colors.bgHighlight}>
+            {" y "}
+          </span>
+          <span fg={colors.textMuted}>{" copy config path"}</span>
+        </text>
+      </box>
     </box>
   )
+})
+
+function formatPublishedPorts(publishedPorts: Record<string, number>): string {
+  const entries = Object.entries(publishedPorts)
+  if (entries.length === 0) {
+    return "n/a"
+  }
+
+  return entries.map(([key, value]) => `${key}=${value}`).join(", ")
 }

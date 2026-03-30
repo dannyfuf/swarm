@@ -10,11 +10,13 @@ branch refs/heads/main
 `
     const result = parseWorktreeList(output)
     expect(result).toHaveLength(1)
-    expect(result[0]).toEqual({
+    expect(result[0]).toMatchObject({
       path: "/home/user/repos/my-project",
       branch: "main",
       commit: "abc123def456",
       detached: false,
+      prunable: false,
+      prunableReason: null,
     })
   })
 
@@ -67,6 +69,66 @@ branch refs/heads/main`
 
   test("handles empty output", () => {
     expect(parseWorktreeList("")).toEqual([])
+  })
+
+  test("parses prunable worktree entry with reason", () => {
+    const output = `worktree /home/user/repos/my-project
+HEAD abc123def456
+branch refs/heads/main
+prunable git worktree prune
+
+`
+    const result = parseWorktreeList(output)
+    expect(result).toHaveLength(1)
+    expect(result[0].prunable).toBe(true)
+    expect(result[0].prunableReason).toBe("git worktree prune")
+  })
+
+  test("parses prunable worktree entry without reason", () => {
+    const output = `worktree /home/user/repos/stale-wt
+HEAD def456
+branch refs/heads/feature/auth
+prunable
+
+`
+    const result = parseWorktreeList(output)
+    expect(result).toHaveLength(1)
+    expect(result[0].prunable).toBe(true)
+    expect(result[0].prunableReason).toBeNull()
+  })
+
+  test("parses mixed active and prunable entries", () => {
+    const output = `worktree /home/user/repos/main
+HEAD abc123
+branch refs/heads/main
+
+worktree /home/user/repos/stale
+HEAD def456
+prunable missing path
+
+worktree /home/user/repos/active-feat
+HEAD ghi789
+branch refs/heads/feature/new
+
+`
+    const result = parseWorktreeList(output)
+    expect(result).toHaveLength(3)
+    expect(result[0].prunable).toBe(false)
+    expect(result[0].prunableReason).toBeNull()
+    expect(result[1].prunable).toBe(true)
+    expect(result[1].prunableReason).toBe("missing path")
+    expect(result[2].prunable).toBe(false)
+  })
+
+  test("parses prunable without trailing blank line", () => {
+    const output = `worktree /path
+HEAD abc
+branch refs/heads/main
+prunable stale`
+    const result = parseWorktreeList(output)
+    expect(result).toHaveLength(1)
+    expect(result[0].prunable).toBe(true)
+    expect(result[0].prunableReason).toBe("stale")
   })
 })
 

@@ -23,7 +23,7 @@ import type { Commit, StatusResult, WorktreeInfo } from "../types/git.js"
  */
 export function parseWorktreeList(output: string): WorktreeInfo[] {
   const worktrees: WorktreeInfo[] = []
-  let current: Partial<WorktreeInfo> | null = null
+  let current: (Partial<WorktreeInfo> & { prunableReasonRaw?: string | null }) | null = null
 
   const lines = output.split("\n")
   for (const rawLine of lines) {
@@ -36,6 +36,8 @@ export function parseWorktreeList(output: string): WorktreeInfo[] {
           branch: current.branch ?? "",
           commit: current.commit ?? "",
           detached: current.detached ?? false,
+          prunable: current.prunable ?? false,
+          prunableReason: current.prunableReasonRaw ?? null,
         })
       }
       current = null
@@ -60,6 +62,10 @@ export function parseWorktreeList(output: string): WorktreeInfo[] {
         case "detached":
           current.detached = true
           break
+        case "prunable":
+          current.prunable = true
+          current.prunableReasonRaw = value || null
+          break
       }
     }
   }
@@ -71,6 +77,8 @@ export function parseWorktreeList(output: string): WorktreeInfo[] {
       branch: current.branch ?? "",
       commit: current.commit ?? "",
       detached: current.detached ?? false,
+      prunable: current.prunable ?? false,
+      prunableReason: current.prunableReasonRaw ?? null,
     })
   }
 

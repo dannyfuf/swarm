@@ -5,6 +5,8 @@
  * Represents managed worktrees and their lifecycle metadata.
  */
 
+import type { WorktreeContainerMetadata } from "./container.js"
+
 /** A managed git worktree with state metadata. */
 export interface Worktree {
   /** Filesystem-safe slug derived from the branch name. */
@@ -21,6 +23,8 @@ export interface Worktree {
   lastOpenedAt: Date
   /** Associated tmux session name (format: `<repo>--wt--<slug>`). */
   tmuxSession: string
+  /** Stable container metadata persisted in Swarm state. */
+  container?: WorktreeContainerMetadata
   /** Whether this worktree is orphaned (exists in state but not on disk). */
   isOrphaned: boolean
 }

@@ -7,8 +7,10 @@
  * Ports the Go `internal/worktree/manager.go` and `internal/worktree/orphan.go`.
  */
 
+import { existsSync, rmSync } from "node:fs"
 import { join } from "node:path"
 import type { Config } from "../types/config.js"
+import type { WorktreeContainerMetadata } from "../types/container.js"
 import type { Repo } from "../types/repo.js"
 import type { WorktreeState } from "../types/state.js"
 import type { CreateOptions, OrphanedWorktree, Worktree } from "../types/worktree.js"
@@ -44,7 +46,7 @@ export class WorktreeService {
     const worktreePath = this.resolveWorktreePath(repo, slug)
 
     // Add worktree via git
-    this.git.worktreeAdd(repo.path, {
+    await this.git.worktreeAddAsync(repo.path, {
       path: worktreePath,
       branch: opts.branch,
       baseBranch: opts.baseBranch,
@@ -62,6 +64,7 @@ export class WorktreeService {
       createdAt: now,
       lastOpenedAt: now,
       tmuxSession: sessionName,
+      container: undefined,
     }
 
     // Persist to state
@@ -75,6 +78,7 @@ export class WorktreeService {
       createdAt: now,
       lastOpenedAt: now,
       tmuxSession: sessionName,
+      container: undefined,
       isOrphaned: false,
     }
   }
@@ -96,6 +100,12 @@ export class WorktreeService {
       // Skip the main repo worktree (it's the repo itself)
       if (gitWt.path === repo.path) continue
 
+      // Skip stale/prunable entries - these are git admin artifacts from deleted directories
+      if (gitWt.prunable) continue
+
+      // Skip entries whose directories no longer exist on disk
+      if (!existsSync(gitWt.path)) continue
+
       // Find matching state entry by path
       const stateEntry = Object.values(stateWorktrees).find((s) => s.path === gitWt.path)
 
@@ -111,6 +121,7 @@ export class WorktreeService {
         createdAt: stateEntry?.createdAt ?? new Date(),
         lastOpenedAt: stateEntry?.lastOpenedAt ?? new Date(),
         tmuxSession: sessionName,
+        container: stateEntry?.container,
         isOrphaned: false,
       })
     }
@@ -126,6 +137,7 @@ export class WorktreeService {
           createdAt: stateEntry.createdAt,
           lastOpenedAt: stateEntry.lastOpenedAt,
           tmuxSession: stateEntry.tmuxSession,
+          container: stateEntry.container,
           isOrphaned: true,
         })
       }
@@ -134,27 +146,54 @@ export class WorktreeService {
     return worktrees
   }
 
-  /** Remove a worktree (git + state). */
+  /** Remove a worktree (git + filesystem + state). */
   async remove(repo: Repo, wt: Worktree, force = false): Promise<void> {
+    // Safety: never allow deleting the main repo
+    if (wt.path === repo.path) {
+      throw new Error("Cannot delete the main repository worktree")
+    }
+
     // Remove from git (continue on error if force)
+    let gitRemoveSucceeded = false
     try {
       if (force) {
-        this.git.worktreeRemoveForce(repo.path, wt.path)
+        await this.git.worktreeRemoveForceAsync(repo.path, wt.path)
       } else {
-        this.git.worktreeRemove(repo.path, wt.path)
+        await this.git.worktreeRemoveAsync(repo.path, wt.path)
       }
+      gitRemoveSucceeded = true
     } catch (error) {
       if (!force) throw error
       // Force mode: continue even if git removal fails
     }
 
-    // Remove from state
+    // Verify the worktree is no longer in git's list
+    if (gitRemoveSucceeded) {
+      const remainingGitWorktrees = await this.git.worktreeListAsync(repo.path)
+      const stillInGitList = remainingGitWorktrees.some((gwt) => gwt.path === wt.path)
+      if (stillInGitList) {
+        throw new Error(`Worktree still appears in git list after removal: ${wt.path}`)
+      }
+    }
+
+    // If directory still exists, remove it explicitly
+    if (existsSync(wt.path)) {
+      try {
+        rmSync(wt.path, { recursive: true, force: true })
+      } catch (error) {
+        throw new Error(
+          `Failed to remove worktree directory ${wt.path}: ${error instanceof Error ? error.message : String(error)}`,
+        )
+      }
+    }
+
+    // Remove from state (do this last so failures can be retried)
     await this.state.removeWorktree(repo.name, wt.slug)
 
     // Auto-prune if configured
     if (this.config.autoPruneOnRemove) {
       try {
-        this.git.worktreePrune(repo.path)
+        await this.git.worktreePruneAsync(repo.path)
       } catch {
         // Ignore prune errors
       }
@@ -170,9 +209,19 @@ export class WorktreeService {
       createdAt: wt.createdAt,
       lastOpenedAt: new Date(),
       tmuxSession: wt.tmuxSession,
+      container: wt.container,
     }
 
     await this.state.updateWorktree(repo.name, repo.path, repo.defaultBranch, worktreeState)
+  }
+
+  /** Update persisted container metadata for a worktree. */
+  async updateContainerMetadata(
+    repo: Repo,
+    wt: Worktree,
+    container: WorktreeContainerMetadata | undefined,
+  ): Promise<void> {
+    await this.state.updateWorktreeContainer(repo.name, wt.slug, container)
   }
 
   /** Detect orphaned worktrees (in state but not in git). */

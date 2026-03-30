@@ -5,7 +5,8 @@
  */
 
 import type { SelectOption } from "@opentui/core"
-import { useMemo } from "react"
+import { memo, useMemo } from "react"
+import { colors } from "../theme.js"
 import type { Repo } from "../types/repo.js"
 
 interface RepoListProps {
@@ -16,7 +17,13 @@ interface RepoListProps {
   onChange: (index: number, option: SelectOption | null) => void
 }
 
-export function RepoList({ repos, selectedIndex, focused, onSelect, onChange }: RepoListProps) {
+export const RepoList = memo(function RepoList({
+  repos,
+  selectedIndex,
+  focused,
+  onSelect,
+  onChange,
+}: RepoListProps) {
   const options = useMemo(
     () =>
       repos.map((r) => ({
@@ -29,8 +36,10 @@ export function RepoList({ repos, selectedIndex, focused, onSelect, onChange }: 
 
   if (repos.length === 0) {
     return (
-      <text fg="#888888">
-        <em>No repositories found</em>
+      <text>
+        <span fg={colors.textMuted}>
+          <em>No repositories found</em>
+        </span>
       </text>
     )
   }
@@ -46,4 +55,4 @@ export function RepoList({ repos, selectedIndex, focused, onSelect, onChange }: 
       style={{ flexGrow: 1 }}
     />
   )
-}
+})

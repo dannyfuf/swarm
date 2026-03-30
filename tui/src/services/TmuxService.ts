@@ -7,8 +7,8 @@
  * Ports the Go `internal/tmux/client.go` and `internal/tmux/layout.go`.
  */
 
-import type { Layout, Session, WindowInfo } from "../types/tmux.js"
-import { execSync } from "../utils/shell.js"
+import type { Session, WindowInfo } from "../types/tmux.js"
+import { exec, execSync } from "../utils/shell.js"
 
 export class TmuxService {
   /** Check if a tmux session exists. */
@@ -132,66 +132,21 @@ export class TmuxService {
     }
   }
 
-  /**
-   * Apply a layout to a session.
-   * Creates windows and panes as specified, sends commands to each.
-   */
-  applyLayout(sessionName: string, layout: Layout): void {
-    for (let i = 0; i < layout.windows.length; i++) {
-      const win = layout.windows[i]
-
-      if (i === 0) {
-        // First window already exists, rename it
-        execSync("tmux", ["rename-window", "-t", `${sessionName}:1`, win.name])
-
-        if (win.command) {
-          execSync("tmux", ["send-keys", "-t", `${sessionName}:1`, win.command, "Enter"])
-        }
-      } else {
-        // Create new window
-        execSync("tmux", ["new-window", "-t", sessionName, "-n", win.name])
-
-        if (win.command) {
-          execSync("tmux", ["send-keys", "-t", `${sessionName}:${i + 1}`, win.command, "Enter"])
-        }
-      }
-
-      // Create panes for this window
-      for (const pane of win.panes) {
-        const splitFlag = pane.direction === "horizontal" ? "-h" : "-v"
-        const args = ["split-window", splitFlag, "-t", `${sessionName}:${i + 1}`]
-        if (pane.size > 0) {
-          args.push("-p", String(pane.size))
-        }
-        execSync("tmux", args)
-
-        if (pane.command) {
-          execSync("tmux", ["send-keys", "-t", `${sessionName}:${i + 1}`, pane.command, "Enter"])
-        }
-      }
-    }
-
-    // Select the first window
-    execSync("tmux", ["select-window", "-t", `${sessionName}:1`])
-  }
-
-  /** Get the default 3-window layout (editor/shell/tests). */
-  defaultLayout(): Layout {
-    return {
-      windows: [
-        { name: "editor", command: "", panes: [] },
-        { name: "shell", command: "", panes: [] },
-        {
-          name: "tests",
-          command: "",
-          panes: [],
-        },
-      ],
-    }
-  }
-
   /** Check if we're running inside an existing tmux session. */
   private isInsideTmux(): boolean {
     return !!process.env.TMUX
+  }
+
+  // --- Async methods for non-blocking operations ---
+
+  /** Check if a tmux session exists (async). */
+  async hasSessionAsync(name: string): Promise<boolean> {
+    const result = await exec("tmux", ["has-session", "-t", name])
+    return result.success
+  }
+
+  /** Kill a tmux session (async). */
+  async killSessionAsync(name: string): Promise<void> {
+    await exec("tmux", ["kill-session", "-t", name])
   }
 }

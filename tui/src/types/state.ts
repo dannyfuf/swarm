@@ -6,6 +6,8 @@
  * compatibility with the Go version.
  */
 
+import type { WorktreeContainerMetadata } from "./container.js"
+
 /** Top-level state object persisted to `.swarm-state.json`. */
 export interface State {
   /** Schema version for forward-compatibility checks. */
@@ -33,4 +35,5 @@ export interface WorktreeState {
   createdAt: Date
   lastOpenedAt: Date
   tmuxSession: string
+  container?: WorktreeContainerMetadata
 }
