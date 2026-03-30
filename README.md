@@ -119,7 +119,7 @@ worktree_pattern: patternA
 # Create tmux session when creating a worktree
 create_session_on_create: true
 
-# Custom tmux layout script (optional)
+# Custom tmux layout script (optional). Invoked on new session creation as: <script> <session-name> <worktree-path>
 tmux_layout_script: ~/.config/swarm/layout.sh
 
 # Status cache TTL (supports ms, s, m, h suffixes)
