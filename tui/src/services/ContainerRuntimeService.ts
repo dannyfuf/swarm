@@ -283,8 +283,9 @@ export class ContainerRuntimeService {
       cleanupTargets.push(["network", "rm", metadata.networkName])
     }
 
-    if ((metadata.dataVolumeNames?.length ?? 0) > 0) {
-      cleanupTargets.push(["volume", "rm", ...metadata.dataVolumeNames])
+    const dataVolumeNames = metadata.dataVolumeNames
+    if (dataVolumeNames && dataVolumeNames.length > 0) {
+      cleanupTargets.push(["volume", "rm", ...dataVolumeNames])
     }
 
     for (const args of cleanupTargets) {
