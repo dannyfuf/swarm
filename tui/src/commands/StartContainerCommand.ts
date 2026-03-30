@@ -36,8 +36,8 @@ export class StartContainerCommand implements Command {
         return {
           success: false,
           message: scaffold.alreadyExisted
-            ? `Container config is required. Edit ${scaffold.path} and try again.`
-            : `Created container config scaffold at ${scaffold.path}. Edit it and press s again.`,
+            ? `Repo dockerization is required. Add or update ${scaffold.composeFilePath} and try again.`
+            : `Created repo dockerization scaffold at ${scaffold.composeFilePath}. Edit it and press s again.`,
           data: scaffold,
         }
       }
@@ -51,5 +51,5 @@ export class StartContainerCommand implements Command {
 }
 
 function isMissingContainerConfigError(error: unknown): error is Error {
-  return error instanceof Error && error.message.includes("Missing container config for repo")
+  return error instanceof Error && error.message.includes("Missing repo dockerization directory")
 }

@@ -82,4 +82,60 @@ describe("PortAllocatorService", () => {
 
     expect(port).toBe(4301)
   })
+
+  test("honors requested fixed published ports", async () => {
+    await mkdir(tempRoot, { recursive: true })
+    const state = new StateService(tempRoot)
+    const allocator = new PortAllocatorService(config, state)
+
+    const ports = await allocator.allocatePublishedPorts(repo, worktree, [
+      { key: "webpack-proxy:3035", requestedPublishedPort: 4405 },
+    ])
+
+    expect(ports).toEqual({ "webpack-proxy:3035": 4405 })
+  })
+
+  test("overrides persisted dynamic port when compose now requires a fixed port", async () => {
+    await mkdir(tempRoot, { recursive: true })
+    const state = new StateService(tempRoot)
+    await state.updateWorktree(repo.name, repo.path, repo.defaultBranch, {
+      slug: worktree.slug,
+      branch: worktree.branch,
+      path: worktree.path,
+      createdAt: worktree.createdAt,
+      lastOpenedAt: worktree.lastOpenedAt,
+      tmuxSession: worktree.tmuxSession,
+      container: {
+        projectName: "swarm-repo-feature-x",
+        dockerizationDir: "/config/repo",
+        composeFiles: ["/config/repo/docker-compose.yml"],
+        generatedOverridePath: "/build/repo/feature-x/override.yml",
+        generatedEnvPath: "/build/repo/feature-x/.env.worktree",
+        publishedPorts: { "webpack-proxy:3035": 4101 },
+        primaryService: "app",
+        primaryUrl: "http://127.0.0.1:4100",
+      },
+    })
+
+    const allocator = new PortAllocatorService(config, state)
+    const ports = await allocator.allocatePublishedPorts(
+      repo,
+      {
+        ...worktree,
+        container: {
+          projectName: "swarm-repo-feature-x",
+          dockerizationDir: "/config/repo",
+          composeFiles: ["/config/repo/docker-compose.yml"],
+          generatedOverridePath: "/build/repo/feature-x/override.yml",
+          generatedEnvPath: "/build/repo/feature-x/.env.worktree",
+          publishedPorts: { "webpack-proxy:3035": 4101 },
+          primaryService: "app",
+          primaryUrl: "http://127.0.0.1:4100",
+        },
+      },
+      [{ key: "webpack-proxy:3035", requestedPublishedPort: 4405 }],
+    )
+
+    expect(ports).toEqual({ "webpack-proxy:3035": 4405 })
+  })
 })

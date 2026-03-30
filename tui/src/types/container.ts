@@ -11,36 +11,16 @@ export interface RepoIdentity {
   key: string
 }
 
-export interface ContainerProcessConfig {
-  name: string
-  command: string
-  expose: boolean
-  internalPort: number | null
-}
-
-export interface ContainerConfig {
-  schemaVersion: 1
-  repoPath: string
-  preset: ContainerPreset
-  runtime: {
-    baseImage: string
-    packages: string[]
-  }
-  env: {
-    file: string | null
-    vars: Record<string, string>
-  }
-  build: {
-    install: string | null
-  }
-  setup: {
-    command: string | null
-  }
-  processes: ContainerProcessConfig[]
+export interface RepoDockerization {
+  dockerizationDir: string
+  composeFilePath: string
+  envFilePath: string | null
+  startupScriptPath: string | null
 }
 
 export interface ContainerConfigScaffold {
   path: string
+  composeFilePath: string
   alreadyExisted: boolean
   contents: string
 }
@@ -53,6 +33,9 @@ export type ContainerConfigSummary =
       exists: false
       isValid: false
       preset: null
+      dockerizationDir?: string
+      composeFilePath?: null
+      envFilePath?: null
       error: null
     }
   | {
@@ -61,44 +44,55 @@ export type ContainerConfigSummary =
       resolvedPath: string
       exists: true
       isValid: true
-      preset: ContainerPreset
+      preset: null
+      dockerizationDir?: string
+      composeFilePath?: string
+      envFilePath?: string | null
       error: null
     }
   | {
       state: "invalid"
       path: string
-      resolvedPath: string
-      exists: true
+      resolvedPath: string | null
+      exists: boolean
       isValid: false
       preset: null
+      dockerizationDir?: string
+      composeFilePath?: string | null
+      envFilePath?: string | null
       error: string
     }
 
 export interface WorktreeContainerMetadata {
-  primaryHostPort: number
-  containerName: string
-  networkName: string
-  dataVolumeNames: string[]
-  baseImageTag: string
-  dependencyImageTag: string
-  dependencyFingerprint: string
+  projectName?: string
+  dockerizationDir?: string
+  composeFiles?: string[]
+  activeProfiles?: string[]
+  generatedOverridePath?: string
+  generatedEnvPath?: string
+  publishedPorts?: Record<string, number>
+  primaryService?: string
+  primaryUrl?: string | null
+  primaryHostPort?: number
+  containerName?: string
+  networkName?: string
+  dataVolumeNames?: string[]
+  baseImageTag?: string
+  dependencyImageTag?: string
+  dependencyFingerprint?: string
 }
 
 export interface ContainerArtifacts {
   buildDir: string
-  baseDockerfilePath: string
-  dependencyDockerfilePath: string
-  dependencyContextDir: string
-  entrypointPath: string
-  processScriptPaths: string[]
+  generatedOverridePath: string
+  generatedEnvPath: string
+  composePlanPath: string
 }
 
 export interface ContainerBuildPlan {
   repoIdentity: RepoIdentity
-  config: ContainerConfig
-  dependencyFingerprint: string
-  baseImageTag: string
-  dependencyImageTag: string
+  dockerization: RepoDockerization
+  metadata: WorktreeContainerMetadata
   artifacts: ContainerArtifacts
   warning: string | null
 }
@@ -107,12 +101,19 @@ export type ContainerHealth = "healthy" | "unhealthy" | "starting" | "none"
 
 export type ContainerRuntimeState = "not-created" | "running" | "stopped" | "failed" | "unknown"
 
+export interface ContainerServiceStatus {
+  name: string
+  state: ContainerRuntimeState
+  health: ContainerHealth
+}
+
 export interface ContainerRuntimeStatus {
   state: ContainerRuntimeState
   health: ContainerHealth
   primaryUrl: string | null
   message: string
   warning: string | null
+  services?: ContainerServiceStatus[]
 }
 
 export interface StartContainerResult {

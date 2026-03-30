@@ -15,7 +15,7 @@ export class RepoIdentityService {
       name,
       path: repoPath,
       pathHash,
-      key: `${name}--${pathHash}`,
+      key: name,
     }
   }
 }

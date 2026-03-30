@@ -44,16 +44,13 @@ const repoIdentityService = new RepoIdentityService()
 const containerConfigService = new ContainerConfigService(repoIdentityService)
 const dependencyFingerprintService = new DependencyFingerprintService()
 const dockerArtifactService = new DockerArtifactService()
+const portAllocatorService = new PortAllocatorService(config, stateService)
 const containerBuildService = new ContainerBuildService(
   containerConfigService,
-  dependencyFingerprintService,
   dockerArtifactService,
-)
-const portAllocatorService = new PortAllocatorService(config, stateService)
-const containerRuntimeService = new ContainerRuntimeService(
-  containerBuildService,
   portAllocatorService,
 )
+const containerRuntimeService = new ContainerRuntimeService(containerBuildService)
 const githubService = new GitHubService()
 
 const services: Services = {

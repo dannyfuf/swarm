@@ -4,6 +4,7 @@
 
 import type { ContainerBuildService } from "../services/ContainerBuildService.js"
 import type { ContainerConfigService } from "../services/ContainerConfigService.js"
+import type { ContainerRuntimeService } from "../services/ContainerRuntimeService.js"
 import type { Repo } from "../types/repo.js"
 import type { Worktree } from "../types/worktree.js"
 import type { Command, CommandResult } from "./Command.js"
@@ -11,23 +12,25 @@ import type { Command, CommandResult } from "./Command.js"
 export class BuildContainerImageCommand implements Command {
   constructor(
     private readonly containerConfigService: ContainerConfigService,
-    private readonly containerBuildService: ContainerBuildService,
+    _containerBuildService: ContainerBuildService,
+    private readonly containerRuntimeService: ContainerRuntimeService,
     private readonly repo: Repo,
     private readonly worktree?: Worktree,
-  ) {}
+  ) {
+    void _containerBuildService
+  }
 
   async execute(): Promise<CommandResult> {
     try {
-      const plan = await this.containerBuildService.buildForRepo(
-        this.repo.path,
-        this.worktree?.path ?? this.repo.path,
-        this.worktree?.container,
-        true,
-      )
+      if (!this.worktree) {
+        throw new Error("Container builds must be run from a managed worktree.")
+      }
+
+      const plan = await this.containerRuntimeService.build(this.repo, this.worktree)
 
       return {
         success: true,
-        message: `Built container images for ${this.repo.name}`,
+        message: `Built compose services for ${this.repo.name}`,
         data: plan,
       }
     } catch (error) {
@@ -36,8 +39,8 @@ export class BuildContainerImageCommand implements Command {
         return {
           success: false,
           message: scaffold.alreadyExisted
-            ? `Container config is required. Edit ${scaffold.path} and try again.`
-            : `Created container config scaffold at ${scaffold.path}. Edit it and press i again.`,
+            ? `Repo dockerization is required. Add or update ${scaffold.composeFilePath} and try again.`
+            : `Created repo dockerization scaffold at ${scaffold.composeFilePath}. Edit it and press i again.`,
           data: scaffold,
         }
       }
@@ -51,5 +54,5 @@ export class BuildContainerImageCommand implements Command {
 }
 
 function isMissingContainerConfigError(error: unknown): error is Error {
-  return error instanceof Error && error.message.includes("Missing container config for repo")
+  return error instanceof Error && error.message.includes("Missing repo dockerization directory")
 }

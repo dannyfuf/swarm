@@ -18,8 +18,8 @@ export class EnsureContainerConfigCommand implements Command {
       return {
         success: true,
         message: scaffold.alreadyExisted
-          ? `Container config already exists at ${scaffold.path}`
-          : `Created container config scaffold at ${scaffold.path}`,
+          ? `Repo dockerization already exists at ${scaffold.composeFilePath}`
+          : `Created repo dockerization scaffold at ${scaffold.composeFilePath}`,
         data: scaffold,
       }
     } catch (error) {

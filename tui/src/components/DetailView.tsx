@@ -61,7 +61,7 @@ function formatConfigState(summary: ContainerConfigSummary): string {
     case "missing":
       return "missing"
     case "present":
-      return summary.preset ? `present (${summary.preset})` : "present"
+      return "present"
     case "invalid":
       return "invalid"
   }
@@ -168,16 +168,17 @@ export const DetailView = memo(function DetailView({
       {worktree.container ? (
         <>
           <DetailRow label="URL">
-            {containerStatus?.primaryUrl ??
-              `http://127.0.0.1:${worktree.container.primaryHostPort}`}
+            {containerStatus?.primaryUrl ?? worktree.container.primaryUrl ?? "n/a"}
           </DetailRow>
           <DetailRow label="Health">{containerStatus?.health ?? "unknown"}</DetailRow>
-          <DetailRow label="Name">{worktree.container.containerName}</DetailRow>
-          <DetailRow label="Network">{worktree.container.networkName}</DetailRow>
-          <DetailRow label="Images">
-            {`${worktree.container.baseImageTag} / ${worktree.container.dependencyImageTag}`}
+          <DetailRow label="Project">{worktree.container.projectName}</DetailRow>
+          <DetailRow label="Service">{worktree.container.primaryService}</DetailRow>
+          <DetailRow label="Compose">
+            {worktree.container.composeFiles?.join(", ") || "n/a"}
           </DetailRow>
-          <DetailRow label="Fingerprint">{worktree.container.dependencyFingerprint}</DetailRow>
+          <DetailRow label="Ports">
+            {formatPublishedPorts(worktree.container.publishedPorts ?? {})}
+          </DetailRow>
           {containerStatus?.warning ? (
             <text>
               <span fg={colors.warning}>
@@ -213,3 +214,12 @@ export const DetailView = memo(function DetailView({
     </box>
   )
 })
+
+function formatPublishedPorts(publishedPorts: Record<string, number>): string {
+  const entries = Object.entries(publishedPorts)
+  if (entries.length === 0) {
+    return "n/a"
+  }
+
+  return entries.map(([key, value]) => `${key}=${value}`).join(", ")
+}

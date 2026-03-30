@@ -226,34 +226,51 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function parseContainerMetadata(value: unknown): WorktreeContainerMetadata | undefined {
   if (!isRecord(value)) return undefined
 
+  if (
+    typeof value.projectName === "string" &&
+    typeof value.dockerizationDir === "string" &&
+    Array.isArray(value.composeFiles) &&
+    value.composeFiles.every((entry) => typeof entry === "string") &&
+    (value.activeProfiles === undefined ||
+      (Array.isArray(value.activeProfiles) &&
+        value.activeProfiles.every((entry) => typeof entry === "string"))) &&
+    typeof value.generatedOverridePath === "string" &&
+    typeof value.generatedEnvPath === "string" &&
+    isNumberRecord(value.publishedPorts) &&
+    typeof value.primaryService === "string" &&
+    (typeof value.primaryUrl === "string" || value.primaryUrl === null)
+  ) {
+    return {
+      projectName: value.projectName,
+      dockerizationDir: value.dockerizationDir,
+      composeFiles: value.composeFiles,
+      activeProfiles: value.activeProfiles,
+      generatedOverridePath: value.generatedOverridePath,
+      generatedEnvPath: value.generatedEnvPath,
+      publishedPorts: value.publishedPorts,
+      primaryService: value.primaryService,
+      primaryUrl: value.primaryUrl,
+    }
+  }
+
   const primaryHostPort = value.primaryHostPort
   const containerName = value.containerName
-  const networkName = value.networkName
-  const dataVolumeNames = value.dataVolumeNames
-  const baseImageTag = value.baseImageTag
-  const dependencyImageTag = value.dependencyImageTag
-  const dependencyFingerprint = value.dependencyFingerprint
-
-  if (
-    typeof primaryHostPort !== "number" ||
-    typeof containerName !== "string" ||
-    typeof networkName !== "string" ||
-    !Array.isArray(dataVolumeNames) ||
-    dataVolumeNames.some((entry) => typeof entry !== "string") ||
-    typeof baseImageTag !== "string" ||
-    typeof dependencyImageTag !== "string" ||
-    typeof dependencyFingerprint !== "string"
-  ) {
+  if (typeof primaryHostPort !== "number" || typeof containerName !== "string") {
     return undefined
   }
 
   return {
-    primaryHostPort,
-    containerName,
-    networkName,
-    dataVolumeNames,
-    baseImageTag,
-    dependencyImageTag,
-    dependencyFingerprint,
+    projectName: containerName,
+    dockerizationDir: "",
+    composeFiles: [],
+    generatedOverridePath: "",
+    generatedEnvPath: "",
+    publishedPorts: { primary: primaryHostPort },
+    primaryService: "app",
+    primaryUrl: `http://127.0.0.1:${primaryHostPort}`,
   }
+}
+
+function isNumberRecord(value: unknown): value is Record<string, number> {
+  return isRecord(value) && Object.values(value).every((entry) => typeof entry === "number")
 }

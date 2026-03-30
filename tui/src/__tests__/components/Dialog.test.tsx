@@ -119,13 +119,14 @@ const mockWorktree: Worktree = {
   lastOpenedAt: new Date("2026-01-16T14:00:00Z"),
   tmuxSession: "test-repo--wt--feature_auth",
   container: {
-    primaryHostPort: 4301,
-    containerName: "test-container",
-    networkName: "test-network",
-    dataVolumeNames: ["test-volume"],
-    baseImageTag: "swarm/test:base",
-    dependencyImageTag: "swarm/test:deps-abc",
-    dependencyFingerprint: "abc",
+    projectName: "swarm-test-repo-feature-auth",
+    dockerizationDir: "/tmp/dockerization",
+    composeFiles: ["/tmp/docker-compose.yml", "/tmp/docker-compose.override.yml"],
+    generatedOverridePath: "/tmp/docker-compose.override.yml",
+    generatedEnvPath: "/tmp/.env.worktree",
+    publishedPorts: { APP_PORT: 4301 },
+    primaryService: "app",
+    primaryUrl: "http://127.0.0.1:4301",
   },
   isOrphaned: false,
 }
@@ -138,7 +139,7 @@ describe("DetailView", () => {
       resolvedPath: "/tmp/config.yml",
       exists: true,
       isValid: true,
-      preset: "node-web",
+      preset: null,
       error: null,
     }
 
@@ -168,8 +169,7 @@ describe("DetailView", () => {
     expect(frame).toContain("test-repo")
     expect(frame).toContain("Config")
     expect(frame).toContain("present")
-    expect(frame).toContain("node-web")
-    expect(frame).toContain("test-container")
+    expect(frame).toContain("swarm-test-repo-feature-auth")
   })
 
   test("renders container warning in detail view", async () => {
@@ -246,7 +246,7 @@ describe("DetailView", () => {
       resolvedPath: "/tmp/config.yml",
       exists: true,
       isValid: true,
-      preset: "node-web",
+      preset: null,
       error: null,
     }
 

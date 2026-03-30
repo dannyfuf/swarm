@@ -1,135 +1,128 @@
 /**
- * Builds repo base images and dependency-variant images for worktree containers.
+ * Prepares and builds worktree-scoped Docker Compose plans.
  */
 
+import { basename } from "node:path"
 import type { ContainerBuildPlan, WorktreeContainerMetadata } from "../types/container.js"
+import type { Repo } from "../types/repo.js"
+import type { Worktree } from "../types/worktree.js"
 import type { AsyncCommandRunner } from "../utils/shell.js"
 import { exec } from "../utils/shell.js"
 import type { ContainerConfigService } from "./ContainerConfigService.js"
-import type { DependencyFingerprintService } from "./DependencyFingerprintService.js"
 import type { DockerArtifactService } from "./DockerArtifactService.js"
+import type { PortAllocatorService } from "./PortAllocatorService.js"
 
 export class ContainerBuildService {
   constructor(
     private readonly containerConfigService: ContainerConfigService,
-    private readonly dependencyFingerprintService: DependencyFingerprintService,
     private readonly dockerArtifactService: DockerArtifactService,
+    private readonly portAllocatorService: PortAllocatorService,
     private readonly runCommand: AsyncCommandRunner = exec,
   ) {}
+
+  async planForWorktree(repo: Repo, worktree: Worktree): Promise<ContainerBuildPlan> {
+    const resolvedConfig = await this.containerConfigService.loadForRepo(repo.path)
+    const generated = await this.dockerArtifactService.generateArtifacts({
+      repoPath: repo.path,
+      worktreePath: worktree.path,
+      worktreeSlug: worktree.slug,
+      repoIdentity: resolvedConfig.identity,
+      dockerization: resolvedConfig.config,
+      existingMetadata: worktree.container,
+      allocatePublishedPorts: (portRequests) =>
+        this.portAllocatorService.allocatePublishedPorts(repo, worktree, portRequests),
+    })
+
+    return {
+      repoIdentity: resolvedConfig.identity,
+      dockerization: resolvedConfig.config,
+      metadata: generated.metadata,
+      artifacts: generated.artifacts,
+      warning: null,
+    }
+  }
+
+  async buildForWorktree(repo: Repo, worktree: Worktree): Promise<ContainerBuildPlan> {
+    const plan = await this.planForWorktree(repo, worktree)
+    await this.ensureDockerComposeAvailable()
+
+    const result = await this.runCommand("docker", buildComposeArgs(plan, ["build"]))
+    if (!result.success) {
+      throw new Error(`Docker compose build failed: ${result.stderr || result.stdout}`)
+    }
+
+    return plan
+  }
 
   async buildForRepo(
     repoPath: string,
     sourcePath: string,
     existingMetadata?: WorktreeContainerMetadata,
-    force = false,
   ): Promise<ContainerBuildPlan> {
-    const resolvedConfig = await this.containerConfigService.loadForRepo(repoPath)
-    const dependency = await this.dependencyFingerprintService.compute(
-      sourcePath,
-      resolvedConfig.config.preset,
+    return this.buildForWorktree(
+      toRepo(repoPath),
+      toWorktree(repoPath, sourcePath, existingMetadata),
     )
-
-    const baseImageTag = `swarm/${resolvedConfig.identity.name}:base-${resolvedConfig.identity.pathHash}`
-    const currentDependencyImageTag = `swarm/${resolvedConfig.identity.name}:deps-${resolvedConfig.identity.pathHash}-${dependency.fingerprint}`
-
-    const shouldWarnOnDrift =
-      !force &&
-      existingMetadata !== undefined &&
-      existingMetadata.dependencyFingerprint !== dependency.fingerprint
-
-    const dependencyFingerprint = shouldWarnOnDrift
-      ? existingMetadata.dependencyFingerprint
-      : dependency.fingerprint
-    const dependencyImageTag = shouldWarnOnDrift
-      ? existingMetadata.dependencyImageTag
-      : currentDependencyImageTag
-
-    const artifacts = await this.dockerArtifactService.generateArtifacts({
-      sourcePath,
-      repoIdentity: resolvedConfig.identity,
-      config: resolvedConfig.config,
-      baseImageTag,
-      dependencyFingerprint: dependency.fingerprint,
-      manifestPaths: dependency.manifestPaths,
-    })
-
-    const warning = shouldWarnOnDrift
-      ? `Dependency manifests changed since the last built image for this worktree. Existing fingerprint: ${existingMetadata.dependencyFingerprint}, current fingerprint: ${dependency.fingerprint}.`
-      : null
-
-    await this.ensureDockerAvailable()
-    await this.ensureImage(baseImageTag, artifacts.baseDockerfilePath, artifacts.buildDir, force)
-    await this.ensureImage(
-      dependencyImageTag,
-      artifacts.dependencyDockerfilePath,
-      artifacts.dependencyContextDir,
-      force || !shouldWarnOnDrift,
-    )
-
-    return {
-      repoIdentity: resolvedConfig.identity,
-      config: resolvedConfig.config,
-      dependencyFingerprint,
-      baseImageTag,
-      dependencyImageTag,
-      artifacts,
-      warning,
-    }
   }
 
   async detectDependencyDrift(
-    repoPath: string,
-    sourcePath: string,
-    metadata?: WorktreeContainerMetadata,
+    _repo: Repo | string,
+    _worktree: Worktree | string,
+    _metadata?: WorktreeContainerMetadata,
   ): Promise<string | null> {
-    if (!metadata) {
-      return null
-    }
-
-    const resolvedConfig = await this.containerConfigService.loadForRepo(repoPath)
-    const dependency = await this.dependencyFingerprintService.compute(
-      sourcePath,
-      resolvedConfig.config.preset,
-    )
-
-    if (dependency.fingerprint === metadata.dependencyFingerprint) {
-      return null
-    }
-
-    return `Dependency image is stale. Built fingerprint ${metadata.dependencyFingerprint}, current fingerprint ${dependency.fingerprint}. Run a rebuild with \`i\` or \`swarm container build\`.`
+    return null
   }
 
-  private async ensureDockerAvailable(): Promise<void> {
-    const result = await this.runCommand("docker", ["info"])
+  private async ensureDockerComposeAvailable(): Promise<void> {
+    const result = await this.runCommand("docker", ["compose", "version"])
     if (!result.success) {
-      throw new Error(`Docker is unavailable: ${result.stderr || result.stdout}`)
+      throw new Error(`Docker Compose is unavailable: ${result.stderr || result.stdout}`)
     }
   }
+}
 
-  private async ensureImage(
-    tag: string,
-    dockerfilePath: string,
-    contextDir: string,
-    force: boolean,
-  ): Promise<void> {
-    if (!force) {
-      const inspectResult = await this.runCommand("docker", ["image", "inspect", tag])
-      if (inspectResult.success) {
-        return
-      }
-    }
-
-    const buildResult = await this.runCommand("docker", [
-      "build",
-      "-t",
-      tag,
-      "-f",
-      dockerfilePath,
-      contextDir,
-    ])
-
-    if (!buildResult.success) {
-      throw new Error(`Docker build failed for ${tag}: ${buildResult.stderr || buildResult.stdout}`)
-    }
+function toRepo(repoPath: string): Repo {
+  return {
+    name: basename(repoPath),
+    path: repoPath,
+    defaultBranch: "main",
+    lastScanned: new Date(),
   }
+}
+
+function toWorktree(
+  repoPath: string,
+  sourcePath: string,
+  existingMetadata?: WorktreeContainerMetadata,
+): Worktree {
+  const slug = basename(sourcePath)
+
+  return {
+    slug,
+    branch: slug,
+    path: sourcePath,
+    repoName: basename(repoPath),
+    createdAt: new Date(),
+    lastOpenedAt: new Date(),
+    tmuxSession: `${basename(repoPath)}--wt--${slug}`,
+    container: existingMetadata,
+    isOrphaned: false,
+  }
+}
+
+export function buildComposeArgs(plan: ContainerBuildPlan, trailingArgs: string[]): string[] {
+  const composeArgs = ["compose"]
+
+  for (const profile of plan.metadata.activeProfiles ?? []) {
+    composeArgs.push("--profile", profile)
+  }
+
+  for (const composeFile of plan.metadata.composeFiles ?? []) {
+    composeArgs.push("-f", composeFile)
+  }
+
+  composeArgs.push("--project-name", plan.metadata.projectName ?? "swarm")
+  composeArgs.push("--env-file", plan.metadata.generatedEnvPath ?? "/dev/null")
+
+  return [...composeArgs, ...trailingArgs]
 }

@@ -21,15 +21,16 @@ export async function runCli(args: string[], services: Services): Promise<number
         const command = new BuildContainerImageCommand(
           services.containerConfig,
           services.containerBuild,
+          services.containerRuntime,
           context.repo,
           context.worktree ?? undefined,
         )
         const result = await command.execute()
         if (!result.success) {
-          const scaffold = result.data as { path?: string } | undefined
-          if (scaffold?.path) {
+          const scaffold = result.data as { composeFilePath?: string } | undefined
+          if (scaffold?.composeFilePath) {
             console.log(result.message)
-            console.log(`path=${scaffold.path}`)
+            console.log(`path=${scaffold.composeFilePath}`)
             return 1
           }
           throw new Error(result.message)
@@ -50,6 +51,7 @@ export async function runCli(args: string[], services: Services): Promise<number
         const scaffold = result.data as { path: string }
         console.log(result.message)
         console.log(`path=${scaffold.path}`)
+        console.log(`compose=${(result.data as { composeFilePath: string }).composeFilePath}`)
         return 0
       }
       case "up": {
@@ -65,10 +67,10 @@ export async function runCli(args: string[], services: Services): Promise<number
         )
         const result = await command.execute()
         if (!result.success) {
-          const scaffold = result.data as { path?: string } | undefined
-          if (scaffold?.path) {
+          const scaffold = result.data as { composeFilePath?: string } | undefined
+          if (scaffold?.composeFilePath) {
             console.log(result.message)
-            console.log(`path=${scaffold.path}`)
+            console.log(`path=${scaffold.composeFilePath}`)
             return 1
           }
           throw new Error(result.message)
@@ -124,14 +126,6 @@ export async function runCli(args: string[], services: Services): Promise<number
       case "logs": {
         if (!context.worktree) {
           throw new Error("`swarm container logs` must be run inside a worktree directory.")
-        }
-        const scaffoldCommand = new EnsureContainerConfigCommand(
-          services.containerConfig,
-          context.repo,
-        )
-        const scaffold = await scaffoldCommand.execute()
-        if (!scaffold.success) {
-          throw new Error(scaffold.message)
         }
         const output = await services.containerRuntime.logs(context.worktree)
         console.log(`== ${context.worktree.branch} container logs ==`)

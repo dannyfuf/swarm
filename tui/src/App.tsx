@@ -303,13 +303,13 @@ export function App() {
           }
           await handleRefresh({ quiet: true })
         } else {
-          const scaffold = result.data as { path?: string; alreadyExisted?: boolean } | undefined
-          if (scaffold?.path) {
+          const scaffold = result.data as { composeFilePath?: string; path?: string } | undefined
+          if (scaffold?.composeFilePath || scaffold?.path) {
             dispatch({
               type: "SHOW_DIALOG",
               dialogType: "help",
-              title: "Container Config Created",
-              message: `${result.message}\n\nPath:\n${scaffold.path}\n\nUpdate the preset, commands, env file, and exposed port for this repo, then try again.`,
+              title: "Repo Dockerization Created",
+              message: `${result.message}\n\nPath:\n${scaffold.composeFilePath ?? scaffold.path}\n\nUpdate the compose definition, then try again.`,
             })
           }
           dispatch({ type: "SET_ERROR", message: result.message })
@@ -367,6 +367,7 @@ export function App() {
         const cmd = new BuildContainerImageCommand(
           services.containerConfig,
           services.containerBuild,
+          services.containerRuntime,
           selectedRepo,
           state.selectedWorktree ?? undefined,
         )
@@ -375,13 +376,13 @@ export function App() {
           dispatch({ type: "SET_STATUS", message: result.message })
           await handleRefresh({ quiet: true })
         } else {
-          const scaffold = result.data as { path?: string; alreadyExisted?: boolean } | undefined
-          if (scaffold?.path) {
+          const scaffold = result.data as { composeFilePath?: string; path?: string } | undefined
+          if (scaffold?.composeFilePath || scaffold?.path) {
             dispatch({
               type: "SHOW_DIALOG",
               dialogType: "help",
-              title: "Container Config Created",
-              message: `${result.message}\n\nPath:\n${scaffold.path}\n\nUpdate the preset and commands, then run the build again.`,
+              title: "Repo Dockerization Created",
+              message: `${result.message}\n\nPath:\n${scaffold.composeFilePath ?? scaffold.path}\n\nUpdate the compose definition, then run the build again.`,
             })
           }
           dispatch({ type: "SET_ERROR", message: result.message })
@@ -393,6 +394,7 @@ export function App() {
     state.selectedWorktree,
     services.containerConfig,
     services.containerBuild,
+    services.containerRuntime,
     dispatch,
     handleRefresh,
     trackActivity,
@@ -405,14 +407,14 @@ export function App() {
     const result = await cmd.execute()
 
     if (result.success) {
-      const scaffold = result.data as { path: string }
+      const scaffold = result.data as { path: string; composeFilePath: string }
       await loadContainerConfigSummary(state.selectedRepo.path)
       dispatch({ type: "SET_STATUS", message: result.message })
       dispatch({
         type: "SHOW_DIALOG",
         dialogType: "help",
-        title: "Container Config",
-        message: `${result.message}\n\nPath:\n${scaffold.path}\n\nSwarm created a starter file you can fill in now.`,
+        title: "Repo Dockerization",
+        message: `${result.message}\n\nDirectory:\n${scaffold.path}\n\nCompose file:\n${scaffold.composeFilePath}\n\nSwarm created a starter compose definition you can fill in now.`,
       })
     } else {
       dispatch({ type: "SET_ERROR", message: result.message })

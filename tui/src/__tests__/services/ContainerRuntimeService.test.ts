@@ -1,6 +1,8 @@
+import { mkdtemp, mkdir, stat } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { describe, expect, test } from "bun:test"
 import { ContainerRuntimeService } from "../../services/ContainerRuntimeService.js"
-import type { ContainerRuntimeStatus } from "../../types/container.js"
 import type { Repo } from "../../types/repo.js"
 import type { Worktree } from "../../types/worktree.js"
 
@@ -23,80 +25,52 @@ const worktree: Worktree = {
 }
 
 describe("ContainerRuntimeService", () => {
-  test("starts container with expected docker args", async () => {
+  test("starts compose environment with expected args", async () => {
     const calls: string[][] = []
-    let containerInspectCount = 0
     const service = new ContainerRuntimeService(
       {
-        buildForRepo: async () => ({
-          repoIdentity: { name: "repo", path: "/repo", pathHash: "abc123", key: "repo--abc123" },
-          config: {
-            schemaVersion: 1,
-            repoPath: "/repo",
-            preset: "node-web",
-            runtime: { baseImage: "node:22", packages: [] },
-            env: { file: null, vars: { NODE_ENV: "development" } },
-            build: { install: "bun install" },
-            setup: { command: null },
-            processes: [{ name: "app", command: "bun run dev", expose: true, internalPort: 3000 }],
+        planForWorktree: async () => ({
+          repoIdentity: { name: "repo", path: "/repo", pathHash: "abc123", key: "repo" },
+          dockerization: {
+            dockerizationDir: "/config/repo",
+            composeFilePath: "/config/repo/docker-compose.yml",
+            envFilePath: "/config/repo/.env",
+            startupScriptPath: null,
           },
-          dependencyFingerprint: "fingerprint",
-          baseImageTag: "swarm/repo:base-abc123",
-          dependencyImageTag: "swarm/repo:deps-abc123-fingerprint",
+          metadata: {
+            projectName: "swarm-repo-feature-x",
+            dockerizationDir: "/config/repo",
+            composeFiles: [
+              "/config/repo/docker-compose.yml",
+              "/build/repo/feature-x/docker-compose.override.yml",
+            ],
+            activeProfiles: ["proxy"],
+            generatedOverridePath: "/build/repo/feature-x/docker-compose.override.yml",
+            generatedEnvPath: "/build/repo/feature-x/.env.worktree",
+            publishedPorts: { APP_PORT: 4301 },
+            primaryService: "app",
+            primaryUrl: "http://127.0.0.1:4301",
+          },
           artifacts: {
-            buildDir: "/build",
-            baseDockerfilePath: "/build/Dockerfile.base",
-            dependencyDockerfilePath: "/build/variant/Dockerfile",
-            dependencyContextDir: "/build/variant",
-            entrypointPath: "/build/variant/entrypoint.sh",
-            processScriptPaths: [],
+            buildDir: "/build/repo/feature-x",
+            generatedOverridePath: "/build/repo/feature-x/docker-compose.override.yml",
+            generatedEnvPath: "/build/repo/feature-x/.env.worktree",
+            composePlanPath: "/build/repo/feature-x/compose-plan.json",
           },
           warning: null,
         }),
+        detectDependencyDrift: async () => null,
       } as never,
-      {
-        allocate: async () => 4301,
-      } as never,
-      async (_command, args) => {
+      async (_command: string, args: string[]) => {
         calls.push(args)
 
-        if (args[0] === "network" && args[1] === "inspect") {
-          return { stdout: "", stderr: "not found", exitCode: 1, success: false }
-        }
-
-        if (args[0] === "volume" && args[1] === "inspect") {
-          return { stdout: "", stderr: "not found", exitCode: 1, success: false }
-        }
-
-        if (args[0] === "network" && args[1] === "create") {
-          return { stdout: "created", stderr: "", exitCode: 0, success: true }
-        }
-
-        if (args[0] === "volume" && args[1] === "create") {
-          return { stdout: "created", stderr: "", exitCode: 0, success: true }
-        }
-
-        if (args[0] === "inspect") {
-          containerInspectCount += 1
-          if (containerInspectCount === 1) {
-            return { stdout: "", stderr: "No such object", exitCode: 1, success: false }
-          }
-
+        if (args.includes("ps")) {
           return {
-            stdout: JSON.stringify({
-              Running: true,
-              ExitCode: 0,
-              Status: "running",
-              Health: { Status: "healthy" },
-            }),
+            stdout: JSON.stringify([{ Service: "app", State: "running", Health: "healthy" }]),
             stderr: "",
             exitCode: 0,
             success: true,
           }
-        }
-
-        if (args[0] === "run") {
-          return { stdout: "container-id", stderr: "", exitCode: 0, success: true }
         }
 
         return { stdout: "ok", stderr: "", exitCode: 0, success: true }
@@ -104,33 +78,263 @@ describe("ContainerRuntimeService", () => {
     )
 
     const result = await service.start(repo, worktree)
-    const runCall = calls.find((args) => args[0] === "run")
 
-    expect(runCall).toBeDefined()
-    expect(runCall).toContain("-p")
-    expect(runCall).toContain("4301:3000")
-    expect(runCall).toContain("-e")
-    expect(runCall).toContain("NODE_ENV=development")
-    expect(result.metadata.primaryHostPort).toBe(4301)
+    expect(calls[0]).toEqual([
+      "compose",
+      "--profile",
+      "proxy",
+      "-f",
+      "/config/repo/docker-compose.yml",
+      "-f",
+      "/build/repo/feature-x/docker-compose.override.yml",
+      "--project-name",
+      "swarm-repo-feature-x",
+      "--env-file",
+      "/build/repo/feature-x/.env.worktree",
+      "up",
+      "-d",
+    ])
+    expect(result.metadata.publishedPorts).toEqual({ APP_PORT: 4301 })
+    expect(result.status.state).toBe("running")
   })
 
-  test("returns stale warning in live status", async () => {
+  test("uses compose down with volume cleanup when removing environment", async () => {
+    const calls: string[][] = []
+    const buildDir = await mkdtemp(join(tmpdir(), "swarm-container-runtime-"))
+    await mkdir(join(buildDir, "feature-x"))
+    const generatedEnvPath = join(buildDir, "feature-x", ".env.worktree")
     const service = new ContainerRuntimeService(
       {
-        detectDependencyDrift: async () => "Dependency image is stale.",
+        detectDependencyDrift: async () => null,
       } as never,
+      async (_command: string, args: string[]) => {
+        calls.push(args)
+        return { stdout: "ok", stderr: "", exitCode: 0, success: true }
+      },
+    )
+
+    await service.removeEnvironment({
+      ...worktree,
+      container: {
+        projectName: "swarm-repo-feature-x",
+        dockerizationDir: "/config/repo",
+        composeFiles: ["/config/repo/docker-compose.yml", join(buildDir, "feature-x", "override.yml")],
+        activeProfiles: ["proxy"],
+        generatedOverridePath: join(buildDir, "feature-x", "override.yml"),
+        generatedEnvPath,
+        publishedPorts: { APP_PORT: 4301 },
+        primaryService: "app",
+        primaryUrl: "http://127.0.0.1:4301",
+      },
+    })
+
+    expect(calls[0]).toEqual([
+      "compose",
+      "--profile",
+      "proxy",
+      "-f",
+      "/config/repo/docker-compose.yml",
+      "-f",
+      join(buildDir, "feature-x", "override.yml"),
+      "--project-name",
+      "swarm-repo-feature-x",
+      "--env-file",
+      generatedEnvPath,
+      "down",
+      "-v",
+      "--remove-orphans",
+    ])
+    await expect(stat(join(buildDir, "feature-x"))).rejects.toThrow()
+  })
+
+  test("falls back to dangling resource cleanup when compose artifacts are missing", async () => {
+    const calls: string[][] = []
+    const buildDir = await mkdtemp(join(tmpdir(), "swarm-container-runtime-"))
+    const worktreeBuildDir = join(buildDir, "test-1")
+    await mkdir(worktreeBuildDir)
+    const generatedEnvPath = join(worktreeBuildDir, ".env.worktree")
+
+    const service = new ContainerRuntimeService(
       {
-        allocate: async () => 4301,
+        detectDependencyDrift: async () => null,
       } as never,
-      async (_command, args) => {
-        if (args[0] === "inspect") {
+      async (_command: string, args: string[]) => {
+        calls.push(args)
+
+        if (args.includes("down")) {
           return {
-            stdout: JSON.stringify({
-              Running: true,
-              ExitCode: 0,
-              Status: "running",
-              Health: { Status: "healthy" },
-            }),
+            stdout: "",
+            stderr: `couldn't find env file: ${generatedEnvPath}`,
+            exitCode: 1,
+            success: false,
+          }
+        }
+
+        if (args[0] === "ps") {
+          return {
+            stdout: "container-1\ncontainer-2",
+            stderr: "",
+            exitCode: 0,
+            success: true,
+          }
+        }
+
+        if (args[0] === "network" && args[1] === "ls") {
+          return {
+            stdout: "network-1",
+            stderr: "",
+            exitCode: 0,
+            success: true,
+          }
+        }
+
+        if (args[0] === "volume" && args[1] === "ls") {
+          return {
+            stdout: "volume-1",
+            stderr: "",
+            exitCode: 0,
+            success: true,
+          }
+        }
+
+        return { stdout: "ok", stderr: "", exitCode: 0, success: true }
+      },
+    )
+
+    await service.removeEnvironment({
+      ...worktree,
+      container: {
+        projectName: "swarm-repo-test-1",
+        dockerizationDir: "/config/repo",
+        composeFiles: ["/config/repo/docker-compose.yml", join(worktreeBuildDir, "override.yml")],
+        activeProfiles: ["proxy"],
+        generatedOverridePath: join(worktreeBuildDir, "override.yml"),
+        generatedEnvPath,
+        publishedPorts: { APP_PORT: 4301 },
+        primaryService: "app",
+        primaryUrl: "http://127.0.0.1:4301",
+        containerName: "legacy-container",
+        networkName: "legacy-network",
+        dataVolumeNames: ["legacy-volume"],
+      },
+    })
+
+    expect(calls).toEqual([
+      [
+        "compose",
+        "--profile",
+        "proxy",
+        "-f",
+        "/config/repo/docker-compose.yml",
+        "-f",
+        join(worktreeBuildDir, "override.yml"),
+        "--project-name",
+        "swarm-repo-test-1",
+        "--env-file",
+        generatedEnvPath,
+        "down",
+        "-v",
+        "--remove-orphans",
+      ],
+      ["ps", "-aq", "--filter", "label=com.docker.compose.project=swarm-repo-test-1"],
+      ["rm", "-f", "container-1", "container-2"],
+      ["network", "ls", "-q", "--filter", "label=com.docker.compose.project=swarm-repo-test-1"],
+      ["network", "rm", "network-1"],
+      ["volume", "ls", "-q", "--filter", "label=com.docker.compose.project=swarm-repo-test-1"],
+      ["volume", "rm", "volume-1"],
+      ["rm", "-f", "legacy-container"],
+      ["network", "rm", "legacy-network"],
+      ["volume", "rm", "legacy-volume"],
+    ])
+    await expect(stat(worktreeBuildDir)).rejects.toThrow()
+  })
+
+  test("runs start.sh instead of docker compose up when present", async () => {
+    const calls: Array<{ command: string; args: string[]; cwd?: string }> = []
+    const service = new ContainerRuntimeService(
+      {
+        planForWorktree: async () => ({
+          repoIdentity: { name: "repo", path: "/repo", pathHash: "abc123", key: "repo" },
+          dockerization: {
+            dockerizationDir: "/config/repo",
+            composeFilePath: "/config/repo/docker-compose.yml",
+            envFilePath: "/config/repo/.env",
+            startupScriptPath: "/config/repo/start.sh",
+          },
+          metadata: {
+            projectName: "swarm-repo-feature-x",
+            dockerizationDir: "/config/repo",
+            composeFiles: [
+              "/config/repo/docker-compose.yml",
+              "/build/repo/feature-x/docker-compose.override.yml",
+            ],
+            activeProfiles: ["proxy"],
+            generatedOverridePath: "/build/repo/feature-x/docker-compose.override.yml",
+            generatedEnvPath: "/build/repo/feature-x/.env.worktree",
+            publishedPorts: { APP_PORT: 4301 },
+            primaryService: "app",
+            primaryUrl: "http://127.0.0.1:4301",
+          },
+          artifacts: {
+            buildDir: "/build/repo/feature-x",
+            generatedOverridePath: "/build/repo/feature-x/docker-compose.override.yml",
+            generatedEnvPath: "/build/repo/feature-x/.env.worktree",
+            composePlanPath: "/build/repo/feature-x/compose-plan.json",
+          },
+          warning: null,
+        }),
+        detectDependencyDrift: async () => null,
+      } as never,
+      async (command: string, args: string[], cwd?: string) => {
+        calls.push({ command, args, cwd })
+
+        if (command === "docker" && args.includes("ps")) {
+          return {
+            stdout: JSON.stringify([{ Service: "app", State: "running", Health: "healthy" }]),
+            stderr: "",
+            exitCode: 0,
+            success: true,
+          }
+        }
+
+        return { stdout: "ok", stderr: "", exitCode: 0, success: true }
+      },
+    )
+
+    await service.start(repo, worktree)
+
+    expect(calls[0]).toEqual({
+      command: "env",
+      args: [
+        "SWARM_CONTAINER_PROJECT_NAME=swarm-repo-feature-x",
+        "SWARM_CONTAINER_WORKTREE_PATH=/repo__wt__feature-x",
+        "SWARM_CONTAINER_REPO_PATH=/repo",
+        "SWARM_CONTAINER_DOCKERIZATION_DIR=/config/repo",
+        "SWARM_CONTAINER_COMPOSE_FILES=/config/repo/docker-compose.yml:/build/repo/feature-x/docker-compose.override.yml",
+        "SWARM_CONTAINER_ENV_FILE=/build/repo/feature-x/.env.worktree",
+        "COMPOSE_PROJECT_NAME=swarm-repo-feature-x",
+        "COMPOSE_FILE=/config/repo/docker-compose.yml:/build/repo/feature-x/docker-compose.override.yml",
+        "COMPOSE_PROFILES=proxy",
+        "COMPOSE_ENV_FILES=/build/repo/feature-x/.env.worktree",
+        "bash",
+        "/config/repo/start.sh",
+      ],
+      cwd: "/config/repo",
+    })
+  })
+
+  test("parses newline-delimited compose ps json output", async () => {
+    const service = new ContainerRuntimeService(
+      {
+        detectDependencyDrift: async () => null,
+      } as never,
+      async (_command: string, args: string[]) => {
+        if (args.includes("ps")) {
+          return {
+            stdout: [
+              JSON.stringify({ Service: "app", State: "running", Health: "healthy" }),
+              JSON.stringify({ Service: "worker", State: "running", Health: "healthy" }),
+            ].join("\n"),
             stderr: "",
             exitCode: 0,
             success: true,
@@ -141,161 +345,22 @@ describe("ContainerRuntimeService", () => {
       },
     )
 
-    const status = (await service.getStatus(repo, {
+    const status = await service.getStatus(repo, {
       ...worktree,
       container: {
-        primaryHostPort: 4301,
-        containerName: "container",
-        networkName: "network",
-        dataVolumeNames: ["vol"],
-        baseImageTag: "swarm/repo:base-abc123",
-        dependencyImageTag: "swarm/repo:deps-abc123-oldfingerprint",
-        dependencyFingerprint: "oldfingerprint",
+        projectName: "swarm-repo-feature-x",
+        dockerizationDir: "/config/repo",
+        composeFiles: ["/config/repo/docker-compose.yml", "/build/repo/feature-x/override.yml"],
+        activeProfiles: ["proxy"],
+        generatedOverridePath: "/build/repo/feature-x/override.yml",
+        generatedEnvPath: "/build/repo/feature-x/.env.worktree",
+        publishedPorts: { APP_PORT: 4301 },
+        primaryService: "app",
+        primaryUrl: "http://127.0.0.1:4301",
       },
-    })) as ContainerRuntimeStatus
+    })
 
-    expect(status.warning).toBe("Dependency image is stale.")
-  })
-})
-
-describe("ContainerRuntimeService.removeEnvironment", () => {
-  test("handles already-removed container gracefully", async () => {
-    const service = new ContainerRuntimeService(
-      {} as never,
-      {} as never,
-      async (_command, args) => {
-        if (args[0] === "rm") {
-          return {
-            stdout: "",
-            stderr: "Error: No such container: container-name",
-            exitCode: 1,
-            success: false,
-          }
-        }
-        return { stdout: "", stderr: "", exitCode: 0, success: true }
-      },
-    )
-
-    const worktreeWithContainer = {
-      ...worktree,
-      container: {
-        primaryHostPort: 4301,
-        containerName: "container-name",
-        networkName: "network-name",
-        dataVolumeNames: ["vol-data"],
-        baseImageTag: "swarm/repo:base",
-        dependencyImageTag: "swarm/repo:deps",
-        dependencyFingerprint: "fp",
-      },
-    }
-
-    await expect(service.removeEnvironment(worktreeWithContainer)).resolves.toBeUndefined()
-  })
-
-  test("handles already-removed network gracefully", async () => {
-    const service = new ContainerRuntimeService(
-      {} as never,
-      {} as never,
-      async (_command, args) => {
-        if (args[0] === "network" && args[1] === "rm") {
-          return {
-            stdout: "",
-            stderr: "Error: No such network: network-name",
-            exitCode: 1,
-            success: false,
-          }
-        }
-        return { stdout: "", stderr: "", exitCode: 0, success: true }
-      },
-    )
-
-    const worktreeWithContainer = {
-      ...worktree,
-      container: {
-        primaryHostPort: 4301,
-        containerName: "container-name",
-        networkName: "network-name",
-        dataVolumeNames: ["vol-data"],
-        baseImageTag: "swarm/repo:base",
-        dependencyImageTag: "swarm/repo:deps",
-        dependencyFingerprint: "fp",
-      },
-    }
-
-    await expect(service.removeEnvironment(worktreeWithContainer)).resolves.toBeUndefined()
-  })
-
-  test("handles already-removed volume gracefully", async () => {
-    const service = new ContainerRuntimeService(
-      {} as never,
-      {} as never,
-      async (_command, args) => {
-        if (args[0] === "volume" && args[1] === "rm") {
-          return {
-            stdout: "",
-            stderr: "Error: No such volume: vol-data",
-            exitCode: 1,
-            success: false,
-          }
-        }
-        return { stdout: "", stderr: "", exitCode: 0, success: true }
-      },
-    )
-
-    const worktreeWithContainer = {
-      ...worktree,
-      container: {
-        primaryHostPort: 4301,
-        containerName: "container-name",
-        networkName: "network-name",
-        dataVolumeNames: ["vol-data"],
-        baseImageTag: "swarm/repo:base",
-        dependencyImageTag: "swarm/repo:deps",
-        dependencyFingerprint: "fp",
-      },
-    }
-
-    await expect(service.removeEnvironment(worktreeWithContainer)).resolves.toBeUndefined()
-  })
-
-  test("throws on real Docker failure", async () => {
-    const service = new ContainerRuntimeService(
-      {} as never,
-      {} as never,
-      async (_command, args) => {
-        if (args[0] === "rm") {
-          return { stdout: "", stderr: "Error: permission denied", exitCode: 1, success: false }
-        }
-        return { stdout: "", stderr: "", exitCode: 0, success: true }
-      },
-    )
-
-    const worktreeWithContainer = {
-      ...worktree,
-      container: {
-        primaryHostPort: 4301,
-        containerName: "container-name",
-        networkName: "network-name",
-        dataVolumeNames: ["vol-data"],
-        baseImageTag: "swarm/repo:base",
-        dependencyImageTag: "swarm/repo:deps",
-        dependencyFingerprint: "fp",
-      },
-    }
-
-    await expect(service.removeEnvironment(worktreeWithContainer)).rejects.toThrow(
-      "Failed to remove container",
-    )
-  })
-
-  test("does nothing when worktree has no container metadata", async () => {
-    const service = new ContainerRuntimeService({} as never, {} as never, async () => ({
-      stdout: "",
-      stderr: "",
-      exitCode: 0,
-      success: true,
-    }))
-
-    await expect(service.removeEnvironment(worktree)).resolves.toBeUndefined()
+    expect(status.state).toBe("running")
+    expect(status.services).toHaveLength(2)
   })
 })

@@ -26,15 +26,16 @@ describe("StartContainerCommand", () => {
     const command = new StartContainerCommand(
       {
         ensureConfigScaffold: async () => ({
-          path: "/config/swarm/containers/repo--hash.yml",
+          path: "/config/swarm/containers/repo",
+          composeFilePath: "/config/swarm/containers/repo/docker-compose.yml",
           alreadyExisted: false,
-          contents: "schema_version: 1",
+          contents: "services:\n  app:\n    image: node:22",
         }),
       } as never,
       {
         start: async () => {
           throw new Error(
-            "Missing container config for repo. Expected file: /config/swarm/containers/repo--hash.yml",
+            "Missing repo dockerization directory for repo. Expected: /config/swarm/containers/repo",
           )
         },
       } as never,
@@ -48,11 +49,12 @@ describe("StartContainerCommand", () => {
     const result = await command.execute()
 
     expect(result.success).toBe(false)
-    expect(result.message).toContain("Created container config scaffold")
+    expect(result.message).toContain("Created repo dockerization scaffold")
     expect(result.data).toEqual({
-      path: "/config/swarm/containers/repo--hash.yml",
+      path: "/config/swarm/containers/repo",
+      composeFilePath: "/config/swarm/containers/repo/docker-compose.yml",
       alreadyExisted: false,
-      contents: "schema_version: 1",
+      contents: "services:\n  app:\n    image: node:22",
     })
   })
 })

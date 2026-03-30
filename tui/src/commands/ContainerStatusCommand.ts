@@ -19,7 +19,7 @@ export class ContainerStatusCommand implements Command {
       const status = await this.containerRuntimeService.getStatus(this.repo, this.worktree)
       return {
         success: true,
-        message: `Container status: ${status.state}${status.warning ? " (stale image warning)" : ""}`,
+        message: `Compose status: ${status.state}${status.warning ? " (warning)" : ""}`,
         data: status,
       }
     } catch (error) {
