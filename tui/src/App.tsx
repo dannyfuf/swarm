@@ -7,7 +7,7 @@
 
 import type { SelectOption } from "@opentui/core"
 import { useRenderer, useTerminalDimensions } from "@opentui/react"
-import { useCallback, useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { BuildContainerImageCommand } from "./commands/BuildContainerImageCommand.js"
 import { CheckRemovalSafetyCommand } from "./commands/CheckRemovalSafetyCommand.js"
 import { CloneRepoCommand } from "./commands/CloneRepoCommand.js"
@@ -49,16 +49,29 @@ export function App() {
   const renderer = useRenderer()
 
   // Track selected indices for <select> components
-  const [repoIndex, setRepoIndex] = useState(0)
   const [worktreeIndex, setWorktreeIndex] = useState(0)
   const [containerConfigSummaryRepoPath, setContainerConfigSummaryRepoPath] = useState<
     string | null
   >(null)
   const [selectedContainerConfigSummary, setSelectedContainerConfigSummary] =
     useState<ContainerConfigSummary | null>(null)
+  const loadWorktreesRequestIdRef = useRef(0)
+  const selectedRepoPathRef = useRef<string | null>(null)
   const trackActivity = useMemo(() => createActivityTracker({ dispatch }), [dispatch])
 
   const selectedRepoPath = state.selectedRepo?.path ?? null
+  const repoIndex = useMemo(() => {
+    if (!state.selectedRepo) {
+      return 0
+    }
+
+    const index = state.repos.findIndex((repo) => repo.path === state.selectedRepo?.path)
+    return index >= 0 ? index : 0
+  }, [state.repos, state.selectedRepo])
+
+  const isRepoStillSelected = useCallback((repoPath: string) => {
+    return selectedRepoPathRef.current === repoPath
+  }, [])
 
   // --- Data Loading ---
 
@@ -80,10 +93,18 @@ export function App() {
 
   /** Load worktrees and statuses for the selected repo. */
   const loadWorktrees = useCallback(async () => {
-    if (!state.selectedRepo) return
+    const repo = state.selectedRepo
+    if (!repo) return
+
+    const requestId = loadWorktreesRequestIdRef.current + 1
+    loadWorktreesRequestIdRef.current = requestId
+
     try {
-      const repo = state.selectedRepo
       const worktrees = await services.worktree.list(repo)
+      if (loadWorktreesRequestIdRef.current !== requestId || !isRepoStillSelected(repo.path)) {
+        return
+      }
+
       dispatch({ type: "SET_WORKTREES", worktrees })
 
       // Compute statuses
@@ -95,10 +116,22 @@ export function App() {
         },
       }))
       const statuses = await services.status.computeAll(items)
+      if (loadWorktreesRequestIdRef.current !== requestId || !isRepoStillSelected(repo.path)) {
+        return
+      }
+
       dispatch({ type: "SET_STATUSES", statuses })
       const containerStatuses = await services.containerRuntime.getStatuses(repo, worktrees)
+      if (loadWorktreesRequestIdRef.current !== requestId || !isRepoStillSelected(repo.path)) {
+        return
+      }
+
       dispatch({ type: "SET_CONTAINER_STATUSES", statuses: containerStatuses })
     } catch (error) {
+      if (loadWorktreesRequestIdRef.current !== requestId || !isRepoStillSelected(repo.path)) {
+        return
+      }
+
       dispatch({
         type: "SET_ERROR",
         message: error instanceof Error ? error.message : "Failed to load worktrees",
@@ -111,6 +144,7 @@ export function App() {
     services.containerRuntime,
     services.containerRuntime.getStatuses,
     dispatch,
+    isRepoStillSelected,
   ])
 
   const loadContainerConfigSummary = useCallback(
@@ -136,6 +170,10 @@ export function App() {
   useEffect(() => {
     loadRepos()
   }, [loadRepos])
+
+  useEffect(() => {
+    selectedRepoPathRef.current = selectedRepoPath
+  }, [selectedRepoPath])
 
   // Load worktrees when repo changes
   useEffect(() => {
@@ -723,18 +761,21 @@ export function App() {
 
   // --- Selection callbacks ---
 
-  const handleRepoChange = useCallback((index: number, _option: SelectOption | null) => {
-    setRepoIndex(index)
-  }, [])
+  const handleRepoChange = useCallback(
+    (index: number, _option: SelectOption | null) => {
+      const repo = state.repos[index]
+      if (!repo) {
+        return
+      }
 
-  const handleRepoSelect = useCallback(
-    (_index: number, option: SelectOption | null) => {
-      if (!option?.value) return
-      dispatch({ type: "SELECT_REPO", repo: option.value })
-      dispatch({ type: "SET_FOCUSED_PANEL", panel: "worktrees" })
+      dispatch({ type: "SELECT_REPO", repo })
     },
-    [dispatch],
+    [dispatch, state.repos],
   )
+
+  const handleRepoSelect = useCallback(() => {
+    dispatch({ type: "SET_FOCUSED_PANEL", panel: "worktrees" })
+  }, [dispatch])
 
   const handleWorktreeChange = useCallback(
     (index: number, option: SelectOption | null) => {

@@ -79,7 +79,16 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       return { ...state, containerStatuses: action.statuses }
 
     case "SELECT_REPO":
-      return { ...state, selectedRepo: action.repo }
+      return {
+        ...state,
+        selectedRepo: action.repo,
+        worktrees: [],
+        statuses: new Map(),
+        containerStatuses: new Map(),
+        selectedWorktree: null,
+        safetyResult: null,
+        safetyWorktree: null,
+      }
 
     case "SELECT_WORKTREE":
       return { ...state, selectedWorktree: action.worktree }

@@ -15,6 +15,13 @@ const mockRepo: Repo = {
   lastScanned: new Date("2026-01-01"),
 }
 
+const otherRepo: Repo = {
+  name: "other-repo",
+  path: "/home/user/repos/other-repo",
+  defaultBranch: "main",
+  lastScanned: new Date("2026-01-01"),
+}
+
 const mockWorktree: Worktree = {
   slug: "feature_auth",
   branch: "feature/auth",
@@ -146,6 +153,53 @@ describe("appReducer", () => {
   test("SELECT_REPO sets selected repo", () => {
     const state = appReducer(initialState, { type: "SELECT_REPO", repo: mockRepo })
     expect(state.selectedRepo).toBe(mockRepo)
+  })
+
+  test("SELECT_REPO clears repo-scoped worktree and safety state", () => {
+    const status = {
+      hasChanges: true,
+      hasUnpushed: false,
+      branchMerged: null,
+      isOrphaned: false,
+      computedAt: new Date(),
+    } satisfies Status
+    const containerStatus = {
+      state: "running",
+      health: "healthy",
+      primaryUrl: "http://127.0.0.1:4301",
+      message: "running",
+      warning: null,
+    } satisfies ContainerRuntimeStatus
+    const stateWithRepoData: AppState = {
+      ...initialState,
+      selectedRepo: mockRepo,
+      worktrees: [mockWorktree],
+      statuses: new Map([[mockWorktree.path, status]]),
+      containerStatuses: new Map([[mockWorktree.path, containerStatus]]),
+      selectedWorktree: mockWorktree,
+      safetyResult: {
+        safe: true,
+        warnings: [],
+        blockers: [],
+        metadata: {
+          checkedAt: new Date(),
+          uncommittedFiles: 0,
+          unpushedCommits: 0,
+          branchMerged: null,
+        },
+      },
+      safetyWorktree: mockWorktree,
+    }
+
+    const state = appReducer(stateWithRepoData, { type: "SELECT_REPO", repo: otherRepo })
+
+    expect(state.selectedRepo).toBe(otherRepo)
+    expect(state.worktrees).toEqual([])
+    expect(state.statuses).toEqual(new Map())
+    expect(state.containerStatuses).toEqual(new Map())
+    expect(state.selectedWorktree).toBeNull()
+    expect(state.safetyResult).toBeNull()
+    expect(state.safetyWorktree).toBeNull()
   })
 
   test("SELECT_WORKTREE sets selected worktree", () => {
