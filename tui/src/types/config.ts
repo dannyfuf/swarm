@@ -27,7 +27,7 @@ export interface Config {
   worktreePattern: WorktreePattern
   /** Automatically create a tmux session when a worktree is created. */
   createSessionOnCreate: boolean
-  /** Path to a custom tmux layout script (shell or JSON). */
+  /** Path to an executable tmux layout script, invoked with session name and worktree path. */
   tmuxLayoutScript: string
   /** How long computed worktree statuses remain cached, in milliseconds. */
   statusCacheTTL: number

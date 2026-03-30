@@ -25,6 +25,7 @@ export class OpenWorktreeCommand implements Command {
 
       if (!this.tmuxService.hasSession(sessionName)) {
         this.tmuxService.createSession(sessionName, this.worktree.path)
+        this.tmuxService.applyConfiguredLayout(sessionName, this.worktree.path)
       }
 
       // Attach or switch to the session

@@ -7,10 +7,17 @@
  * Ports the Go `internal/tmux/client.go` and `internal/tmux/layout.go`.
  */
 
+import { existsSync } from "node:fs"
 import type { Session, WindowInfo } from "../types/tmux.js"
 import { exec, execSync } from "../utils/shell.js"
 
+interface TmuxServiceOptions {
+  layoutScriptPath?: string
+}
+
 export class TmuxService {
+  constructor(private readonly options: TmuxServiceOptions = {}) {}
+
   /** Check if a tmux session exists. */
   hasSession(name: string): boolean {
     const result = execSync("tmux", ["has-session", "-t", name])
@@ -22,6 +29,20 @@ export class TmuxService {
     const result = execSync("tmux", ["new-session", "-d", "-s", name, "-c", workingDir])
     if (!result.success) {
       throw new Error(`Failed to create tmux session: ${result.stderr}`)
+    }
+  }
+
+  /** Apply the configured layout script to a session, if one exists. */
+  applyConfiguredLayout(name: string, workingDir: string): void {
+    const layoutScriptPath = this.options.layoutScriptPath?.trim()
+    if (!layoutScriptPath || !existsSync(layoutScriptPath)) {
+      return
+    }
+
+    const result = execSync(layoutScriptPath, [name, workingDir], workingDir)
+    if (!result.success) {
+      const reason = result.stderr || result.stdout || "unknown error"
+      throw new Error(`Failed to apply tmux layout: ${reason}`)
     }
   }
 

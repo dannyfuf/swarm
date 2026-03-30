@@ -33,7 +33,7 @@ const configService = new ConfigService()
 const config = await configService.load()
 
 const gitService = new GitService()
-const tmuxService = new TmuxService()
+const tmuxService = new TmuxService({ layoutScriptPath: config.tmuxLayoutScript })
 const stateService = new StateService(config.aiWorkingDir)
 const repoService = new RepoService(config, gitService)
 const worktreeService = new WorktreeService(config, gitService, stateService)
