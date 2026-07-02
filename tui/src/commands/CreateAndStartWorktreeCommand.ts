@@ -22,12 +22,14 @@ export class CreateAndStartWorktreeCommand implements Command {
 
   async execute(): Promise<CommandResult> {
     try {
-      const branchInfo = await this.gitService.getBranchInfoAsync(this.repo.path, this.branchName)
+      // Only existence matters here; full branch info (commit counts, merge
+      // status) is expensive on large repositories.
+      const branchExists = await this.gitService.branchExistsAsync(this.repo.path, this.branchName)
 
       const opts: CreateOptions = {
         branch: this.branchName,
-        baseBranch: branchInfo.exists ? "" : this.repo.defaultBranch,
-        newBranch: !branchInfo.exists,
+        baseBranch: branchExists ? "" : this.repo.defaultBranch,
+        newBranch: !branchExists,
       }
 
       const worktree = await this.worktreeService.create(this.repo, opts)
