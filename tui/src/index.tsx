@@ -5,6 +5,8 @@
  * and renders the React component tree.
  */
 
+import { rm } from "node:fs/promises"
+import { join } from "node:path"
 import { createCliRenderer } from "@opentui/core"
 import { createRoot } from "@opentui/react"
 import { App } from "./App.js"
@@ -31,6 +33,10 @@ import { AppProvider, type Services } from "./state/AppContext.js"
 // Initialize services
 const configService = new ConfigService()
 const config = await configService.load()
+
+// Sweep trash left behind if a previous run was killed before its
+// background worktree deletion finished (fire-and-forget).
+void rm(join(config.aiWorkingDir, ".swarm-trash"), { recursive: true, force: true }).catch(() => {})
 
 const gitService = new GitService()
 const tmuxService = new TmuxService({ layoutScriptPath: config.tmuxLayoutScript })

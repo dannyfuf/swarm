@@ -67,7 +67,22 @@ function createMockGit(overrides: Partial<GitService> = {}): GitService {
     deleteBranchAsync: mock(() => Promise.resolve()),
     fetchAll: mock(() => {}),
     status: mock(() => ({ modified: [], added: [], deleted: [], untracked: [] })),
+    statusAsync: mock(() =>
+      Promise.resolve({ modified: [], added: [], deleted: [], untracked: [] }),
+    ),
+    worktreeStatusAsync: mock(() =>
+      Promise.resolve({
+        modified: [],
+        added: [],
+        deleted: [],
+        untracked: [],
+        ahead: 0,
+        behind: 0,
+        hasUpstream: false,
+      }),
+    ),
     unpushedCommits: mock(() => 0),
+    unpushedCommitsAsync: mock(() => Promise.resolve(0)),
     ...overrides,
   } as unknown as GitService
 }
@@ -131,7 +146,9 @@ describe("WorktreeService", () => {
           prunableReason: "missing path",
         },
       ]
-      const mockGit = createMockGit({ worktreeList: mock(() => gitWorktrees) })
+      const mockGit = createMockGit({
+        worktreeListAsync: mock(() => Promise.resolve(gitWorktrees)),
+      })
       const mockState = createMockState()
       const { WorktreeService } = await import("../../services/WorktreeService.js")
       const service = new WorktreeService(config, mockGit, mockState)
@@ -169,7 +186,9 @@ describe("WorktreeService", () => {
           prunableReason: null,
         },
       ]
-      const mockGit = createMockGit({ worktreeList: mock(() => gitWorktrees) })
+      const mockGit = createMockGit({
+        worktreeListAsync: mock(() => Promise.resolve(gitWorktrees)),
+      })
       const mockState = createMockState()
       const { WorktreeService } = await import("../../services/WorktreeService.js")
       const service = new WorktreeService(config, mockGit, mockState)
@@ -191,7 +210,9 @@ describe("WorktreeService", () => {
           prunableReason: null,
         },
       ]
-      const mockGit = createMockGit({ worktreeList: mock(() => gitWorktrees) })
+      const mockGit = createMockGit({
+        worktreeListAsync: mock(() => Promise.resolve(gitWorktrees)),
+      })
       const mockState = createMockState({
         getRepoWorktrees: mock(() =>
           Promise.resolve({
@@ -227,7 +248,9 @@ describe("WorktreeService", () => {
           prunableReason: null,
         },
       ]
-      const mockGit = createMockGit({ worktreeList: mock(() => gitWorktrees) })
+      const mockGit = createMockGit({
+        worktreeListAsync: mock(() => Promise.resolve(gitWorktrees)),
+      })
       const mockState = createMockState()
       const { WorktreeService } = await import("../../services/WorktreeService.js")
       const service = new WorktreeService(config, mockGit, mockState)

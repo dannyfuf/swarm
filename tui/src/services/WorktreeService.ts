@@ -7,8 +7,9 @@
  * Ports the Go `internal/worktree/manager.go` and `internal/worktree/orphan.go`.
  */
 
-import { existsSync, rmSync } from "node:fs"
-import { join } from "node:path"
+import { existsSync } from "node:fs"
+import { mkdir, rename, rm } from "node:fs/promises"
+import { basename, join } from "node:path"
 import type { Config } from "../types/config.js"
 import type { WorktreeContainerMetadata } from "../types/container.js"
 import type { Repo } from "../types/repo.js"
@@ -86,7 +87,7 @@ export class WorktreeService {
   /** List all worktrees for a repo, cross-referencing git and state data. */
   async list(repo: Repo): Promise<Worktree[]> {
     // Get git worktree list
-    const gitWorktrees = this.git.worktreeList(repo.path)
+    const gitWorktrees = await this.git.worktreeListAsync(repo.path)
 
     // Get state data
     const stateWorktrees = await this.state.getRepoWorktrees(repo.name)
@@ -153,18 +154,65 @@ export class WorktreeService {
       throw new Error("Cannot delete the main repository worktree")
     }
 
-    // Remove from git (continue on error if force)
-    let gitRemoveSucceeded = false
-    try {
-      if (force) {
-        await this.git.worktreeRemoveForceAsync(repo.path, wt.path)
-      } else {
-        await this.git.worktreeRemoveAsync(repo.path, wt.path)
+    const dirExists = existsSync(wt.path)
+
+    // The fast path below bypasses `git worktree remove`, so mirror its
+    // guard: refuse to delete a dirty worktree unless forced.
+    if (dirExists && !force) {
+      const status = await this.git.statusAsync(wt.path)
+      const dirty =
+        status.modified.length +
+          status.added.length +
+          status.deleted.length +
+          status.untracked.length >
+        0
+      if (dirty) {
+        throw new Error(
+          `git worktree remove failed: ${wt.path} contains modified or untracked files, use force to delete it`,
+        )
       }
-      gitRemoveSucceeded = true
-    } catch (error) {
-      if (!force) throw error
-      // Force mode: continue even if git removal fails
+    }
+
+    // Fast path: rename the directory into a trash folder (instant on the
+    // same filesystem), prune the now-stale git admin entry, and delete the
+    // trashed files in the background. Deleting a large worktree in place
+    // (git worktree remove / rm -rf) can take minutes.
+    let gitRemoveSucceeded = false
+    let trashPathPendingRemoval: string | null = null
+    if (dirExists) {
+      const trashPath = await this.moveToTrash(wt.path)
+      if (trashPath) {
+        await this.git.worktreePruneAsync(repo.path)
+        gitRemoveSucceeded = true
+        trashPathPendingRemoval = trashPath
+      }
+    }
+
+    // Fallback: classic git removal (e.g. trash rename failed across
+    // filesystems, or the directory is already gone)
+    if (!gitRemoveSucceeded) {
+      try {
+        if (force) {
+          await this.git.worktreeRemoveForceAsync(repo.path, wt.path)
+        } else {
+          await this.git.worktreeRemoveAsync(repo.path, wt.path)
+        }
+        gitRemoveSucceeded = true
+      } catch (error) {
+        if (!force) throw error
+        // Force mode: continue even if git removal fails
+      }
+
+      // If directory still exists, remove it explicitly
+      if (existsSync(wt.path)) {
+        try {
+          await rm(wt.path, { recursive: true, force: true })
+        } catch (error) {
+          throw new Error(
+            `Failed to remove worktree directory ${wt.path}: ${error instanceof Error ? error.message : String(error)}`,
+          )
+        }
+      }
     }
 
     // Verify the worktree is no longer in git's list
@@ -172,19 +220,18 @@ export class WorktreeService {
       const remainingGitWorktrees = await this.git.worktreeListAsync(repo.path)
       const stillInGitList = remainingGitWorktrees.some((gwt) => gwt.path === wt.path)
       if (stillInGitList) {
+        // Fast path: git still tracks the worktree (e.g. locked entry), so
+        // restore the directory instead of destroying tracked data.
+        if (trashPathPendingRemoval) {
+          await rename(trashPathPendingRemoval, wt.path).catch(() => {})
+        }
         throw new Error(`Worktree still appears in git list after removal: ${wt.path}`)
       }
     }
 
-    // If directory still exists, remove it explicitly
-    if (existsSync(wt.path)) {
-      try {
-        rmSync(wt.path, { recursive: true, force: true })
-      } catch (error) {
-        throw new Error(
-          `Failed to remove worktree directory ${wt.path}: ${error instanceof Error ? error.message : String(error)}`,
-        )
-      }
+    // Only destroy the trashed files once git has confirmed the removal
+    if (trashPathPendingRemoval) {
+      void rm(trashPathPendingRemoval, { recursive: true, force: true }).catch(() => {})
     }
 
     // Remove from state (do this last so failures can be retried)
@@ -197,6 +244,25 @@ export class WorktreeService {
       } catch {
         // Ignore prune errors
       }
+    }
+  }
+
+  /**
+   * Move a directory into the trash folder. Returns the trashed path, or
+   * null when the rename is not possible (e.g. crossing filesystems) so the
+   * caller can fall back to in-place removal.
+   */
+  private async moveToTrash(path: string): Promise<string | null> {
+    const trashRoot = join(this.config.aiWorkingDir, ".swarm-trash")
+    const uniqueSuffix = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+    const trashPath = join(trashRoot, `${basename(path)}-${uniqueSuffix}`)
+
+    try {
+      await mkdir(trashRoot, { recursive: true })
+      await rename(path, trashPath)
+      return trashPath
+    } catch {
+      return null
     }
   }
 
