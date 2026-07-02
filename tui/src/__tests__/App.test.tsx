@@ -71,6 +71,11 @@ function createDeferred<TValue>() {
   return { promise, resolve }
 }
 
+/** Wait past the repo-selection debounce so the worktree load fires. */
+function waitForDebounce() {
+  return new Promise((resolve) => setTimeout(resolve, 150))
+}
+
 describe("App", () => {
   test("switching repos reloads worktrees for the highlighted repo and ignores stale results", async () => {
     const firstRepoLoad = createDeferred<Worktree[]>()
@@ -84,7 +89,7 @@ describe("App", () => {
 
     const services = {
       repo: {
-        scanAll: mock(() => [firstRepo, secondRepo]),
+        scanAllAsync: mock(() => Promise.resolve([firstRepo, secondRepo])),
       },
       worktree: {
         list: listWorktrees,
@@ -123,8 +128,21 @@ describe("App", () => {
       await testSetup.renderOnce()
     })
 
+    // Let the debounced load for the first repo fire (it stays pending on
+    // the deferred promise)
+    await act(async () => {
+      await waitForDebounce()
+      await testSetup.renderOnce()
+    })
+
     await act(async () => {
       testSetup.mockInput.pressArrow("down")
+      await testSetup.renderOnce()
+    })
+
+    // Let the debounced load for the second repo fire and settle
+    await act(async () => {
+      await waitForDebounce()
       await testSetup.renderOnce()
     })
 

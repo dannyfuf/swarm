@@ -27,6 +27,7 @@ export type AppAction =
   | { type: "SET_REPOS"; repos: Repo[] }
   | { type: "SET_WORKTREES"; worktrees: Worktree[] }
   | { type: "SET_STATUSES"; statuses: Map<string, Status> }
+  | { type: "SET_WORKTREE_STATUS"; path: string; status: Status }
   | { type: "SET_CONTAINER_STATUSES"; statuses: Map<string, ContainerRuntimeStatus> }
   | { type: "SELECT_REPO"; repo: Repo }
   | { type: "SELECT_WORKTREE"; worktree: Worktree }

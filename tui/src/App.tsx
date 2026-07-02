@@ -76,9 +76,9 @@ export function App() {
   // --- Data Loading ---
 
   /** Load the initial list of repos. */
-  const loadRepos = useCallback(() => {
+  const loadRepos = useCallback(async () => {
     try {
-      const repos = services.repo.scanAll()
+      const repos = await services.repo.scanAllAsync()
       dispatch({ type: "SET_REPOS", repos })
       if (repos.length > 0) {
         dispatch({ type: "SELECT_REPO", repo: repos[0] })
@@ -107,7 +107,7 @@ export function App() {
 
       dispatch({ type: "SET_WORKTREES", worktrees })
 
-      // Compute statuses
+      // Compute statuses concurrently, painting each badge as it lands
       const items = worktrees.map((wt) => ({
         worktree: wt,
         options: {
@@ -115,12 +115,16 @@ export function App() {
           defaultBranch: repo.defaultBranch,
         },
       }))
-      const statuses = await services.status.computeAll(items)
+      await services.status.computeAll(items, (path, status) => {
+        if (loadWorktreesRequestIdRef.current !== requestId || !isRepoStillSelected(repo.path)) {
+          return
+        }
+        dispatch({ type: "SET_WORKTREE_STATUS", path, status })
+      })
       if (loadWorktreesRequestIdRef.current !== requestId || !isRepoStillSelected(repo.path)) {
         return
       }
 
-      dispatch({ type: "SET_STATUSES", statuses })
       const containerStatuses = await services.containerRuntime.getStatuses(repo, worktrees)
       if (loadWorktreesRequestIdRef.current !== requestId || !isRepoStillSelected(repo.path)) {
         return
@@ -168,19 +172,24 @@ export function App() {
 
   // Initial load
   useEffect(() => {
-    loadRepos()
+    void loadRepos()
   }, [loadRepos])
 
   useEffect(() => {
     selectedRepoPathRef.current = selectedRepoPath
   }, [selectedRepoPath])
 
-  // Load worktrees when repo changes
+  // Load worktrees when repo changes. Debounced so scrolling through the
+  // repo list doesn't fire a full git scan for every row passed over.
   useEffect(() => {
-    if (state.selectedRepo) {
-      setWorktreeIndex(0)
-      loadWorktrees()
-    }
+    if (!state.selectedRepo) return
+
+    setWorktreeIndex(0)
+    const timer = setTimeout(() => {
+      void loadWorktrees()
+    }, 120)
+
+    return () => clearTimeout(timer)
   }, [state.selectedRepo, loadWorktrees])
 
   useEffect(() => {
@@ -225,7 +234,19 @@ export function App() {
       if (!selectedRepo) return
 
       const executeRefresh = async () => {
-        const cmd = new RefreshCommand(services.worktree, services.status, selectedRepo)
+        const cmd = new RefreshCommand(services.worktree, services.status, selectedRepo, {
+          // Quiet refreshes (after create/delete) keep warm cache entries
+          // for untouched worktrees; explicit refreshes recompute everything.
+          clearCache: !quiet,
+          onWorktrees: (worktrees) => {
+            if (!isRepoStillSelected(selectedRepo.path)) return
+            dispatch({ type: "SET_WORKTREES", worktrees })
+          },
+          onStatus: (path, status) => {
+            if (!isRepoStillSelected(selectedRepo.path)) return
+            dispatch({ type: "SET_WORKTREE_STATUS", path, status })
+          },
+        })
         const result = await cmd.execute()
         if (result.success) {
           const data = result.data as { worktrees: Worktree[]; statuses: Map<string, Status> }
@@ -234,9 +255,9 @@ export function App() {
             data.worktrees,
           )
           await loadContainerConfigSummary(selectedRepo.path)
-          dispatch({ type: "SET_WORKTREES", worktrees: data.worktrees })
-          dispatch({ type: "SET_STATUSES", statuses: data.statuses })
-          dispatch({ type: "SET_CONTAINER_STATUSES", statuses: containerStatuses })
+          if (isRepoStillSelected(selectedRepo.path)) {
+            dispatch({ type: "SET_CONTAINER_STATUSES", statuses: containerStatuses })
+          }
           if (!quiet) {
             dispatch({ type: "SET_STATUS", message: result.message })
           }
@@ -269,6 +290,7 @@ export function App() {
       dispatch,
       loadContainerConfigSummary,
       trackActivity,
+      isRepoStillSelected,
     ],
   )
 
@@ -567,6 +589,9 @@ export function App() {
         )
         const result = await cmd.execute()
         if (result.success) {
+          // Drop the stale cache entry in case a worktree is recreated at
+          // the same path within the TTL window
+          services.status.invalidateCache(worktreeToDelete.path)
           dispatch({ type: "SET_STATUS", message: result.message })
           setWorktreeIndex(0)
           await handleRefresh({ quiet: true })
@@ -584,6 +609,7 @@ export function App() {
     services.containerRuntime,
     services.git,
     services.tmux,
+    services.status,
     dispatch,
     handleRefresh,
     trackActivity,
@@ -723,7 +749,7 @@ export function App() {
             availability: "installed",
           })
           dispatch({ type: "SET_STATUS", message: result.message })
-          loadRepos()
+          void loadRepos()
         } else {
           dispatch({
             type: "SET_REMOTE_REPO_STATUS",

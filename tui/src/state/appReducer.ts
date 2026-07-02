@@ -75,6 +75,12 @@ export function appReducer(state: AppState, action: AppAction): AppState {
     case "SET_STATUSES":
       return { ...state, statuses: action.statuses }
 
+    case "SET_WORKTREE_STATUS": {
+      const statuses = new Map(state.statuses)
+      statuses.set(action.path, action.status)
+      return { ...state, statuses }
+    }
+
     case "SET_CONTAINER_STATUSES":
       return { ...state, containerStatuses: action.statuses }
 
