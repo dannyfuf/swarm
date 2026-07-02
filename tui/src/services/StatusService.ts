@@ -2,7 +2,9 @@
  * Status computation service for Swarm TUI.
  *
  * Computes worktree health status (changes, unpushed, merged, orphaned)
- * with TTL-based caching. Supports parallel computation via worker pool.
+ * with TTL-based caching. All git work runs asynchronously so the UI never
+ * blocks, and a single porcelain-v2 invocation per worktree answers both
+ * the dirty and unpushed questions.
  *
  * Ports the Go `internal/status/computer.go`.
  */
@@ -24,8 +26,12 @@ export interface WorktreeWithOptions {
   options: ComputeOptions
 }
 
+/** Callback fired as each worktree status finishes computing. */
+export type StatusListener = (path: string, status: Status) => void
+
 export class StatusService {
   private readonly cache = new Map<string, Status>()
+  private readonly inFlight = new Map<string, Promise<Status>>()
   private readonly ttl: number
 
   /**
@@ -39,82 +45,57 @@ export class StatusService {
     this.ttl = ttl
   }
 
-  /** Compute status for a single worktree, using cache when fresh. */
-  compute(wt: Worktree, opts: ComputeOptions): Status {
-    // Check cache
+  /**
+   * Compute status for a single worktree, using cache when fresh.
+   * Concurrent calls for the same path share one in-flight computation.
+   */
+  compute(wt: Worktree, opts: ComputeOptions): Promise<Status> {
     const cached = this.cache.get(wt.path)
     if (cached && this.isFresh(cached)) {
-      return cached
+      return Promise.resolve(cached)
     }
 
-    const status: Status = {
-      hasChanges: false,
-      hasUnpushed: false,
-      branchMerged: null,
-      isOrphaned: wt.isOrphaned,
-      computedAt: new Date(),
+    const inFlight = this.inFlight.get(wt.path)
+    if (inFlight) {
+      return inFlight
     }
 
-    // Check git status for changes
-    try {
-      const gitStatus = this.git.status(wt.path)
-      status.hasChanges =
-        gitStatus.modified.length > 0 ||
-        gitStatus.added.length > 0 ||
-        gitStatus.deleted.length > 0 ||
-        gitStatus.untracked.length > 0
-    } catch {
-      // Can't check status (dir might not exist)
-    }
-
-    // Check unpushed commits
-    try {
-      const unpushed = this.git.unpushedCommits(wt.path, wt.branch)
-      status.hasUnpushed = unpushed > 0
-    } catch {
-      // Can't check unpushed (no remote tracking)
-    }
-
-    // Check merge status (only if TTL is long enough to justify the cost)
-    if (this.ttl >= 5 * 60_000) {
-      try {
-        status.branchMerged = this.git.isMerged(opts.repoPath, wt.branch)
-      } catch {
-        // Can't check merge status
-      }
-    }
-
-    // Update cache
-    this.cache.set(wt.path, status)
-
-    return status
+    const promise = this.computeFresh(wt, opts).finally(() => {
+      this.inFlight.delete(wt.path)
+    })
+    this.inFlight.set(wt.path, promise)
+    return promise
   }
 
   /**
-   * Compute statuses for multiple worktrees in parallel.
-   * Uses a worker pool with min(numCPUs, 4) concurrent workers.
+   * Compute statuses for multiple worktrees concurrently.
+   * Git subprocesses are the bottleneck, so a small worker pool keeps
+   * the machine responsive while saturating disk/CPU. Each result is
+   * reported through `onStatus` as soon as it lands, so the UI can
+   * paint badges incrementally instead of waiting for the whole batch.
    */
-  async computeAll(items: WorktreeWithOptions[]): Promise<Map<string, Status>> {
+  async computeAll(
+    items: WorktreeWithOptions[],
+    onStatus?: StatusListener,
+  ): Promise<Map<string, Status>> {
     const results = new Map<string, Status>()
-    const maxWorkers = Math.min(cpus().length, 4)
+    if (items.length === 0) return results
 
-    // For simplicity and Bun compatibility, we process in batches
-    // rather than using actual worker threads (git commands are the bottleneck)
-    const batches = this.chunk(items, maxWorkers)
+    const workerCount = Math.min(items.length, Math.max(cpus().length, 4), 8)
+    let nextIndex = 0
 
-    for (const batch of batches) {
-      // Process each batch concurrently
-      const promises = batch.map(async (item) => {
-        const status = this.compute(item.worktree, item.options)
-        return { path: item.worktree.path, status }
-      })
-
-      const batchResults = await Promise.all(promises)
-      for (const { path, status } of batchResults) {
-        results.set(path, status)
+    const workers = Array.from({ length: workerCount }, async () => {
+      while (true) {
+        const index = nextIndex++
+        if (index >= items.length) return
+        const item = items[index]
+        const status = await this.compute(item.worktree, item.options)
+        results.set(item.worktree.path, status)
+        onStatus?.(item.worktree.path, status)
       }
-    }
+    })
 
+    await Promise.all(workers)
     return results
   }
 
@@ -128,15 +109,43 @@ export class StatusService {
     this.cache.clear()
   }
 
-  private isFresh(status: Status): boolean {
-    return Date.now() - status.computedAt.getTime() < this.ttl
+  private async computeFresh(wt: Worktree, opts: ComputeOptions): Promise<Status> {
+    const status: Status = {
+      hasChanges: false,
+      hasUnpushed: false,
+      branchMerged: null,
+      isOrphaned: wt.isOrphaned,
+      computedAt: new Date(),
+    }
+
+    // One git call covers both dirty state and upstream ahead count
+    try {
+      const gitStatus = await this.git.worktreeStatusAsync(wt.path)
+      status.hasChanges =
+        gitStatus.modified.length > 0 ||
+        gitStatus.added.length > 0 ||
+        gitStatus.deleted.length > 0 ||
+        gitStatus.untracked.length > 0
+      status.hasUnpushed = gitStatus.hasUpstream && gitStatus.ahead > 0
+    } catch {
+      // Can't check status (dir might not exist)
+    }
+
+    // Check merge status (only if TTL is long enough to justify the cost)
+    if (this.ttl >= 5 * 60_000) {
+      try {
+        status.branchMerged = await this.git.isMergedAsync(opts.repoPath, wt.branch)
+      } catch {
+        // Can't check merge status
+      }
+    }
+
+    this.cache.set(wt.path, status)
+
+    return status
   }
 
-  private chunk<T>(array: T[], size: number): T[][] {
-    const chunks: T[][] = []
-    for (let i = 0; i < array.length; i += size) {
-      chunks.push(array.slice(i, i + size))
-    }
-    return chunks
+  private isFresh(status: Status): boolean {
+    return Date.now() - status.computedAt.getTime() < this.ttl
   }
 }
