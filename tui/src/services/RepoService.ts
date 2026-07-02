@@ -73,6 +73,68 @@ export class RepoService {
     return repos
   }
 
+  /**
+   * Scan the AI working directory for all git repositories (async).
+   * Default-branch detection shells out to git, so run it for all
+   * candidates concurrently instead of serially blocking the event loop.
+   */
+  async scanAllAsync(): Promise<Repo[]> {
+    const aiDir = this.config.aiWorkingDir
+
+    if (!existsSync(aiDir)) {
+      throw new Error(`AI working directory does not exist: ${aiDir}`)
+    }
+
+    const entries = readdirSync(aiDir)
+    const candidates: string[] = []
+
+    for (const entry of entries) {
+      // Skip worktree directories
+      if (entry.includes("__wt__")) continue
+
+      const fullPath = join(aiDir, entry)
+
+      // Must be a directory
+      try {
+        const stat = statSync(fullPath)
+        if (!stat.isDirectory()) continue
+      } catch {
+        continue
+      }
+
+      // Must contain a .git directory (is a git repo)
+      const gitDir = join(fullPath, ".git")
+      if (!existsSync(gitDir)) continue
+
+      candidates.push(entry)
+    }
+
+    const repos = await Promise.all(
+      candidates.map(async (entry): Promise<Repo> => {
+        const fullPath = join(aiDir, entry)
+
+        let defaultBranch: string
+        try {
+          defaultBranch = await this.git.defaultBranchAsync(fullPath)
+        } catch {
+          defaultBranch = this.config.defaultBaseBranch
+        }
+
+        return {
+          name: entry,
+          path: fullPath,
+          defaultBranch,
+          lastScanned: new Date(),
+        }
+      }),
+    )
+
+    // Sort alphabetically by name
+    repos.sort((a, b) => a.name.localeCompare(b.name))
+
+    return repos
+  }
+
   /** Find a repo by name with a direct path lookup. */
   findByName(name: string): Repo | null {
     const fullPath = join(this.config.aiWorkingDir, name)
