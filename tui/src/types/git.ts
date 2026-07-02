@@ -29,6 +29,20 @@ export interface StatusResult {
   untracked: string[]
 }
 
+/**
+ * Aggregated result from `git status --porcelain=v2 --branch`.
+ * Extends the file lists with upstream tracking info so a single
+ * git invocation answers both "is it dirty?" and "is it unpushed?".
+ */
+export interface WorktreeStatus extends StatusResult {
+  /** Commits ahead of the upstream tracking branch. */
+  ahead: number
+  /** Commits behind the upstream tracking branch. */
+  behind: number
+  /** Whether the branch has an upstream tracking branch. */
+  hasUpstream: boolean
+}
+
 /** A parsed git commit record. */
 export interface Commit {
   hash: string

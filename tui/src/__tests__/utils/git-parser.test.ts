@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test"
-import { parseCommits, parseStatus, parseWorktreeList } from "../../utils/git-parser.js"
+import {
+  parseCommits,
+  parseStatus,
+  parseStatusV2,
+  parseWorktreeList,
+} from "../../utils/git-parser.js"
 
 describe("parseWorktreeList", () => {
   test("parses single worktree entry", () => {
@@ -223,5 +228,65 @@ def456|Add|Other|2026-01-14 09:00:00 +0000`
     // The parser takes the first 4 parts
     expect(result).toHaveLength(1)
     expect(result[0].hash).toBe("abc123")
+  })
+})
+
+describe("parseStatusV2", () => {
+  test("parses branch headers for upstream and ahead/behind", () => {
+    const output = `# branch.oid abc123
+# branch.head feature/x
+# branch.upstream origin/feature/x
+# branch.ab +3 -21`
+    const result = parseStatusV2(output)
+    expect(result.hasUpstream).toBe(true)
+    expect(result.ahead).toBe(3)
+    expect(result.behind).toBe(21)
+    expect(result.modified).toEqual([])
+    expect(result.untracked).toEqual([])
+  })
+
+  test("reports no upstream when branch.upstream header is absent", () => {
+    const output = `# branch.oid abc123
+# branch.head feature/x`
+    const result = parseStatusV2(output)
+    expect(result.hasUpstream).toBe(false)
+    expect(result.ahead).toBe(0)
+    expect(result.behind).toBe(0)
+  })
+
+  test("classifies changed, renamed, unmerged, and untracked entries", () => {
+    const output = [
+      "# branch.head feature/x",
+      "1 .M N... 100644 100644 100644 abc def src/app.ts",
+      "1 A. N... 000000 100644 100644 000 def src/new.ts",
+      "1 .D N... 100644 100644 000000 abc 000 src/gone.ts",
+      "2 R. N... 100644 100644 100644 abc def R100 src/renamed.ts\tsrc/old.ts",
+      "u UU N... 100644 100644 100644 100644 abc def ghi src/conflict.ts",
+      "? untracked.txt",
+    ].join("\n")
+    const result = parseStatusV2(output)
+    expect(result.modified).toEqual(["src/app.ts", "src/renamed.ts", "src/conflict.ts"])
+    expect(result.added).toEqual(["src/new.ts"])
+    expect(result.deleted).toEqual(["src/gone.ts"])
+    expect(result.untracked).toEqual(["untracked.txt"])
+  })
+
+  test("preserves paths containing spaces", () => {
+    const output = [
+      "1 .M N... 100644 100644 100644 abc def src/my file.ts",
+      "? untracked dir/other file.txt",
+    ].join("\n")
+    const result = parseStatusV2(output)
+    expect(result.modified).toEqual(["src/my file.ts"])
+    expect(result.untracked).toEqual(["untracked dir/other file.txt"])
+  })
+
+  test("handles empty output", () => {
+    const result = parseStatusV2("")
+    expect(result.modified).toEqual([])
+    expect(result.added).toEqual([])
+    expect(result.deleted).toEqual([])
+    expect(result.untracked).toEqual([])
+    expect(result.hasUpstream).toBe(false)
   })
 })

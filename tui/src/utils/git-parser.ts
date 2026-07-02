@@ -5,7 +5,7 @@
  * output from git commands into structured TypeScript objects.
  */
 
-import type { Commit, StatusResult, WorktreeInfo } from "../types/git.js"
+import type { Commit, StatusResult, WorktreeInfo, WorktreeStatus } from "../types/git.js"
 
 /**
  * Parse `git worktree list --porcelain` output into structured entries.
@@ -119,6 +119,81 @@ export function parseStatus(output: string): StatusResult {
       result.deleted.push(file)
     } else if (indexStatus === "?" && workTreeStatus === "?") {
       result.untracked.push(file)
+    }
+  }
+
+  return result
+}
+
+/**
+ * Parse `git status --porcelain=v2 --branch` output.
+ *
+ * Header lines (`# branch.ab +A -B`) carry ahead/behind counts relative to
+ * the upstream tracking branch. Entry lines describe changed files:
+ * ```
+ * # branch.upstream origin/main
+ * # branch.ab +2 -0
+ * 1 .M N... 100644 100644 100644 abc def src/app.ts
+ * 2 R. N... 100644 100644 100644 abc def R100 new.ts	old.ts
+ * ? untracked.txt
+ * ```
+ */
+export function parseStatusV2(output: string): WorktreeStatus {
+  const result: WorktreeStatus = {
+    modified: [],
+    added: [],
+    deleted: [],
+    untracked: [],
+    ahead: 0,
+    behind: 0,
+    hasUpstream: false,
+  }
+
+  for (const line of output.split("\n")) {
+    if (line === "") continue
+
+    if (line.startsWith("# branch.upstream ")) {
+      result.hasUpstream = true
+      continue
+    }
+
+    if (line.startsWith("# branch.ab ")) {
+      const match = line.match(/\+(\d+) -(\d+)/)
+      if (match) {
+        result.ahead = Number.parseInt(match[1], 10)
+        result.behind = Number.parseInt(match[2], 10)
+      }
+      continue
+    }
+
+    const type = line[0]
+
+    if (type === "?") {
+      result.untracked.push(line.slice(2))
+      continue
+    }
+
+    // Changed (1), renamed/copied (2), and unmerged (u) entries have a fixed
+    // field count before the path; rename entries append "\t<origPath>".
+    if (type === "1" || type === "2" || type === "u") {
+      const fieldCount = type === "1" ? 8 : type === "2" ? 9 : 10
+      const fields = line.split(" ")
+      const path = fields.slice(fieldCount).join(" ").split("\t")[0]
+      if (!path) continue
+
+      const xy = fields[1] ?? ""
+      const index = xy[0]
+      const workTree = xy[1]
+
+      if (index === "A") {
+        result.added.push(path)
+      } else if (index === "D" || workTree === "D") {
+        result.deleted.push(path)
+      } else {
+        // Modified, renamed, copied, type-changed, unmerged: all count as
+        // dirty for safety purposes.
+        result.modified.push(path)
+      }
     }
   }
 
