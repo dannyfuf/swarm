@@ -9,11 +9,23 @@
  * and `internal/git/safety.go`.
  */
 
-import type { AddOptions, BranchInfo, StatusResult, WorktreeInfo } from "../types/git.js"
-import { parseCommits, parseStatus, parseWorktreeList } from "../utils/git-parser.js"
+import type {
+  AddOptions,
+  BranchInfo,
+  StatusResult,
+  WorktreeInfo,
+  WorktreeStatus,
+} from "../types/git.js"
+import { parseCommits, parseStatus, parseStatusV2, parseWorktreeList } from "../utils/git-parser.js"
 import { exec, execSync } from "../utils/shell.js"
 
 export class GitService {
+  /**
+   * The default branch of a repo never changes mid-session, so cache it:
+   * detecting it costs up to three git invocations per lookup.
+   */
+  private readonly defaultBranchCache = new Map<string, string>()
+
   /** List all worktrees for a repository. */
   worktreeList(repoPath: string): WorktreeInfo[] {
     const result = execSync("git", ["-C", repoPath, "worktree", "list", "--porcelain"])
@@ -88,30 +100,52 @@ export class GitService {
    * Tries `origin/HEAD`, then falls back to checking "main" and "master".
    */
   defaultBranch(repoPath: string): string {
+    const cached = this.defaultBranchCache.get(repoPath)
+    if (cached) return cached
+
+    let branch = "main" // Ultimate fallback
+
     // Try origin/HEAD
     const symRef = execSync("git", ["-C", repoPath, "symbolic-ref", "refs/remotes/origin/HEAD"])
-    if (symRef.success) {
+    if (symRef.success && symRef.stdout.replace(/^refs\/remotes\/origin\//, "")) {
       // refs/remotes/origin/main -> main
-      const ref = symRef.stdout.trim()
-      const branch = ref.replace(/^refs\/remotes\/origin\//, "")
-      if (branch) return branch
+      branch = symRef.stdout.replace(/^refs\/remotes\/origin\//, "")
+    } else if (
+      execSync("git", ["-C", repoPath, "rev-parse", "--verify", "refs/heads/main"]).success
+    ) {
+      branch = "main"
+    } else if (
+      execSync("git", ["-C", repoPath, "rev-parse", "--verify", "refs/heads/master"]).success
+    ) {
+      branch = "master"
     }
 
-    // Fallback: check if "main" branch exists
-    const mainCheck = execSync("git", ["-C", repoPath, "rev-parse", "--verify", "refs/heads/main"])
-    if (mainCheck.success) return "main"
+    this.defaultBranchCache.set(repoPath, branch)
+    return branch
+  }
 
-    // Fallback: check if "master" branch exists
-    const masterCheck = execSync("git", [
-      "-C",
-      repoPath,
-      "rev-parse",
-      "--verify",
-      "refs/heads/master",
-    ])
-    if (masterCheck.success) return "master"
+  /** Detect the default branch for a repository (async, cached). */
+  async defaultBranchAsync(repoPath: string): Promise<string> {
+    const cached = this.defaultBranchCache.get(repoPath)
+    if (cached) return cached
 
-    return "main" // Ultimate fallback
+    let branch = "main" // Ultimate fallback
+
+    const symRef = await exec("git", ["-C", repoPath, "symbolic-ref", "refs/remotes/origin/HEAD"])
+    if (symRef.success && symRef.stdout.replace(/^refs\/remotes\/origin\//, "")) {
+      branch = symRef.stdout.replace(/^refs\/remotes\/origin\//, "")
+    } else if (
+      (await exec("git", ["-C", repoPath, "rev-parse", "--verify", "refs/heads/main"])).success
+    ) {
+      branch = "main"
+    } else if (
+      (await exec("git", ["-C", repoPath, "rev-parse", "--verify", "refs/heads/master"])).success
+    ) {
+      branch = "master"
+    }
+
+    this.defaultBranchCache.set(repoPath, branch)
+    return branch
   }
 
   /** Check if a branch exists in the repository. */
@@ -192,15 +226,22 @@ export class GitService {
     return info
   }
 
-  /** Check if a branch is merged into the default branch. */
+  /**
+   * Check if a branch is merged into the default branch.
+   * Uses `merge-base --is-ancestor` (one ancestry walk) instead of
+   * `branch --contains`, which scans every branch in the repository.
+   */
   isMerged(repoPath: string, branch: string): boolean {
     const defaultBr = this.defaultBranch(repoPath)
-    const result = execSync("git", ["-C", repoPath, "branch", "--contains", `refs/heads/${branch}`])
-    if (!result.success) return false
-
-    // Check if default branch is in the output
-    const branches = result.stdout.split("\n").map((line) => line.replace(/^\*?\s+/, "").trim())
-    return branches.includes(defaultBr)
+    const result = execSync("git", [
+      "-C",
+      repoPath,
+      "merge-base",
+      "--is-ancestor",
+      `refs/heads/${branch}`,
+      `refs/heads/${defaultBr}`,
+    ])
+    return result.success
   }
 
   /** Count unpushed commits on a branch (compared to origin). */
@@ -226,6 +267,54 @@ export class GitService {
   }
 
   // --- Async methods for non-blocking operations ---
+
+  /** Get working tree status (async, porcelain format). */
+  async statusAsync(repoPath: string): Promise<StatusResult> {
+    const result = await exec("git", [
+      "-C",
+      repoPath,
+      "--no-optional-locks",
+      "status",
+      "--porcelain",
+    ])
+    if (!result.success) {
+      throw new Error(`git status failed: ${result.stderr}`)
+    }
+    return parseStatus(result.stdout)
+  }
+
+  /**
+   * Get working tree status plus upstream ahead/behind counts in a single
+   * git invocation (async). `--no-optional-locks` avoids contending with
+   * other git processes on the index in large repositories.
+   */
+  async worktreeStatusAsync(worktreePath: string): Promise<WorktreeStatus> {
+    const result = await exec("git", [
+      "-C",
+      worktreePath,
+      "--no-optional-locks",
+      "status",
+      "--porcelain=v2",
+      "--branch",
+    ])
+    if (!result.success) {
+      throw new Error(`git status failed: ${result.stderr}`)
+    }
+    return parseStatusV2(result.stdout)
+  }
+
+  /** Count unpushed commits on a branch compared to origin (async). */
+  async unpushedCommitsAsync(repoPath: string, branch: string): Promise<number> {
+    const result = await exec("git", [
+      "-C",
+      repoPath,
+      "rev-list",
+      `origin/${branch}..refs/heads/${branch}`,
+      "--count",
+    ])
+    if (!result.success) return 0
+    return Number.parseInt(result.stdout, 10) || 0
+  }
 
   /** List all worktrees for a repository (async). */
   async worktreeListAsync(repoPath: string): Promise<WorktreeInfo[]> {
@@ -361,18 +450,16 @@ export class GitService {
 
   /** Check if a branch is merged into the default branch (async). */
   async isMergedAsync(repoPath: string, branch: string): Promise<boolean> {
-    const defaultBr = this.defaultBranch(repoPath)
+    const defaultBr = await this.defaultBranchAsync(repoPath)
     const result = await exec("git", [
       "-C",
       repoPath,
-      "branch",
-      "--contains",
+      "merge-base",
+      "--is-ancestor",
       `refs/heads/${branch}`,
+      `refs/heads/${defaultBr}`,
     ])
-    if (!result.success) return false
-
-    const branches = result.stdout.split("\n").map((line) => line.replace(/^\*?\s+/, "").trim())
-    return branches.includes(defaultBr)
+    return result.success
   }
 
   /** Delete a branch (async). */
