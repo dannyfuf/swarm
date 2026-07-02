@@ -17,7 +17,7 @@ export class CheckRemovalSafetyCommand implements Command {
 
   async execute(): Promise<CommandResult> {
     try {
-      const result = this.safetyService.checkRemoval(this.worktree)
+      const result = await this.safetyService.checkRemoval(this.worktree)
 
       if (result.blockers.length > 0) {
         const blockerMessages = result.blockers.map((b) => b.message).join(", ")

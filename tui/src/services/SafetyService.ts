@@ -24,8 +24,10 @@ export class SafetyService {
   /**
    * Check whether a worktree is safe to remove.
    * Returns blockers (uncommitted changes) and warnings (unpushed commits).
+   * A single porcelain-v2 status call answers both questions without
+   * blocking the event loop.
    */
-  checkRemoval(wt: Worktree): CheckResult {
+  async checkRemoval(wt: Worktree): Promise<CheckResult> {
     const blockers: Blocker[] = []
     const warnings: Warning[] = []
     const metadata: CheckMetadata = {
@@ -45,9 +47,10 @@ export class SafetyService {
       }
     }
 
-    // Check for uncommitted changes
     try {
-      const status = this.git.status(wt.path)
+      const status = await this.git.worktreeStatusAsync(wt.path)
+
+      // Check for uncommitted changes
       const totalChanges =
         status.modified.length +
         status.added.length +
@@ -65,6 +68,16 @@ export class SafetyService {
           fix: "Commit or stash your changes before removing this worktree",
         })
       }
+
+      // Check for unpushed commits (ahead of the upstream tracking branch)
+      if (status.hasUpstream && status.ahead > 0) {
+        metadata.unpushedCommits = status.ahead
+        warnings.push({
+          type: "unpushed_commits",
+          message: `${status.ahead} unpushed commit(s)`,
+          details: `Branch "${wt.branch}" has ${status.ahead} commit(s) not pushed to origin`,
+        })
+      }
     } catch {
       // If status fails, assume there might be changes
       warnings.push({
@@ -72,21 +85,6 @@ export class SafetyService {
         message: "Could not check git status",
         details: "Git status command failed for this worktree",
       })
-    }
-
-    // Check for unpushed commits
-    try {
-      const unpushed = this.git.unpushedCommits(wt.path, wt.branch)
-      if (unpushed > 0) {
-        metadata.unpushedCommits = unpushed
-        warnings.push({
-          type: "unpushed_commits",
-          message: `${unpushed} unpushed commit(s)`,
-          details: `Branch "${wt.branch}" has ${unpushed} commit(s) not pushed to origin`,
-        })
-      }
-    } catch {
-      // Ignore if we can't check unpushed (no remote tracking)
     }
 
     return {
