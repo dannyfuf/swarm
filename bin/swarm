@@ -7,31 +7,119 @@ script_dir=$(CDPATH= cd -P "$(dirname "$0")" && pwd)
 repo_root=$(CDPATH= cd -P "$script_dir/.." && pwd)
 node_bin=""
 
-if command -v node >/dev/null 2>&1 && node -e '
-  const [major, minor] = process.versions.node.split(".").map(Number);
-  process.exit(major > 26 || (major === 26 && minor >= 4) ? 0 : 1);
-' >/dev/null 2>&1; then
-  node_bin=$(command -v node)
+if [ "${SWARM_HOME+x}" = x ]; then
+  swarm_home=$SWARM_HOME
+elif [ -n "${HOME:-}" ]; then
+  swarm_home=$HOME/.swarm
 else
-  node_score=0
-  for candidate in "$HOME"/.nvm/versions/node/v26*/bin/node; do
-    [ -x "$candidate" ] || continue
-    if "$candidate" -e '
-      const [major, minor] = process.versions.node.split(".").map(Number);
-      process.exit(major > 26 || (major === 26 && minor >= 4) ? 0 : 1);
-    '; then
-      candidate_score=$(
-        "$candidate" -p '
-          const [major, minor, patch] = process.versions.node.split(".").map(Number);
-          major * 1000000 + minor * 1000 + patch;
-        '
-      )
-      if [ "$candidate_score" -gt "$node_score" ]; then
-        node_bin=$candidate
-        node_score=$candidate_score
-      fi
+  swarm_home=.swarm
+fi
+if [ -n "$swarm_home" ]; then
+  cache_dir=$swarm_home/cache
+else
+  cache_dir=cache
+fi
+node_cache=$cache_dir/node-bin
+
+parse_versioned_node() {
+  parsed_version=""
+  case $1 in
+    "${HOME:-}"/.nvm/versions/node/v*/bin/node)
+      parsed_version=${1#"${HOME:-}"/.nvm/versions/node/v}
+      parsed_version=${parsed_version%/bin/node}
+      ;;
+    "${HOME:-}"/.nodenv/versions/*/bin/node)
+      parsed_version=${1#"${HOME:-}"/.nodenv/versions/}
+      parsed_version=${parsed_version%/bin/node}
+      ;;
+    *) return 1 ;;
+  esac
+
+  parsed_major=${parsed_version%%.*}
+  version_tail=${parsed_version#*.}
+  [ "$version_tail" != "$parsed_version" ] || return 1
+  parsed_minor=${version_tail%%.*}
+  parsed_patch=${version_tail#*.}
+  [ "$parsed_patch" != "$version_tail" ] || return 1
+  case $parsed_patch in
+    *.*) return 1 ;;
+  esac
+  case $parsed_major$parsed_minor$parsed_patch in
+    "" | *[!0-9]*) return 1 ;;
+  esac
+}
+
+version_is_supported() {
+  [ "$parsed_major" -gt 26 ] || {
+    [ "$parsed_major" -eq 26 ] && [ "$parsed_minor" -ge 4 ]
+  }
+}
+
+version_is_higher() {
+  [ "$parsed_major" -gt "$best_major" ] || {
+    [ "$parsed_major" -eq "$best_major" ] &&
+      { [ "$parsed_minor" -gt "$best_minor" ] || {
+        [ "$parsed_minor" -eq "$best_minor" ] && [ "$parsed_patch" -gt "$best_patch" ]
+      }; }
+  }
+}
+
+write_node_cache() {
+  if mkdir -p "$cache_dir" 2>/dev/null; then
+    cache_tmp=$node_cache.$$
+    if printf '%s\n' "$node_bin" 2>/dev/null >"$cache_tmp" && mv "$cache_tmp" "$node_cache" 2>/dev/null; then
+      return
     fi
-  done
+    rm -f "$cache_tmp" 2>/dev/null || :
+  fi
+}
+
+if [ -n "${SWARM_NODE:-}" ] && [ -f "$SWARM_NODE" ] && [ -x "$SWARM_NODE" ]; then
+  node_bin=$SWARM_NODE
+elif [ -f "$node_cache" ]; then
+  cached_node=""
+  IFS= read -r cached_node <"$node_cache" || :
+  if [ -n "$cached_node" ] && [ -f "$cached_node" ] && [ -x "$cached_node" ]; then
+    node_bin=$cached_node
+  fi
+fi
+
+if [ -z "$node_bin" ]; then
+  path_node=$(command -v node 2>/dev/null || :)
+
+  # Prefer a PATH binary only when its nvm/nodenv path makes the version free to inspect.
+  # Otherwise choose the highest known versioned install before probing an opaque PATH binary.
+  if [ -n "$path_node" ] && [ -f "$path_node" ] && [ -x "$path_node" ] && parse_versioned_node "$path_node" && version_is_supported; then
+    node_bin=$path_node
+  elif [ -n "${HOME:-}" ]; then
+    best_major=0
+    best_minor=0
+    best_patch=0
+    for candidate in \
+      "$HOME"/.nvm/versions/node/v*/bin/node \
+      "$HOME"/.nodenv/versions/*/bin/node; do
+      [ -f "$candidate" ] && [ -x "$candidate" ] || continue
+      parse_versioned_node "$candidate" || continue
+      version_is_supported || continue
+      if [ -z "$node_bin" ] || version_is_higher; then
+        node_bin=$candidate
+        best_major=$parsed_major
+        best_minor=$parsed_minor
+        best_patch=$parsed_patch
+      fi
+    done
+  fi
+
+  if [ -z "$node_bin" ] && [ -n "$path_node" ] && [ -f "$path_node" ] && [ -x "$path_node" ] && "$path_node" -e '
+    const [major, minor] = process.versions.node.split(".").map(Number);
+    process.exit(major > 26 || (major === 26 && minor >= 4) ? 0 : 1);
+  ' >/dev/null 2>&1; then
+    node_bin=$path_node
+  fi
+
+  if [ -n "$node_bin" ]; then
+    write_node_cache
+  fi
 fi
 
 if [ -z "$node_bin" ]; then

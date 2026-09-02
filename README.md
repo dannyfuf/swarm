@@ -26,7 +26,10 @@ ln -s "$PWD/bin/swarm" /usr/local/bin/swarm
 ```
 
 The launcher finds this repository from its own location, so `swarm` works from any current
-directory. You can choose another writable directory on `PATH` for the symlink.
+directory. You can choose another writable directory on `PATH` for the symlink. It uses
+`SWARM_NODE` when set to an executable, otherwise caches a resolved Node 26.4+ path under
+`${SWARM_HOME:-~/.swarm}/cache`. The tmux popup inherits the tmux server environment and does not
+source interactive shell startup files.
 
 ### tmux
 

@@ -46,8 +46,9 @@ Node 26.8.1 + `@opentui/core`/`@opentui/react` 0.5.10 + React 19. TypeScript run
 `tsx` (`node --experimental-ffi --import tsx src/main.ts`); `npm run build` bundles with esbuild
 to `dist/swarm.mjs` for fast popup start-up (`bin/swarm` prefers `dist/` when present).
 Validation: `zod` v4. Tests: `node --test` (+ tsx). Lint/format: biome. Package manager: npm.
-`.nvmrc` pins 26.8.1; `bin/swarm` falls back to the newest `~/.nvm/versions/node/v26*` when the
-`node` on PATH is older than 26.4.
+`.nvmrc` pins 26.8.1. `bin/swarm` honors an executable `SWARM_NODE`, then a cached Node path, a
+known versioned PATH binary, or the newest compatible nvm/nodenv install. Only an otherwise opaque
+PATH binary needs a version-probe process.
 
 ```
 bin/swarm                 launcher (exec runtime with src/main.ts, passes args)
