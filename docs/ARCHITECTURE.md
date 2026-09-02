@@ -51,7 +51,7 @@ Validation: `zod` v4. Tests: `node --test` (+ tsx). Lint/format: biome. Package 
 
 ```
 bin/swarm                 launcher (exec runtime with src/main.ts, passes args)
-tmux/tmux.conf            full tmux config (theme, persistence) with the ONE swarm binding: prefix+S → popup
+tmux/tmux.conf            full tmux config (theme, persistence) with the ONE swarm binding: prefix+s → popup (replaces the default session chooser)
 src/main.ts               CLI entry: `swarm` (TUI), `swarm open <repo>/<slug>`, `swarm sleep <session>`, `swarm doctor`
 src/core/                 contracts and pure helpers; no I/O
   types.ts                domain zod schemas + inferred types (section 4)
@@ -431,7 +431,7 @@ Dialogs: `Esc` cancel, `Enter` confirm, `Tab`/`S-Tab` fields, `ctrl-n`/`ctrl-p` 
 ```
 
 Rules: worktrees pane focused by default with "All" selected (most recently opened first) so
-the common path is `prefix S` → `j`/`/…` → `Enter`. Rows show only what changes a decision:
+the common path is `prefix s` → `j`/`/…` → `Enter`. Rows show only what changes a decision:
 state glyph, branch, what is running, recency. Everything else lives in the detail box.
 Rows of in-flight operations show a spinner + step text instead of columns. Empty states carry
 the next action ("No repos in buk — press n to clone one"). Colors: a single accent for the

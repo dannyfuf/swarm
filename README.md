@@ -35,7 +35,7 @@ The project-owned [`tmux/tmux.conf`](tmux/tmux.conf) is a complete tmux configur
 sources it. Both entry points prefer `~/buk/swarm` and fall back to this refactor worktree.
 Set `SWARM_ROOT` to use another checkout.
 
-The configuration uses `C-s` as its prefix and `prefix` + `S` opens swarm. It enables
+The configuration uses `C-s` as its prefix and `prefix` + `s` opens swarm (replacing the built-in session chooser). It enables
 tmux-resurrect and tmux-continuum, saves every 10 minutes, restores sessions automatically,
 and restores Neovim sessions and lazygit processes without auto-restarting coding agents.
 On first use, press `prefix` + `I` to install the configured TPM plugins.
