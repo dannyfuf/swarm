@@ -144,9 +144,24 @@ export function createWorktreeService({
             throw toSwarmError(error, "git", `Failed to fetch repository: ${repo.id}`);
           }
 
+          let defaultBranch: string;
+          try {
+            defaultBranch = await git.defaultBranch(repo.path, repo.defaultBranch);
+            if (defaultBranch !== repo.defaultBranch) repo.defaultBranch = defaultBranch;
+            const remoteBranches = await git.remoteBranches(repo.path);
+            if (!remoteBranches.includes(`origin/${defaultBranch}`)) {
+              throw new SwarmError(
+                "git",
+                `Remote has no '${defaultBranch}' branch yet; push an initial commit to ${repo.id} first`,
+              );
+            }
+          } catch (error) {
+            throw toSwarmError(error, "git", `Failed to resolve repository base: ${repo.id}`);
+          }
+
           onEvent?.({ type: "step", label: "Updating base" });
           try {
-            await git.resetToRemote(repo.path, repo.defaultBranch);
+            await git.resetToRemote(repo.path, defaultBranch);
           } catch (error) {
             throw toSwarmError(error, "git", `Failed to update repository base: ${repo.id}`);
           }
@@ -181,7 +196,7 @@ export function createWorktreeService({
             const remoteBranch = `origin/${input.branch}`;
             resolvedBaseRef = branches.includes(remoteBranch)
               ? remoteBranch
-              : (input.baseRef ?? `origin/${repo.defaultBranch}`);
+              : (input.baseRef ?? `origin/${defaultBranch}`);
             try {
               if (branches.includes(remoteBranch)) {
                 await git.checkoutTracking(destination, input.branch);

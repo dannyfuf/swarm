@@ -90,21 +90,51 @@ describe("git adapter", () => {
     );
   });
 
-  test("falls back to main when present and master otherwise", async () => {
-    const makeGit = (mainExists: boolean) => {
+  test("prefers a hinted remote branch, then main, then master", async () => {
+    const makeGit = (existingBranches: string[]) => {
       const shell = createFakeShell([
         { match: (_cmd, args) => args[0] === "symbolic-ref", result: { code: 1 } },
         { match: (_cmd, args) => args[0] === "remote", result: { code: 1 } },
         {
           match: (_cmd, args) => args[0] === "show-ref",
-          result: { code: mainExists ? 0 : 1 },
+          result: (_cmd, args) => ({
+            code: existingBranches.includes(args.at(-1)?.replace("refs/remotes/origin/", "") ?? "")
+              ? 0
+              : 1,
+          }),
         },
       ]);
       return createGit(shell, createNullLogger());
     };
 
-    assert.equal(await makeGit(true).defaultBranch("/repo"), "main");
-    assert.equal(await makeGit(false).defaultBranch("/repo"), "master");
+    assert.equal(await makeGit(["trunk", "main"]).defaultBranch("/repo", "trunk"), "trunk");
+    assert.equal(await makeGit(["main"]).defaultBranch("/repo", "trunk"), "main");
+    assert.equal(await makeGit(["master"]).defaultBranch("/repo"), "master");
+  });
+
+  test("uses the hint for an empty remote, then an unborn local HEAD, then main", async () => {
+    const makeGit = (localHead?: string) => {
+      const shell = createFakeShell([
+        {
+          match: (_cmd, args) => args[0] === "symbolic-ref",
+          result: (_cmd, args) =>
+            args[1] === "--short" && localHead ? { stdout: `${localHead}\n` } : { code: 1 },
+        },
+        { match: (_cmd, args) => args[0] === "remote", result: { code: 1 } },
+        { match: (_cmd, args) => args[0] === "show-ref", result: { code: 1 } },
+        { match: (_cmd, args) => args[0] === "for-each-ref", result: { stdout: "" } },
+      ]);
+      return { git: createGit(shell, createNullLogger()), shell };
+    };
+
+    const hinted = makeGit("legacy");
+    assert.equal(await hinted.git.defaultBranch("/repo", "main"), "main");
+    assert.equal(
+      hinted.shell.calls.some(({ args }) => args[0] === "symbolic-ref" && args[1] === "--short"),
+      false,
+    );
+    assert.equal(await makeGit("develop").git.defaultBranch("/repo"), "develop");
+    assert.equal(await makeGit().git.defaultBranch("/repo"), "main");
   });
 
   test("turns command failures into git errors containing stderr", async () => {

@@ -141,7 +141,7 @@ describe("createRepoService", () => {
     );
   });
 
-  test("persists a detached clone job and later promotes the completed clone", async () => {
+  test("persists a detached clone job and promotes an empty clone with its GitHub branch hint", async () => {
     const state = createMemoryState(
       makeState({ contexts: [contexts[0]], repos: [], worktrees: [], activeContextId: "buk" }),
     );
@@ -149,9 +149,9 @@ describe("createRepoService", () => {
     const git = createFakeGit();
     const process = createFakeProcess();
     const files = createFakeFiles();
-    git.defaultBranch = async (path) => {
-      git.calls.push({ method: "defaultBranch", args: [path] });
-      return "trunk";
+    git.defaultBranch = async (path, hint) => {
+      git.calls.push({ method: "defaultBranch", args: [path, hint] });
+      return hint ?? "main";
     };
     const service = createRepoService({
       state,
@@ -195,7 +195,11 @@ describe("createRepoService", () => {
 
     assert.deepEqual(state.state.clones, []);
     assert.equal(state.state.repos[0]?.id, job.id);
-    assert.equal(state.state.repos[0]?.defaultBranch, "trunk");
+    assert.equal(state.state.repos[0]?.defaultBranch, "main");
+    assert.deepEqual(git.calls.find(({ method }) => method === "defaultBranch")?.args, [
+      job.stagingPath,
+      "main",
+    ]);
     assert.ok(files.calls.some(({ method, args }) => method === "move" && args[1] === destination));
   });
 

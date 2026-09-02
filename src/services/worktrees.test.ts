@@ -22,7 +22,12 @@ describe("createWorktreeService", () => {
       makeState({ contexts: [contexts[0]], repos: [repo], worktrees: [] }),
     );
     const files = createFakeFiles({ paths: [repo.path] });
-    const git = createFakeGit({ remoteBranches: { [destination]: ["origin/main"] } });
+    const git = createFakeGit({
+      remoteBranches: {
+        [repo.path]: ["origin/main"],
+        [destination]: ["origin/main"],
+      },
+    });
     const shell = createFakeShell([
       {
         match: (cmd, args) => cmd === "sh" && args[1] === "npm install",
@@ -64,12 +69,91 @@ describe("createWorktreeService", () => {
     assert.deepEqual(state.state.worktrees, [created]);
   });
 
+  test("self-heals a stale default branch and persists the resolved branch", async () => {
+    const currentRepo = repos[0];
+    assert.ok(currentRepo);
+    const repo = { ...currentRepo, defaultBranch: "master" };
+    const destination = "/home/test/.swarm/worktrees/bukhr/payroll/feat-healed";
+    const state = createMemoryState(
+      makeState({ contexts: [contexts[0]], repos: [repo], worktrees: [] }),
+    );
+    const git = createFakeGit({
+      defaultBranches: { [repo.path]: "main" },
+      remoteBranches: {
+        [repo.path]: ["origin/main"],
+        [destination]: ["origin/main"],
+      },
+    });
+    const service = createWorktreeService({
+      state,
+      config: createMemoryConfig(),
+      git,
+      files: createFakeFiles({ paths: [repo.path] }),
+      tmux: createFakeTmux(),
+      shell: createFakeShell(),
+      clock: createFixedClock(),
+      logger: createNullLogger(),
+    });
+
+    const created = await service.create({ repoId: repo.id, branch: "feat/healed" });
+
+    assert.equal(state.state.repos[0]?.defaultBranch, "main");
+    assert.equal(created.baseRef, "origin/main");
+    assert.deepEqual(git.calls.find(({ method }) => method === "defaultBranch")?.args, [
+      repo.path,
+      "master",
+    ]);
+    assert.deepEqual(git.calls.find(({ method }) => method === "resetToRemote")?.args, [
+      repo.path,
+      "main",
+    ]);
+  });
+
+  test("reports a clear git error when the remote is still empty", async () => {
+    const repo = repos[0];
+    assert.ok(repo);
+    const git = createFakeGit({ remoteBranches: { [repo.path]: [] } });
+    const files = createFakeFiles({ paths: [repo.path] });
+    const service = createWorktreeService({
+      state: createMemoryState(
+        makeState({ contexts: [contexts[0]], repos: [repo], worktrees: [] }),
+      ),
+      config: createMemoryConfig(),
+      git,
+      files,
+      tmux: createFakeTmux(),
+      shell: createFakeShell(),
+      clock: createFixedClock(),
+      logger: createNullLogger(),
+    });
+
+    await assert.rejects(
+      service.create({ repoId: repo.id, branch: "feat/first" }),
+      (error) =>
+        error instanceof SwarmError &&
+        error.code === "git" &&
+        error.message ===
+          "Remote has no 'main' branch yet; push an initial commit to bukhr/payroll first",
+    );
+    assert.equal(
+      git.calls.some(({ method }) => method === "resetToRemote"),
+      false,
+    );
+    assert.equal(
+      files.calls.some(({ method }) => method === "cloneTree"),
+      false,
+    );
+  });
+
   test("tracks an existing remote branch and persists that branch as the resolved base", async () => {
     const repo = repos[0];
     assert.ok(repo);
     const destination = "/home/test/.swarm/worktrees/bukhr/payroll/feat-existing";
     const git = createFakeGit({
-      remoteBranches: { [destination]: ["origin/feat/existing", "origin/main"] },
+      remoteBranches: {
+        [repo.path]: ["origin/main"],
+        [destination]: ["origin/feat/existing", "origin/main"],
+      },
     });
     const service = createWorktreeService({
       state: createMemoryState(
@@ -100,7 +184,7 @@ describe("createWorktreeService", () => {
     const state = createMemoryState(
       makeState({ contexts: [contexts[0]], repos: [repo], worktrees: [] }),
     );
-    const git = createFakeGit();
+    const git = createFakeGit({ remoteBranches: { [repo.path]: ["origin/main"] } });
     const service = createWorktreeService({
       state,
       config: createMemoryConfig(),
@@ -288,7 +372,9 @@ describe("createWorktreeService", () => {
     assert.ok(repo);
     const destination = "/home/test/.swarm/worktrees/bukhr/payroll/feat-broken";
     const files = createFakeFiles({ paths: [repo.path] });
-    const git = createFakeGit({ remoteBranches: { [destination]: [] } });
+    const git = createFakeGit({
+      remoteBranches: { [repo.path]: ["origin/main"], [destination]: [] },
+    });
     git.checkoutNewBranch = async () => {
       throw new Error("checkout failed");
     };
