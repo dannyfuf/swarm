@@ -1,0 +1,51 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.5.11/schema.json",
+  "files": {
+    "ignoreUnknown": true,
+    "includes": ["**", "!!dist", "!!node_modules", "!!.opencode"]
+  },
+  "formatter": {
+    "enabled": true,
+    "indentStyle": "space",
+    "indentWidth": 2,
+    "lineWidth": 100
+  },
+  "javascript": {
+    "formatter": {
+      "quoteStyle": "double"
+    }
+  },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "preset": "recommended"
+    }
+  },
+  "overrides": [
+    {
+      "includes": ["src/ui/**/*.ts", "src/ui/**/*.tsx"],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "patterns": [
+                  {
+                    "group": [
+                      "../services/**",
+                      "../../services/**",
+                      "../adapters/**",
+                      "../../adapters/**"
+                    ],
+                    "message": "UI modules may depend only on core contracts, not services or adapters."
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}
