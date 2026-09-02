@@ -35,7 +35,7 @@ export interface Logger {
 export interface GitPort {
   cloneDetached(url: string, dest: string, logPath: string): Promise<number>;
   fetch(repoPath: string, opts?: { prune?: boolean; signal?: AbortSignal }): Promise<void>;
-  defaultBranch(repoPath: string): Promise<string>;
+  defaultBranch(repoPath: string, hint?: string): Promise<string>;
   resetToRemote(repoPath: string, branch: string): Promise<void>;
   checkoutNewBranch(path: string, branch: string, from: string): Promise<void>;
   checkoutTracking(path: string, branch: string): Promise<void>;

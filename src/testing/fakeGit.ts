@@ -40,9 +40,9 @@ export function createFakeGit(options: FakeGitOptions = {}): FakeGit {
     async fetch(repoPath, opts) {
       calls.push({ method: "fetch", args: [repoPath, opts] });
     },
-    async defaultBranch(repoPath) {
-      calls.push({ method: "defaultBranch", args: [repoPath] });
-      return defaultBranches.get(repoPath) ?? "main";
+    async defaultBranch(repoPath, hint) {
+      calls.push({ method: "defaultBranch", args: [repoPath, hint] });
+      return defaultBranches.get(repoPath) ?? hint ?? "main";
     },
     async resetToRemote(repoPath, branch) {
       calls.push({ method: "resetToRemote", args: [repoPath, branch] });

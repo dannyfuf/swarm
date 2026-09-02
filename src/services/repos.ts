@@ -245,7 +245,7 @@ export function createRepoService({
             continue;
           }
 
-          const defaultBranch = await git.defaultBranch(completedPath);
+          const defaultBranch = await git.defaultBranch(completedPath, clone.defaultBranch);
           if (completedPath === clone.stagingPath) await files.move(clone.stagingPath, clone.path);
           await mutateState(state, (next) => {
             if (!next.repos.some((repo) => repo.id === clone.id)) {

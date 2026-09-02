@@ -43,6 +43,24 @@ export function createGit(shell: Shell, logger: Logger): GitPort {
     return ref.startsWith(prefix) && ref.length > prefix.length ? ref.slice(prefix.length) : null;
   };
 
+  const remoteBranchExists = async (repoPath: string, branch: string): Promise<boolean> => {
+    const result = await attempt(
+      ["show-ref", "--verify", "--quiet", `refs/remotes/origin/${branch}`],
+      { cwd: repoPath },
+    );
+    return result.code === 0;
+  };
+
+  const listRemoteBranches = async (repoPath: string): Promise<string[]> => {
+    const result = await run(["for-each-ref", "--format=%(refname:short)", "refs/remotes/origin"], {
+      cwd: repoPath,
+    });
+    return result.stdout
+      .split(/\r?\n/)
+      .map((branch) => branch.trim())
+      .filter((branch) => branch.length > 0 && branch !== "origin/HEAD" && branch !== "origin");
+  };
+
   return {
     async cloneDetached(url, dest, logPath): Promise<number> {
       try {
@@ -61,7 +79,7 @@ export function createGit(shell: Shell, logger: Logger): GitPort {
       });
     },
 
-    async defaultBranch(repoPath): Promise<string> {
+    async defaultBranch(repoPath, hint): Promise<string> {
       const existing = await symbolicDefaultBranch(repoPath);
       if (existing) return existing;
 
@@ -69,10 +87,18 @@ export function createGit(shell: Shell, logger: Logger): GitPort {
       const refreshed = await symbolicDefaultBranch(repoPath);
       if (refreshed) return refreshed;
 
-      const main = await attempt(["show-ref", "--verify", "--quiet", "refs/remotes/origin/main"], {
-        cwd: repoPath,
-      });
-      return main.code === 0 ? "main" : "master";
+      if (hint && (await remoteBranchExists(repoPath, hint))) return hint;
+      if (hint !== "main" && (await remoteBranchExists(repoPath, "main"))) return "main";
+      if (hint !== "master" && (await remoteBranchExists(repoPath, "master"))) return "master";
+
+      const remoteBranches = await listRemoteBranches(repoPath);
+      if (remoteBranches.length > 0) return remoteBranches[0]?.slice("origin/".length) ?? "main";
+      if (hint) return hint;
+
+      const localHead = await attempt(["symbolic-ref", "--short", "HEAD"], { cwd: repoPath });
+      return localHead.code === 0 && localHead.stdout.trim().length > 0
+        ? localHead.stdout.trim()
+        : "main";
     },
 
     async resetToRemote(repoPath, branch): Promise<void> {
@@ -101,14 +127,7 @@ export function createGit(shell: Shell, logger: Logger): GitPort {
     },
 
     async remoteBranches(repoPath): Promise<string[]> {
-      const result = await run(
-        ["for-each-ref", "--format=%(refname:short)", "refs/remotes/origin"],
-        { cwd: repoPath },
-      );
-      return result.stdout
-        .split(/\r?\n/)
-        .map((branch) => branch.trim())
-        .filter((branch) => branch.length > 0 && branch !== "origin/HEAD" && branch !== "origin");
+      return listRemoteBranches(repoPath);
     },
 
     async currentBranch(path): Promise<string> {
