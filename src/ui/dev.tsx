@@ -13,7 +13,7 @@ import { createStore } from "../app/store.ts";
 import type { WorktreeId, WorktreeStatus } from "../core/types.ts";
 import { createFakeController } from "../testing/fakeController.ts";
 import { makeState } from "../testing/fixtures.ts";
-import { runTui } from "./App.tsx";
+import { runTui } from "./runTui.tsx";
 
 const HOME = "/home/test";
 

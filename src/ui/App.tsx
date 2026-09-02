@@ -1,5 +1,4 @@
-import { createCliRenderer } from "@opentui/core";
-import { createRoot, useKeyboard, useTerminalDimensions } from "@opentui/react";
+import { useKeyboard, useTerminalDimensions } from "@opentui/react";
 import { useEffect, useRef, useSyncExternalStore } from "react";
 import { resolveKey } from "../app/keymap.ts";
 import {
@@ -372,53 +371,4 @@ export function App({ store, controller, onExit, home = process.env.HOME ?? "" }
       ) : null}
     </box>
   );
-}
-
-export interface RunTuiDeps extends UiDeps {
-  home?: string;
-}
-
-/**
- * Mount the TUI on a real terminal and resolve once the user leaves: `"quit"`
- * for `q`/`Esc`/`ctrl-c`, `"opened"` after a worktree was mounted and the tmux
- * client switched. The renderer is torn down before resolving so the caller can
- * exit the process (and the tmux popup closes) with a clean terminal.
- */
-export async function runTui(deps: RunTuiDeps): Promise<UiExit> {
-  const renderer = await createCliRenderer({ exitOnCtrlC: false });
-  const root = createRoot(renderer);
-
-  return new Promise<UiExit>((resolve, reject) => {
-    let settled = false;
-    const finish = (result: { exit: UiExit } | { error: unknown }) => {
-      if (settled) return;
-      settled = true;
-      setTimeout(() => {
-        process.off("unhandledRejection", onUnhandledRejection);
-        let cleanupError: unknown;
-        try {
-          root.unmount();
-        } catch (error) {
-          cleanupError = error;
-        }
-        try {
-          renderer.destroy();
-        } catch (error) {
-          cleanupError ??= error;
-        }
-
-        if ("error" in result) reject(result.error);
-        else if (cleanupError !== undefined) reject(cleanupError);
-        else resolve(result.exit);
-      }, 0);
-    };
-    const onUnhandledRejection = (error: unknown): void => finish({ error });
-
-    process.once("unhandledRejection", onUnhandledRejection);
-    try {
-      root.render(<App {...deps} onExit={(exit) => finish({ exit })} />);
-    } catch (error) {
-      finish({ error });
-    }
-  });
 }

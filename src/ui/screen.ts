@@ -838,6 +838,17 @@ function footerContent(state: AppState, layout: ScreenLayout, context: ScreenCon
     );
   }
 
+  if (state.loading) {
+    return fitLine(
+      [
+        cell(" ", {}),
+        cell(spinnerFrame(context.tick), { fg: theme.accent, bold: true }),
+        cell(" Loading workspace…", { fg: theme.dim }),
+      ],
+      width,
+    );
+  }
+
   if (state.mode === "filter") {
     const line: Line = [cell(" ", {})];
     for (const [key, label] of [

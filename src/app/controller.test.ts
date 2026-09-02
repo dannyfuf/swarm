@@ -57,6 +57,8 @@ interface Harness {
     open: SessionService["open"];
     setContext: ContextService["setActive"];
     loadPr: PrService["load"];
+    loadState: StatePort["load"];
+    currentSession: TmuxPort["currentSession"];
   };
   calls: {
     snapshots: Worktree[][];
@@ -106,6 +108,7 @@ function createHarness(initial: State = makeState()): Harness {
       clones: persisted.clones,
       worktrees: persisted.worktrees,
       activeContextId: persisted.activeContextId,
+      loading: true,
     }),
   );
   const calls: Harness["calls"] = {
@@ -154,11 +157,17 @@ function createHarness(initial: State = makeState()): Harness {
     async open() {},
     async setContext() {},
     async loadPr() {},
+    async loadState() {
+      return structuredClone(persisted);
+    },
+    async currentSession() {
+      return "swarm/popup";
+    },
   };
 
   const state: StatePort = {
     async load() {
-      return structuredClone(persisted);
+      return behavior.loadState();
     },
     async save(next) {
       persisted = structuredClone(next);
@@ -256,7 +265,7 @@ function createHarness(initial: State = makeState()): Harness {
   const tmux: TmuxPort = {
     insideTmux: () => true,
     async currentSession() {
-      return "swarm/popup";
+      return behavior.currentSession();
     },
     async listSessions() {
       return [];
@@ -331,16 +340,23 @@ function createHarness(initial: State = makeState()): Harness {
 function deferred<T>(): {
   promise: Promise<T>;
   resolve(value: T): void;
+  reject(error: unknown): void;
 } {
   let resolvePromise: ((value: T) => void) | undefined;
-  const promise = new Promise<T>((resolve) => {
+  let rejectPromise: ((error: unknown) => void) | undefined;
+  const promise = new Promise<T>((resolve, reject) => {
     resolvePromise = resolve;
+    rejectPromise = reject;
   });
   return {
     promise,
     resolve(value) {
       assert.ok(resolvePromise);
       resolvePromise(value);
+    },
+    reject(error) {
+      assert.ok(rejectPromise);
+      rejectPromise(error);
     },
   };
 }
@@ -377,10 +393,9 @@ describe("createController", () => {
     assert.equal(state.config.reposDir, config.reposDir);
     assert.equal(Object.keys(state.statuses).length, worktrees.length);
     assert.deepEqual(harness.calls.intervals, [config.ui.statusRefreshMs]);
-    assert.deepEqual(
-      harness.store.actions.slice(0, 2).map(({ type }) => type),
-      ["hydrate", "statuses"],
-    );
+    const hydrateIndex = harness.store.actions.findIndex(({ type }) => type === "hydrate");
+    const statusIndex = harness.store.actions.findIndex(({ type }) => type === "statuses");
+    assert.ok(hydrateIndex >= 0 && statusIndex > hydrateIndex);
 
     harness.controller.dispose();
     assert.equal(harness.calls.clearedIntervals.length, 1);
@@ -402,6 +417,43 @@ describe("createController", () => {
     );
     harness.controller.dispose();
     pending.resolve();
+  });
+
+  test("init hydrates cached state without waiting for shell-backed enrichment", async () => {
+    const harness = createHarness();
+    const session = deferred<string | null>();
+    const reconciliation = deferred<CloneJob[]>();
+    harness.behavior.currentSession = async () => session.promise;
+    harness.behavior.reconcileClones = async () => reconciliation.promise;
+
+    await harness.controller.init();
+
+    assert.equal(harness.store.getState().loading, false);
+    assert.deepEqual(harness.store.getState().worktrees, worktrees);
+    assert.equal(harness.store.getState().currentSession, undefined);
+    assert.equal(harness.calls.reconciliations, 1);
+
+    session.resolve("swarm/popup");
+    reconciliation.resolve([]);
+    await flush();
+    assert.equal(harness.store.getState().currentSession, "swarm/popup");
+    harness.controller.dispose();
+  });
+
+  test("init failures become persistent UI errors and error toasts", async () => {
+    const harness = createHarness();
+    harness.behavior.loadState = async () => {
+      throw new Error("state unavailable");
+    };
+
+    await assert.rejects(harness.controller.init(), /state unavailable/u);
+
+    const state = harness.store.getState();
+    assert.equal(state.loading, false);
+    assert.equal(state.error, "state unavailable");
+    assert.equal(state.toasts.at(-1)?.level, "error");
+    assert.equal(state.toasts.at(-1)?.text, "state unavailable");
+    harness.controller.dispose();
   });
 
   test("polling skips ticks while a snapshot is in flight", async () => {
@@ -663,6 +715,7 @@ describe("createController", () => {
     };
 
     await harness.controller.init();
+    await flush();
     harness.clock.advance(2_000);
     await flush();
     assert.equal(requests, 2);
