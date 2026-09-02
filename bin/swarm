@@ -1,0 +1,49 @@
+#!/bin/sh
+
+set -eu
+
+swarm_cwd=$PWD
+script_dir=$(CDPATH= cd -P "$(dirname "$0")" && pwd)
+repo_root=$(CDPATH= cd -P "$script_dir/.." && pwd)
+node_bin=""
+
+if command -v node >/dev/null 2>&1 && node -e '
+  const [major, minor] = process.versions.node.split(".").map(Number);
+  process.exit(major > 26 || (major === 26 && minor >= 4) ? 0 : 1);
+' >/dev/null 2>&1; then
+  node_bin=$(command -v node)
+else
+  node_score=0
+  for candidate in "$HOME"/.nvm/versions/node/v26*/bin/node; do
+    [ -x "$candidate" ] || continue
+    if "$candidate" -e '
+      const [major, minor] = process.versions.node.split(".").map(Number);
+      process.exit(major > 26 || (major === 26 && minor >= 4) ? 0 : 1);
+    '; then
+      candidate_score=$(
+        "$candidate" -p '
+          const [major, minor, patch] = process.versions.node.split(".").map(Number);
+          major * 1000000 + minor * 1000 + patch;
+        '
+      )
+      if [ "$candidate_score" -gt "$node_score" ]; then
+        node_bin=$candidate
+        node_score=$candidate_score
+      fi
+    fi
+  done
+fi
+
+if [ -z "$node_bin" ]; then
+  echo "swarm: Node >= 26.4 is required" >&2
+  exit 1
+fi
+
+export SWARM_CWD="$swarm_cwd"
+cd "$repo_root"
+
+if [ -f dist/swarm.mjs ]; then
+  exec "$node_bin" --experimental-ffi --no-warnings=ExperimentalWarning dist/swarm.mjs "$@"
+fi
+
+exec "$node_bin" --experimental-ffi --no-warnings=ExperimentalWarning --import tsx src/main.ts "$@"
