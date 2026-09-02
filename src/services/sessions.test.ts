@@ -110,8 +110,8 @@ describe("SessionService.mount", () => {
       ],
     );
     assert.deepEqual(tmux.sentKeys, [
-      { target: `=${target.session}:0`, keys: ["nvim"], enter: true },
-      { target: `=${target.session}:1`, keys: ["claude"], enter: true },
+      { target: `=${target.session}:0`, keys: ["nvim ."], enter: true },
+      { target: `=${target.session}:1`, keys: ["cc"], enter: true },
       { target: `=${target.session}:2`, keys: ["lazygit"], enter: true },
     ]);
     assert.equal(tmux.calls.at(-1)?.method, "selectWindow");
@@ -137,7 +137,7 @@ describe("SessionService.mount", () => {
       ],
     );
     assert.deepEqual(tmux.sentKeys, [
-      { target: `=${target.session}:3`, keys: ["nvim"], enter: true },
+      { target: `=${target.session}:3`, keys: ["nvim ."], enter: true },
       { target: `=${target.session}:4`, keys: ["lazygit"], enter: true },
     ]);
   });

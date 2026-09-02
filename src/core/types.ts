@@ -197,8 +197,8 @@ export const ConfigSchema = z.object({
 export type Config = z.infer<typeof ConfigSchema>;
 
 export const DEFAULT_WINDOWS: WindowSpec[] = [
-  { name: "nvim", command: "nvim" },
-  { name: "cc", command: "claude" },
+  { name: "nvim", command: "nvim ." },
+  { name: "cc", command: "cc" },
   { name: "lg", command: "lazygit" },
 ];
 
