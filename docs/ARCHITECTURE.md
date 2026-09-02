@@ -452,6 +452,33 @@ cursor row, green for attached, yellow for running agents, red only for danger d
 
 ## 10. Integration notes
 
+- 2026-09-02: PR cache reads and network refreshes are now separate `GithubPort` operations.
+  `PrService` emits validated cached slices before refresh, retains them with a short error on
+  refresh failure, and owns one four-call limiter plus repo/tab generations and abort signals
+  across every overlapping load. PR schemas accept only exact numbered `github.com` pull URLs,
+  with `ProcessPort.openUrl` repeating the HTTPS/host allowlist; branch validation now mirrors
+  `git check-ref-format --branch`. Successful context switches background-load both PR tabs.
+- 2026-09-02: the pull request screen got its rendering and input wiring. `buildScreen` now
+  branches on `AppState.screen`: `prs` replaces the two panes with one full-width body (tab
+  header, PR list, per-repo error rows, detail pane) while the frame, context tabs and footer
+  stay put, so `ScreenContext` gained a `prScroll` offset alongside the two existing ones and
+  `worktreeColumns(rightWidth, badged?)` gained an optional PR-badge column that only exists
+  while a visible worktree row actually has a pull request. The footer reads its hints from
+  `prHints` on that screen, the palette lists only commands whose `screens` include the current
+  one, and `src/app/selectors.ts` exports `prScopeRepoIds` (previously private) so the UI can
+  label the scope and its freshness without re-deriving the scope rule.
+- 2026-09-02: pull requests became a first-class non-persisted app feature. Core now defines
+  validated `PullRequest`, `PrRepoSlice`, `PrTab`, check/review/state types and pure PR/worktree
+  matching helpers; `Config.github.prTtlSeconds` defaults to 90.
+  `GithubPort.readCachedPullRequests` returns validated per-repo/per-tab data from
+  `cache/github/prs/<owner>/<name>/<tab>.json`, while `listPullRequests` refreshes it;
+  `GitPort.fetchPullHead` safely fetches fork PR
+  refs; and `ProcessPort.openUrl` launches the platform browser with detached argv.
+  `PrService.load` streams isolated per-repo slices at concurrency four, while
+  `WorktreeService.create` accepts `source: {kind:"pull", number}` and persists fork worktrees
+  with `baseRef: pull/<number>/head`. `AppState` now carries `screen`, PR tab/cursor/filter/scope
+  and slice maps; its reducer, selectors, screen-aware keymap/command metadata, and `Controller`
+  expose PR navigation, refresh, contextual open/create, browser, copy, and back operations.
 - 2026-09-02: repository cloning became a persisted detached background job. `Shell.spawnDetached`
   now returns a pid and can redirect output to a log; `GitPort` exposes `cloneDetached`; `State`
   and `AppState` include clone jobs; and `RepoService.reconcileClones` promotes or fails them on

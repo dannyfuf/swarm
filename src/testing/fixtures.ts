@@ -3,6 +3,7 @@ import {
   type Config,
   type Context,
   defaultConfig,
+  type PullRequest,
   type RemoteRepo,
   type Repo,
   type State,
@@ -141,6 +142,31 @@ export const remoteRepos: RemoteRepo[] = [
     defaultBranch: "main",
   },
 ];
+
+export function pullRequest(overrides: Partial<PullRequest> = {}): PullRequest {
+  const pr: PullRequest = {
+    repoId: "bukhr/payroll",
+    number: 42,
+    title: "Improve payroll exports",
+    url: "https://github.com/bukhr/payroll/pull/42",
+    author: "octocat",
+    headRefName: "feat/payroll-exports",
+    baseRefName: "main",
+    isDraft: false,
+    isCrossRepository: false,
+    reviewDecision: "review_required",
+    checks: "pass",
+    additions: 120,
+    deletions: 24,
+    labels: ["feature"],
+    updatedAt: "2026-02-12T00:00:00.000Z",
+    ...overrides,
+  };
+  return {
+    ...pr,
+    url: overrides.url ?? `https://github.com/${pr.repoId}/pull/${pr.number}`,
+  };
+}
 
 export function makeState(overrides: Partial<State> = {}): State {
   return structuredClone({

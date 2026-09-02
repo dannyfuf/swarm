@@ -65,6 +65,84 @@ export const WorktreeSchema = z.object({
 });
 export type Worktree = z.infer<typeof WorktreeSchema>;
 
+export const PrTabSchema = z.enum(["mine", "review"]);
+export type PrTab = z.infer<typeof PrTabSchema>;
+
+export const PrChecksSchema = z.enum(["pass", "fail", "pending", "none"]);
+export type PrChecks = z.infer<typeof PrChecksSchema>;
+
+export const PrReviewDecisionSchema = z.enum([
+  "approved",
+  "changes_requested",
+  "review_required",
+  "none",
+]);
+export type PrReviewDecision = z.infer<typeof PrReviewDecisionSchema>;
+
+export const PrStateSchema = z.enum([
+  "draft",
+  "ci_fail",
+  "changes",
+  "ci_pending",
+  "approved",
+  "review",
+]);
+export type PrState = z.infer<typeof PrStateSchema>;
+
+export const PullRequestSchema = z
+  .object({
+    repoId: RepoId,
+    number: z.number().int().positive(),
+    title: z.string(),
+    url: z.string().url(),
+    author: z.string().min(1),
+    headRefName: z.string().min(1),
+    baseRefName: z.string().min(1),
+    isDraft: z.boolean(),
+    isCrossRepository: z.boolean(),
+    headRepo: RepoId.optional(),
+    reviewDecision: PrReviewDecisionSchema,
+    checks: PrChecksSchema,
+    additions: z.number().int().nonnegative(),
+    deletions: z.number().int().nonnegative(),
+    labels: z.array(z.string()),
+    updatedAt: z.string().datetime(),
+  })
+  .superRefine((pr, context) => {
+    let url: URL;
+    try {
+      url = new URL(pr.url);
+    } catch {
+      return;
+    }
+    const match = /^\/[^/]+\/[^/]+\/pull\/([1-9]\d*)$/u.exec(url.pathname);
+    if (
+      url.protocol !== "https:" ||
+      url.hostname !== "github.com" ||
+      url.port !== "" ||
+      url.username !== "" ||
+      url.password !== "" ||
+      url.search !== "" ||
+      url.hash !== "" ||
+      match?.[1] !== String(pr.number)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["url"],
+        message: `Expected https://github.com/<owner>/<name>/pull/${pr.number}`,
+      });
+    }
+  });
+export type PullRequest = z.infer<typeof PullRequestSchema>;
+
+export const PrRepoSliceSchema = z.object({
+  prs: z.array(PullRequestSchema),
+  fetchedAt: z.string().datetime().optional(),
+  error: z.string().optional(),
+  loading: z.boolean(),
+});
+export type PrRepoSlice = z.infer<typeof PrRepoSliceSchema>;
+
 export const StateSchema = z.object({
   version: z.literal(1),
   contexts: z.array(ContextSchema),
@@ -106,9 +184,10 @@ export const ConfigSchema = z.object({
   github: z
     .object({
       cacheTtlSeconds: z.number().int().default(3600),
+      prTtlSeconds: z.number().int().default(90),
       cloneProtocol: z.enum(["ssh", "https"]).default("ssh"),
     })
-    .default({ cacheTtlSeconds: 3600, cloneProtocol: "ssh" }),
+    .default({ cacheTtlSeconds: 3600, prTtlSeconds: 90, cloneProtocol: "ssh" }),
   ui: z
     .object({
       statusRefreshMs: z.number().int().default(2000),
@@ -165,7 +244,7 @@ export function defaultConfig(home: string): Config {
       keepAlive: DEFAULT_KEEP_ALIVE.map((rule) => ({ ...rule })),
       graceMs: 2000,
     },
-    github: { cacheTtlSeconds: 3600, cloneProtocol: "ssh" },
+    github: { cacheTtlSeconds: 3600, prTtlSeconds: 90, cloneProtocol: "ssh" },
     ui: { statusRefreshMs: 2000 },
   };
 }

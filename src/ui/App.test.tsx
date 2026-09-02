@@ -4,8 +4,9 @@ import type { TestRendererSetup } from "@opentui/core/testing";
 import { testRender } from "@opentui/react/test-utils";
 import { createStore } from "../app/store.ts";
 import type { Store, UiExit } from "../core/app.ts";
+import type { PullRequest } from "../core/types.ts";
 import { createFakeController, type FakeController } from "../testing/fakeController.ts";
-import { config as fixtureConfig, makeAppState } from "../testing/fixtures.ts";
+import { config as fixtureConfig, makeAppState, pullRequest } from "../testing/fixtures.ts";
 import { App } from "./App.tsx";
 
 interface Harness {
@@ -52,6 +53,54 @@ async function mount(width = 110, height = 32): Promise<Harness> {
     frame: () => setup.captureCharFrame(),
     stop: () => setup.renderer.destroy(),
   };
+}
+
+/** A PR whose head branch matches the `feat/payroll-fix` worktree fixture. */
+const linkedPr = pullRequest({
+  number: 1234,
+  title: "feat: add pr integration to swarm",
+  headRefName: "feat/payroll-fix",
+  author: "dannyfuf",
+  reviewDecision: "approved",
+  updatedAt: "2026-09-02T10:00:00.000Z",
+});
+
+const loosePr = pullRequest({
+  number: 1201,
+  title: "fix: nil guard on payroll export",
+  headRefName: "fix/nil-guard",
+  author: "dannyfuf",
+  updatedAt: "2026-09-01T10:00:00.000Z",
+});
+
+const reviewPr = pullRequest({
+  repoId: "bukhr/platform",
+  number: 877,
+  title: "feat: payroll export v2",
+  headRefName: "feat/export-v2",
+  author: "jperez",
+  updatedAt: "2026-09-02T08:00:00.000Z",
+});
+
+function seedPrs(harness: Harness, tab: "mine" | "review", prs: PullRequest[]): void {
+  const byRepo = new Map<string, PullRequest[]>();
+  for (const pr of prs) byRepo.set(pr.repoId, [...(byRepo.get(pr.repoId) ?? []), pr]);
+  for (const [repoId, group] of byRepo) {
+    harness.store.dispatch({
+      type: "prSlice",
+      tab,
+      repoId,
+      slice: { prs: group, fetchedAt: "2026-09-02T11:58:00.000Z", loading: false },
+    });
+  }
+}
+
+async function mountWithPrs(): Promise<Harness> {
+  const harness = await mount();
+  seedPrs(harness, "mine", [linkedPr, loosePr]);
+  seedPrs(harness, "review", [reviewPr]);
+  await harness.setup.flush();
+  return harness;
 }
 
 test("runTui's App mounts and paints the full frame", async () => {
@@ -217,6 +266,152 @@ test("n opens the create-worktree dialog seeded with known base refs", async () 
       assert.ok(dialog.branches.includes("origin/main"));
     }
     assert.ok(harness.frame().includes("New worktree"));
+  } finally {
+    harness.stop();
+  }
+});
+
+test("p opens the pull request screen, Tab toggles the tab and q returns", async () => {
+  const harness = await mountWithPrs();
+  try {
+    harness.setup.mockInput.pressKey("p");
+    await harness.setup.flush();
+    assert.equal(harness.store.getState().screen, "prs");
+    const frame = harness.frame();
+    assert.ok(frame.includes("PULL REQUESTS"), "the panes gave way to the PR body");
+    assert.ok(!frame.includes("WORKTREES"));
+    assert.ok(frame.includes("#1234"), "the PR number");
+    assert.ok(frame.includes("feat: add pr integration to swarm"), "the PR title");
+    assert.ok(frame.includes("approved"), "the state word");
+
+    harness.setup.mockInput.pressTab();
+    await harness.setup.flush();
+    assert.equal(harness.store.getState().prTab, "review");
+    assert.ok(harness.frame().includes("#877"));
+
+    harness.setup.mockInput.pressKey("q");
+    await harness.setup.flush();
+    assert.equal(harness.store.getState().screen, "main");
+    assert.deepEqual(harness.exits, [], "q on the PR screen goes back, it does not quit");
+  } finally {
+    harness.stop();
+  }
+});
+
+test("the PR footer promises open or create worktree depending on the row", async () => {
+  const harness = await mountWithPrs();
+  try {
+    harness.setup.mockInput.pressKey("p");
+    await harness.setup.flush();
+    assert.ok(harness.frame().includes("Enter open"), "the linked PR opens its worktree");
+
+    harness.setup.mockInput.pressKey("j");
+    await harness.setup.flush();
+    assert.equal(harness.store.getState().prCursor, 1);
+    assert.ok(harness.frame().includes("Enter create worktree"), "the loose PR creates one");
+  } finally {
+    harness.stop();
+  }
+});
+
+test("opening a PR exits the popup once the controller resolves", async () => {
+  const harness = await mountWithPrs();
+  try {
+    harness.setup.mockInput.pressKey("p");
+    await harness.setup.flush();
+    harness.setup.mockInput.pressEnter();
+    await harness.setup.flush();
+    assert.deepEqual(harness.exits, ["opened"]);
+  } finally {
+    harness.stop();
+  }
+});
+
+test("y on the PR screen copies the PR url instead of a worktree path", async () => {
+  const harness = await mountWithPrs();
+  try {
+    harness.setup.mockInput.pressKey("p");
+    await harness.setup.flush();
+    harness.setup.mockInput.pressKey("y");
+    await harness.setup.flush();
+    assert.deepEqual(harness.controller.yankedPrUrls, [linkedPr.url]);
+    assert.deepEqual(harness.controller.yankedPaths, []);
+  } finally {
+    harness.stop();
+  }
+});
+
+test("/ on the PR screen edits the PR filter, not the worktree filter", async () => {
+  const harness = await mountWithPrs();
+  try {
+    harness.setup.mockInput.pressKey("p");
+    await harness.setup.flush();
+    harness.setup.mockInput.pressKey("/");
+    await harness.setup.flush();
+    await harness.setup.mockInput.typeText("guard");
+    await harness.setup.flush();
+
+    assert.equal(harness.store.getState().prFilter, "guard");
+    assert.equal(harness.store.getState().filter, "");
+    const frame = harness.frame();
+    assert.ok(frame.includes("#1201"));
+    assert.ok(!frame.includes("#1234"), "non matching rows are gone");
+  } finally {
+    harness.stop();
+  }
+});
+
+test("the palette only lists commands the current screen can run", async () => {
+  const main = await mountWithPrs();
+  try {
+    main.setup.mockInput.pressKey(":");
+    await main.setup.flush();
+    await main.setup.mockInput.typeText("clone");
+    await main.setup.flush();
+    assert.ok(main.frame().includes("Create or clone"));
+  } finally {
+    main.stop();
+  }
+
+  const prs = await mountWithPrs();
+  try {
+    prs.setup.mockInput.pressKey("p");
+    await prs.setup.flush();
+    prs.setup.mockInput.pressKey(":");
+    await prs.setup.flush();
+    await prs.setup.mockInput.typeText("clone");
+    await prs.setup.flush();
+    assert.ok(!prs.frame().includes("Create or clone"), "a main-only command is gone");
+
+    for (let index = 0; index < 5; index += 1) prs.setup.mockInput.pressBackspace();
+    await prs.setup.mockInput.typeText("browser");
+    await prs.setup.flush();
+    assert.ok(prs.frame().includes("Open in browser"), "a PR-only command shows up");
+  } finally {
+    prs.stop();
+  }
+});
+
+test("the worktree list badges the branch that already has a pull request", async () => {
+  const harness = await mountWithPrs();
+  try {
+    const frame = harness.frame();
+    assert.ok(frame.includes("#1234 approved"), "the reverse link badge");
+    assert.ok(frame.includes("1 to review"), "the review count in the top line");
+  } finally {
+    harness.stop();
+  }
+});
+
+test("the help dialog documents the pull request keys", async () => {
+  const harness = await mount();
+  try {
+    harness.setup.mockInput.pressKey("?");
+    await harness.setup.flush();
+    const frame = harness.frame();
+    assert.ok(frame.includes("PULL REQUESTS"));
+    assert.ok(frame.includes("Pull requests"), "p is listed in the normal section");
+    assert.ok(frame.includes("Back to worktrees"));
   } finally {
     harness.stop();
   }

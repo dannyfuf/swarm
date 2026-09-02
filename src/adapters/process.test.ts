@@ -116,4 +116,34 @@ describe("process adapter", () => {
     assert.equal(await processPort.isAlive(process.pid), true);
     assert.equal(await processPort.isAlive(2_147_483_647), false);
   });
+
+  test("opens URLs detached with platform-specific argv", async () => {
+    const darwinShell = createFakeShell();
+    await createProcess(darwinShell, "darwin").openUrl("https://github.com/acme/app/pull/7");
+    assert.deepEqual(darwinShell.detachedCalls, [
+      { cmd: "open", args: ["https://github.com/acme/app/pull/7"], opts: undefined },
+    ]);
+
+    const linuxShell = createFakeShell();
+    await createProcess(linuxShell, "linux").openUrl("https://github.com/acme/app/pull/7");
+    assert.equal(linuxShell.detachedCalls[0]?.cmd, "xdg-open");
+  });
+
+  test("rejects non-GitHub hosts and unsafe URL schemes without launching", async () => {
+    const shell = createFakeShell();
+    const processPort = createProcess(shell, "darwin");
+
+    for (const url of [
+      "https://evil.example/phish",
+      "http://github.com/acme/app/pull/7",
+      "javascript:alert(1)",
+      "file:///tmp/pr",
+    ]) {
+      await assert.rejects(
+        processPort.openUrl(url),
+        (error: unknown) => error instanceof SwarmError && error.code === "validation",
+      );
+    }
+    assert.deepEqual(shell.detachedCalls, []);
+  });
 });

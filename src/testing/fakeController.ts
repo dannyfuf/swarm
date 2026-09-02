@@ -1,4 +1,4 @@
-import { selectedRepo, selectedWorktree } from "../app/selectors.ts";
+import { selectedPr, selectedRepo, selectedWorktree } from "../app/selectors.ts";
 import type { AppState, Controller, Operation, Store } from "../core/app.ts";
 import { SwarmError } from "../core/errors.ts";
 import { slugify, worktreeId } from "../core/paths.ts";
@@ -20,6 +20,8 @@ export type FakeController = Controller & {
   readonly remoteRepos: RemoteRepo[];
   readonly yankedPaths: string[];
   readonly disposed: boolean;
+  readonly yankedPrUrls: string[];
+  readonly browsedPrUrls: string[];
 };
 
 function wait(milliseconds: number): Promise<void> {
@@ -35,6 +37,8 @@ export function createFakeController(
   const remotes = structuredClone(fixtures.remoteRepos ?? defaultRemoteRepos);
   const delayMs = fixtures.operationDelayMs ?? 300;
   const yankedPaths: string[] = [];
+  const yankedPrUrls: string[] = [];
+  const browsedPrUrls: string[] = [];
   let disposed = false;
   let operationSequence = 0;
 
@@ -81,6 +85,8 @@ export function createFakeController(
       return remotes;
     },
     yankedPaths,
+    yankedPrUrls,
+    browsedPrUrls,
     get disposed() {
       return disposed;
     },
@@ -334,6 +340,31 @@ export function createFakeController(
         type: "toast",
         toast: { id: `yank-${worktree.id}`, level: "success", text: "Path copied" },
       });
+    },
+    async openPrs() {
+      store.dispatch({ type: "setPrTab", tab: "mine" });
+      store.dispatch({ type: "setScreen", screen: "prs", scope: { kind: "all" }, cursor: 0 });
+    },
+    async refreshPrs() {},
+    async openSelectedPr() {
+      const pr = selectedPr(store.getState());
+      if (!pr) throw new SwarmError("not-found", "No pull request is selected");
+    },
+    async browseSelectedPr() {
+      const pr = selectedPr(store.getState());
+      if (!pr) throw new SwarmError("not-found", "No pull request is selected");
+      browsedPrUrls.push(pr.url);
+    },
+    async yankSelectedPr() {
+      const pr = selectedPr(store.getState());
+      if (!pr) throw new SwarmError("not-found", "No pull request is selected");
+      yankedPrUrls.push(pr.url);
+    },
+    backToMain() {
+      store.dispatch({ type: "setScreen", screen: "main" });
+    },
+    setPrTab(tab) {
+      store.dispatch({ type: "setPrTab", tab });
     },
     dispose() {
       disposed = true;

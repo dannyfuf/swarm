@@ -93,6 +93,47 @@ describe("createWorktreeService", () => {
     ]);
   });
 
+  test("fetches a fork PR head before checkout and persists its pull ref", async () => {
+    const repo = repos[0];
+    assert.ok(repo);
+    const destination = "/home/test/.swarm/worktrees/bukhr/payroll/pr-77";
+    const state = createMemoryState(
+      makeState({ contexts: [contexts[0]], repos: [repo], worktrees: [] }),
+    );
+    const git = createFakeGit();
+    const service = createWorktreeService({
+      state,
+      config: createMemoryConfig(),
+      git,
+      files: createFakeFiles({ paths: [repo.path] }),
+      tmux: createFakeTmux(),
+      shell: createFakeShell(),
+      clock: createFixedClock(),
+      logger: createNullLogger(),
+    });
+    const steps: string[] = [];
+
+    const created = await service.create(
+      { repoId: repo.id, branch: "pr/77", source: { kind: "pull", number: 77 } },
+      (event) => {
+        if (event.type === "step") steps.push(event.label);
+      },
+    );
+
+    assert.equal(created.path, destination);
+    assert.equal(created.baseRef, "pull/77/head");
+    assert.ok(steps.includes("Fetching PR head"));
+    assert.equal(steps.includes("Creating branch"), false);
+    const branchCalls = git.calls.filter(({ method }) =>
+      ["fetchPullHead", "checkoutTracking"].includes(method),
+    );
+    assert.deepEqual(branchCalls, [
+      { method: "fetchPullHead", args: [destination, 77, "pr/77"] },
+      { method: "checkoutTracking", args: [destination, "pr/77"] },
+    ]);
+    assert.equal(state.state.worktrees[0]?.baseRef, "pull/77/head");
+  });
+
   test("rejects invalid branch forms before any I/O", async () => {
     const state = createMemoryState(makeState());
     const git = createFakeGit();
@@ -109,10 +150,20 @@ describe("createWorktreeService", () => {
     const invalid = [
       "",
       "feat with-space",
+      "feat\u0001control",
+      "feat\u007fcontrol",
       "feat..bad",
       "-leading",
+      "/leading",
       "trailing/",
+      "trailing.",
       "name.lock",
+      "feat/name.lock/next",
+      ".hidden",
+      "feat/.hidden",
+      "foo//bar",
+      "foo/@{bar",
+      "@",
       "bad~name",
       "bad^name",
       "bad:name",
@@ -130,6 +181,16 @@ describe("createWorktreeService", () => {
     }
     assert.deepEqual(git.calls, []);
     assert.equal(state.saves.length, 0);
+
+    await assert.rejects(
+      service.create({
+        repoId: "bukhr/payroll",
+        branch: "pr/1",
+        source: { kind: "pull", number: 0 },
+      }),
+      (error) => error instanceof SwarmError && error.code === "validation",
+    );
+    assert.deepEqual(git.calls, []);
   });
 
   test("detects id and path conflicts", async () => {

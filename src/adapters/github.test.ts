@@ -6,6 +6,7 @@ import type { RemoteRepo } from "../core/types.ts";
 import { createFakeFiles } from "../testing/fakeFiles.ts";
 import { createFakeShell } from "../testing/fakeShell.ts";
 import { createFixedClock } from "../testing/fixedClock.ts";
+import { pullRequest } from "../testing/fixtures.ts";
 import { createNullLogger } from "../testing/nullLogger.ts";
 import { createGithub } from "./github.ts";
 
@@ -40,6 +41,36 @@ function ghRepoJson(name = "live"): string {
       defaultBranchRef: null,
     },
   ]);
+}
+
+function ghPr(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  const number = typeof overrides.number === "number" ? overrides.number : 42;
+  return {
+    number,
+    title: "Improve exports",
+    url: `https://github.com/acme/app/pull/${number}`,
+    author: { login: "octocat" },
+    headRefName: "feat/exports",
+    baseRefName: "main",
+    isDraft: false,
+    isCrossRepository: false,
+    headRepository: { name: "app", nameWithOwner: "acme/app" },
+    headRepositoryOwner: { login: "acme" },
+    reviewDecision: "REVIEW_REQUIRED",
+    statusCheckRollup: [],
+    additions: 10,
+    deletions: 2,
+    labels: [{ name: "feature" }],
+    updatedAt: "2026-01-01T10:00:00.000Z",
+    ...overrides,
+  };
+}
+
+function prCache(fetchedAt: string) {
+  return JSON.stringify({
+    fetchedAt,
+    prs: [pullRequest({ repoId: "acme/app", url: "https://github.com/acme/app/pull/42" })],
+  });
 }
 
 function createAdapter(
@@ -177,5 +208,234 @@ describe("GitHub adapter", () => {
       assert.match(error.message, /gh auth login/);
       return true;
     });
+  });
+
+  test("uses exact pull request argv for both tabs", async () => {
+    const shell = createFakeShell([{ match: (cmd) => cmd === "gh", result: { stdout: "[]" } }]);
+    const { github } = createAdapter(createFakeFiles(), shell);
+
+    await github.listPullRequests({ owner: "acme", name: "app" }, "mine");
+    await github.listPullRequests({ owner: "acme", name: "app" }, "review");
+
+    const base = [
+      "pr",
+      "list",
+      "--repo",
+      "acme/app",
+      "--state",
+      "open",
+      "--limit",
+      "100",
+      "--json",
+      "number,title,url,author,headRefName,baseRefName,isDraft,isCrossRepository,headRepository,headRepositoryOwner,reviewDecision,statusCheckRollup,additions,deletions,labels,updatedAt",
+    ];
+    assert.deepEqual(shell.calls[0]?.args, [...base, "--author", "@me"]);
+    assert.deepEqual(shell.calls[1]?.args, [...base, "--search", "review-requested:@me"]);
+  });
+
+  test("maps review decisions, fork metadata, labels, and check rollups", async () => {
+    const shell = createFakeShell([
+      {
+        match: (cmd) => cmd === "gh",
+        result: {
+          stdout: JSON.stringify([
+            ghPr({
+              number: 1,
+              reviewDecision: "APPROVED",
+              statusCheckRollup: [{ conclusion: "SUCCESS", status: "COMPLETED" }],
+            }),
+            ghPr({
+              number: 2,
+              reviewDecision: "CHANGES_REQUESTED",
+              statusCheckRollup: [{ conclusion: "FAILURE", status: "COMPLETED" }],
+            }),
+            ghPr({
+              number: 3,
+              reviewDecision: "",
+              statusCheckRollup: [{ conclusion: null, status: "IN_PROGRESS" }],
+            }),
+            ghPr({
+              number: 4,
+              isCrossRepository: true,
+              headRepository: { name: "fork" },
+              headRepositoryOwner: { login: "contributor" },
+              reviewDecision: null,
+            }),
+          ]),
+        },
+      },
+    ]);
+    const { github } = createAdapter(createFakeFiles(), shell);
+
+    const result = await github.listPullRequests({ owner: "acme", name: "app" }, "mine");
+
+    assert.deepEqual(
+      result.prs.map(({ number, reviewDecision, checks }) => ({
+        number,
+        reviewDecision,
+        checks,
+      })),
+      [
+        { number: 1, reviewDecision: "approved", checks: "pass" },
+        { number: 2, reviewDecision: "changes_requested", checks: "fail" },
+        { number: 3, reviewDecision: "none", checks: "pending" },
+        { number: 4, reviewDecision: "none", checks: "none" },
+      ],
+    );
+    assert.equal(result.prs[3]?.headRepo, "contributor/fork");
+    assert.deepEqual(result.prs[0]?.labels, ["feature"]);
+  });
+
+  test("maps mixed CheckRun and StatusContext rollups", async () => {
+    const cases = [
+      {
+        rollup: [
+          { __typename: "CheckRun", conclusion: "SUCCESS", status: "COMPLETED" },
+          { __typename: "StatusContext", state: "SUCCESS" },
+        ],
+        expected: "pass",
+      },
+      {
+        rollup: [
+          { __typename: "CheckRun", conclusion: "STARTUP_FAILURE", status: "COMPLETED" },
+          { __typename: "StatusContext", state: "PENDING" },
+        ],
+        expected: "fail",
+      },
+      {
+        rollup: [
+          { __typename: "CheckRun", conclusion: "STALE", status: "COMPLETED" },
+          { __typename: "StatusContext", state: "SUCCESS" },
+        ],
+        expected: "pending",
+      },
+    ] as const;
+    const shell = createFakeShell([
+      {
+        match: (cmd) => cmd === "gh",
+        result: {
+          stdout: JSON.stringify(
+            cases.map(({ rollup }, index) =>
+              ghPr({ number: index + 1, statusCheckRollup: rollup }),
+            ),
+          ),
+        },
+      },
+    ]);
+    const { github } = createAdapter(createFakeFiles(), shell);
+
+    const result = await github.listPullRequests({ owner: "acme", name: "app" }, "mine");
+
+    assert.deepEqual(
+      result.prs.map(({ checks }) => checks),
+      cases.map(({ expected }) => expected),
+    );
+  });
+
+  test("maps a ghost author and deleted fork metadata without losing the PR", async () => {
+    const shell = createFakeShell([
+      {
+        match: (cmd) => cmd === "gh",
+        result: {
+          stdout: JSON.stringify([
+            ghPr({
+              author: null,
+              isCrossRepository: true,
+              headRepository: null,
+              headRepositoryOwner: null,
+            }),
+          ]),
+        },
+      },
+    ]);
+    const { github } = createAdapter(createFakeFiles(), shell);
+
+    const result = await github.listPullRequests({ owner: "acme", name: "app" }, "review");
+
+    assert.equal(result.prs[0]?.author, "ghost");
+    assert.equal(result.prs[0]?.headRepo, undefined);
+    assert.equal(result.prs[0]?.isCrossRepository, true);
+  });
+
+  test("validates pull request JSON", async () => {
+    const shell = createFakeShell([
+      { match: (cmd) => cmd === "gh", result: { stdout: JSON.stringify([ghPr({ number: -1 })]) } },
+    ]);
+    const { github } = createAdapter(createFakeFiles(), shell);
+
+    await assert.rejects(
+      github.listPullRequests({ owner: "acme", name: "app" }, "mine"),
+      (error: unknown) =>
+        error instanceof SwarmError && /invalid pull request data/.test(error.message),
+    );
+  });
+
+  test("reads validated PR caches with freshness separate from network refresh", async () => {
+    const path = `${cacheDir}/prs/acme/app/mine.json`;
+    const files = createFakeFiles({
+      texts: { [path]: prCache("2026-01-01T11:59:30.000Z") },
+    });
+    const shell = createFakeShell([
+      {
+        match: (cmd) => cmd === "gh",
+        result: { stdout: JSON.stringify([ghPr({ number: 88 })]) },
+      },
+    ]);
+    const { github } = createAdapter(files, shell);
+
+    const cached = await github.readCachedPullRequests({ owner: "acme", name: "app" }, "mine", {
+      ttlSeconds: 90,
+    });
+    assert.ok(cached);
+    assert.equal(cached.prs[0]?.number, 42);
+    assert.equal(cached.stale, false);
+    assert.equal(shell.calls.length, 0);
+    assert.equal(
+      (
+        await github.readCachedPullRequests({ owner: "acme", name: "app" }, "mine", {
+          ttlSeconds: 10,
+        })
+      )?.stale,
+      true,
+    );
+
+    const refreshed = await github.listPullRequests({ owner: "acme", name: "app" }, "mine");
+    assert.equal(refreshed.prs[0]?.number, 88);
+    const rewritten = await github.readCachedPullRequests({ owner: "acme", name: "app" }, "mine", {
+      ttlSeconds: 90,
+    });
+    assert.equal(rewritten?.prs[0]?.number, 88);
+    assert.equal(rewritten?.stale, false);
+  });
+
+  test("rejects invalid PR URLs from gh and ignores them in disk caches", async () => {
+    const path = `${cacheDir}/prs/acme/app/mine.json`;
+    const files = createFakeFiles({
+      texts: {
+        [path]: JSON.stringify({
+          fetchedAt: now,
+          prs: [pullRequest({ repoId: "acme/app", url: "https://evil.example/phish" })],
+        }),
+      },
+    });
+    const shell = createFakeShell([
+      {
+        match: (cmd) => cmd === "gh",
+        result: { stdout: JSON.stringify([ghPr({ url: "https://evil.example/phish" })]) },
+      },
+    ]);
+    const logger = createNullLogger();
+    const { github } = createAdapter(files, shell, logger);
+
+    assert.equal(
+      await github.readCachedPullRequests({ owner: "acme", name: "app" }, "mine"),
+      undefined,
+    );
+    assert.equal(logger.entries.at(-1)?.level, "warn");
+    await assert.rejects(
+      github.listPullRequests({ owner: "acme", name: "app" }, "mine"),
+      (error: unknown) =>
+        error instanceof SwarmError && /invalid pull request data/.test(error.message),
+    );
   });
 });

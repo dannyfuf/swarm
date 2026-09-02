@@ -39,8 +39,23 @@ const RIGHT_COLUMN: Line[] = [
   entry("m", "Move repo to context"),
   entry("gt / gT", "Next / prev context"),
   entry("1 - 9", "Nth context"),
+  entry("p", "Pull requests"),
   entry("/ / :", "Filter / commands"),
   entry(", / ?", "Settings / help"),
+];
+
+const PR_LEFT_COLUMN: Line[] = [
+  entry("⏎ / o", "Open or create worktree"),
+  entry("O", "Open, keep previous"),
+  entry("Tab / h l", "Switch tab"),
+  entry("b / y", "Browser / copy URL"),
+];
+
+const PR_RIGHT_COLUMN: Line[] = [
+  entry("/", "Filter pull requests"),
+  entry("r", "Force refresh scope"),
+  entry("1-9 gt gT", "Context (rescopes)"),
+  entry("p / q / Esc", "Back to worktrees"),
 ];
 
 const FILTER_COLUMN: Line[] = [
@@ -86,6 +101,9 @@ export function HelpDialog({ store }: { store: Store }) {
       <Spacer />
       <SectionLabel text="  NORMAL" />
       <LinesView lines={twoColumns(LEFT_COLUMN, RIGHT_COLUMN, columnWidth)} />
+      <Spacer />
+      <SectionLabel text="  PULL REQUESTS" />
+      <LinesView lines={twoColumns(PR_LEFT_COLUMN, PR_RIGHT_COLUMN, columnWidth)} />
       <Spacer />
       <LinesView
         lines={[

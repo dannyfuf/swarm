@@ -55,6 +55,8 @@ export const glyphs = {
   arrow: "→",
   checked: "x",
   check: "✓",
+  cross: "✗",
+  warn: "⚠",
   private: "◆",
   public: "◇",
   up: "↑",

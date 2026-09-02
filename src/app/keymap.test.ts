@@ -12,8 +12,9 @@ function resolve(
   event: KeyEvent,
   pending = "",
   hasFilter = false,
+  screen: "main" | "prs" = "main",
 ): { command: Command; pending: string } {
-  return resolveKey(mode, pending, event, { hasFilter });
+  return resolveKey(mode, pending, event, { hasFilter, screen });
 }
 
 describe("resolveKey normal mode", () => {
@@ -127,6 +128,45 @@ describe("resolveKey filter mode", () => {
   }
 });
 
+describe("resolveKey PR screen", () => {
+  const cases: Array<[string, KeyEvent, Command]> = [
+    ["tab", key("tab"), "nextTab"],
+    ["shift-tab", key("tab", { shift: true }), "prevTab"],
+    ["l", key("l"), "nextTab"],
+    ["right", key("right"), "nextTab"],
+    ["h", key("h"), "prevTab"],
+    ["left", key("left"), "prevTab"],
+    ["b", key("b"), "browse"],
+    ["p", key("p"), "back"],
+    ["q", key("q"), "back"],
+    ["escape", key("escape"), "back"],
+    ["ctrl-c", key("c", { ctrl: true }), "quit"],
+  ];
+
+  for (const [label, event, command] of cases) {
+    test(`${label} resolves to ${command}`, () => {
+      assert.deepEqual(resolve("normal", event, "", false, "prs"), {
+        command,
+        pending: "",
+      });
+    });
+  }
+
+  test("keeps navigation and context chords working", () => {
+    assert.equal(resolve("normal", key("g"), "", false, "prs").pending, "g");
+    assert.equal(resolve("normal", key("g"), "g", false, "prs").command, "top");
+    assert.equal(resolve("normal", key("t"), "g", false, "prs").command, "nextContext");
+    assert.equal(
+      resolve("normal", key("t", { shift: true }), "g", false, "prs").command,
+      "prevContext",
+    );
+  });
+
+  test("Escape clears a retained PR filter before going back", () => {
+    assert.equal(resolve("normal", key("escape"), "", true, "prs").command, "clearFilter");
+  });
+});
+
 describe("resolveKey dialog mode", () => {
   test("ctrl-c quits", () => {
     assert.deepEqual(resolve("dialog", key("c", { ctrl: true })), {
@@ -157,4 +197,6 @@ test("footer hints exist for both panes and palette commands are unique", () => 
   assert.ok(KEY_HINTS.repos.length > 0);
   assert.ok(KEY_HINTS.worktrees.length > 0);
   assert.equal(new Set(COMMANDS.map(({ command }) => command)).size, COMMANDS.length);
+  assert.ok(COMMANDS.every(({ screens }) => screens.length > 0));
+  assert.equal(resolve("normal", key("p")).command, "prs");
 });

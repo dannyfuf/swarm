@@ -4,6 +4,7 @@ export type FakeProcess = ProcessPort & {
   snapshotCalls: number;
   listeningPortCalls: number;
   alive: Set<number>;
+  openedUrls: string[];
 };
 
 export function createFakeProcess(
@@ -15,6 +16,7 @@ export function createFakeProcess(
     snapshotCalls: 0,
     listeningPortCalls: 0,
     alive,
+    openedUrls: [],
     async snapshot() {
       fake.snapshotCalls += 1;
       return processSnapshot.map((process) => ({ ...process }));
@@ -53,6 +55,9 @@ export function createFakeProcess(
     },
     async isAlive(pid) {
       return alive.has(pid);
+    },
+    async openUrl(url) {
+      fake.openedUrls.push(url);
     },
   };
   return fake;

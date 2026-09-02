@@ -1,22 +1,41 @@
 import type { Action, Controller, Operation, Store, Toast } from "../core/app.ts";
 import { SwarmError } from "../core/errors.ts";
 import { slugify, worktreeId } from "../core/paths.ts";
-import type { Clipboard, Clock, ConfigPort, Logger, StatePort, TmuxPort } from "../core/ports.ts";
+import type {
+  Clipboard,
+  Clock,
+  ConfigPort,
+  Logger,
+  ProcessPort,
+  StatePort,
+  TmuxPort,
+} from "../core/ports.ts";
+import { prLocalBranch, validateBranch } from "../core/prs.ts";
 import type {
   ContextService,
   OnEvent,
+  PrService,
   RepoService,
   SessionService,
   StatusService,
   WorktreeService,
 } from "../core/services.ts";
-import type { State, Worktree, WorktreeId, WorktreeStatus } from "../core/types.ts";
-import { selectedRepo, selectedWorktree } from "./selectors.ts";
+import type { PrTab, State, Worktree, WorktreeId, WorktreeStatus } from "../core/types.ts";
+import {
+  prsInScope,
+  prWorktree,
+  selectedPr,
+  selectedRepo,
+  selectedWorktree,
+  visibleRepos,
+  worktreePr,
+} from "./selectors.ts";
 
 export interface ControllerDeps {
   store: Store;
   contexts: ContextService;
   repos: RepoService;
+  prs: PrService;
   worktrees: WorktreeService;
   sessions: SessionService;
   status: StatusService;
@@ -24,6 +43,7 @@ export interface ControllerDeps {
   state: StatePort;
   tmux: TmuxPort;
   clipboard: Clipboard;
+  process: ProcessPort;
   clock: Clock;
   logger: Logger;
 }
@@ -186,6 +206,41 @@ export function createController(deps: ControllerDeps): Controller {
     await snapshot(persisted.worktrees, false);
   };
 
+  const activeContextRepoIds = (): Array<ReturnType<typeof visibleRepos>[number]["id"]> =>
+    visibleRepos(deps.store.getState()).map(({ id }) => id);
+
+  const prRepoIds = (): Array<ReturnType<typeof visibleRepos>[number]["id"]> => {
+    const state = deps.store.getState();
+    const contextRepos = visibleRepos(state);
+    if (state.prScope.kind === "repo") {
+      const repoId = state.prScope.repoId;
+      return contextRepos.some(({ id }) => id === repoId) ? [repoId] : [];
+    }
+    return contextRepos.map(({ id }) => id);
+  };
+
+  const loadPrTabs = async (
+    tabs: PrTab[],
+    force: boolean,
+    repoIds = prRepoIds(),
+  ): Promise<void> => {
+    await Promise.all(
+      tabs.map((tab) =>
+        deps.prs.load(repoIds, tab, {
+          force,
+          onSlice(repoId, slice) {
+            const previousError = deps.store.getState().prs[tab][repoId]?.error;
+            dispatch({ type: "prSlice", tab, repoId, slice });
+            if (slice.error && previousError === undefined) {
+              deps.logger.error(slice.error, { repoId, tab });
+              toast("error", slice.error);
+            }
+          },
+        }),
+      ),
+    );
+  };
+
   const runOperation = async (options: {
     label: string;
     targetId?: string;
@@ -302,6 +357,7 @@ export function createController(deps: ControllerDeps): Controller {
           },
           Math.max(minimumRefreshMs, config.ui.statusRefreshMs),
         );
+        void loadPrTabs(["mine", "review"], false, activeContextRepoIds());
       } catch (error) {
         const swarmError = reportError(error);
         dispatch({
@@ -318,6 +374,7 @@ export function createController(deps: ControllerDeps): Controller {
       try {
         await deps.contexts.setActive(id);
         dispatch({ type: "setContext", contextId: id });
+        void loadPrTabs(["mine", "review"], false, activeContextRepoIds());
       } catch (error) {
         throw reportError(error);
       }
@@ -591,6 +648,121 @@ export function createController(deps: ControllerDeps): Controller {
       } catch (error) {
         reportError(error);
       }
+    },
+
+    async openPrs() {
+      const state = deps.store.getState();
+      const repo = selectedRepo(state);
+      const scope = repo ? { kind: "repo" as const, repoId: repo.id } : { kind: "all" as const };
+      const worktree = state.pane === "worktrees" ? selectedWorktree(state) : undefined;
+      const linked = worktree ? worktreePr(state, worktree) : undefined;
+      const scopedState = { ...state, prTab: "mine" as const, prScope: scope };
+      const cursor = linked
+        ? Math.max(
+            0,
+            prsInScope(scopedState, "mine").findIndex(
+              (pr) => pr.repoId === linked.repoId && pr.number === linked.number,
+            ),
+          )
+        : 0;
+      dispatch({ type: "setPrTab", tab: "mine" });
+      dispatch({ type: "setScreen", screen: "prs", scope, cursor });
+      void loadPrTabs(["mine", "review"], false);
+    },
+
+    async refreshPrs({ force }) {
+      await loadPrTabs(["mine", "review"], force);
+    },
+
+    async openSelectedPr({ keepPrevious }) {
+      const state = deps.store.getState();
+      const pr = selectedPr(state);
+      if (!pr) {
+        throw reportError(new SwarmError("not-found", "No pull request is selected"));
+      }
+      const linked = prWorktree(state, pr);
+      if (linked) {
+        try {
+          await deps.sessions.open(linked, { sleepPrevious: !keepPrevious });
+          return;
+        } catch (error) {
+          throw reportError(error);
+        }
+      }
+
+      const branch = prLocalBranch(pr);
+      try {
+        validateBranch(branch);
+      } catch (error) {
+        throw reportError(error);
+      }
+      let created: Worktree | undefined;
+      let failure: unknown;
+      await runOperation({
+        label: "Creating worktree",
+        targetId: worktreeId(pr.repoId, slugify(branch)),
+        success: `Worktree ${branch} ready`,
+        execute: async (onEvent) => {
+          try {
+            created = await deps.worktrees.create(
+              {
+                repoId: pr.repoId,
+                branch,
+                ...(pr.isCrossRepository
+                  ? { source: { kind: "pull" as const, number: pr.number } }
+                  : {}),
+              },
+              onEvent,
+            );
+            return created;
+          } catch (error) {
+            failure = error;
+            throw error;
+          }
+        },
+      });
+      if (failure !== undefined) throw failure;
+      if (!created) throw new SwarmError("conflict", `Worktree creation already in progress`);
+      try {
+        await deps.sessions.open(created, { sleepPrevious: !keepPrevious });
+      } catch (error) {
+        throw reportError(error);
+      }
+    },
+
+    async browseSelectedPr() {
+      const pr = selectedPr(deps.store.getState());
+      if (!pr) {
+        reportError(new SwarmError("not-found", "No pull request is selected"));
+        return;
+      }
+      try {
+        await deps.process.openUrl(pr.url);
+      } catch (error) {
+        reportError(error);
+      }
+    },
+
+    async yankSelectedPr() {
+      const pr = selectedPr(deps.store.getState());
+      if (!pr) {
+        reportError(new SwarmError("not-found", "No pull request is selected"));
+        return;
+      }
+      try {
+        await deps.clipboard.copy(pr.url);
+        toast("success", "Copied PR URL");
+      } catch (error) {
+        reportError(error);
+      }
+    },
+
+    backToMain() {
+      dispatch({ type: "setScreen", screen: "main" });
+    },
+
+    setPrTab(tab) {
+      dispatch({ type: "setPrTab", tab });
     },
 
     dispose() {

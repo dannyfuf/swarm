@@ -11,8 +11,6 @@ function commandFailure(command: string, result: ShellResult): SwarmError {
 }
 
 export function createProcess(shell: Shell, platform: NodeJS.Platform): ProcessPort {
-  void platform;
-
   return {
     async snapshot() {
       let result: ShellResult;
@@ -109,6 +107,24 @@ export function createProcess(shell: Shell, platform: NodeJS.Platform): ProcessP
           return true;
         }
         return false;
+      }
+    },
+
+    async openUrl(url) {
+      let parsed: URL;
+      try {
+        parsed = new URL(url);
+      } catch (cause) {
+        throw new SwarmError("validation", `Invalid URL: ${url}`, { cause });
+      }
+      if (parsed.protocol !== "https:" || parsed.hostname !== "github.com") {
+        throw new SwarmError("validation", `Unsupported URL: ${url}`);
+      }
+      const command = platform === "darwin" ? "open" : "xdg-open";
+      try {
+        await shell.spawnDetached(command, [url]);
+      } catch (cause) {
+        throw new SwarmError("unsupported", `Unable to open URL: ${url}`, { cause });
       }
     },
   };

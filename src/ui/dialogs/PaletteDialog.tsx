@@ -35,8 +35,10 @@ export function PaletteDialog({
       label: `Switch to ${context.name}`,
       keys: `${index + 1}`,
     }));
-    return [...COMMANDS, ...contextItems];
-  }, [state.contexts]);
+    // A command the current screen cannot run has no business being listed.
+    const available = COMMANDS.filter((command) => command.screens.includes(state.screen));
+    return [...available, ...contextItems];
+  }, [state.contexts, state.screen]);
 
   const matches = useMemo(
     () => fuzzyFilter(query, items, (item) => item.label).slice(0, VISIBLE),

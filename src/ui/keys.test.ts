@@ -54,7 +54,7 @@ test("j and k only move lists when no text field owns the keyboard", () => {
 });
 
 test("real OpenTUI key shapes resolve to the documented commands", () => {
-  const context = { hasFilter: false };
+  const context = { hasFilter: false, screen: "main" as const };
   const cases: Array<[Partial<CoreKeyEvent>, string]> = [
     [{ name: "j", sequence: "j" }, "down"],
     [{ name: "k", sequence: "k" }, "up"],
@@ -81,7 +81,7 @@ test("real OpenTUI key shapes resolve to the documented commands", () => {
 });
 
 test("gg and gt chord through the pending buffer", () => {
-  const context = { hasFilter: false };
+  const context = { hasFilter: false, screen: "main" as const };
   const first = resolveKey(
     "normal",
     "",
@@ -110,7 +110,7 @@ test("gg and gt chord through the pending buffer", () => {
 });
 
 test("filter mode leaves printable keys to the input", () => {
-  const context = { hasFilter: true };
+  const context = { hasFilter: true, screen: "main" as const };
   assert.equal(
     resolveKey("filter", "", toKeyEvent(coreKey({ name: "p", sequence: "p" })), context).command,
     "none",
@@ -127,7 +127,7 @@ test("filter mode leaves printable keys to the input", () => {
 });
 
 test("dialog mode swallows everything except ctrl-c", () => {
-  const context = { hasFilter: false };
+  const context = { hasFilter: false, screen: "main" as const };
   assert.equal(
     resolveKey("dialog", "", toKeyEvent(coreKey({ name: "j", sequence: "j" })), context).command,
     "none",

@@ -31,6 +31,7 @@ describe("git adapter", () => {
     await git.resetToRemote("/repos/repo", "main");
     await git.checkoutNewBranch("/work/repo", "feature/new", "origin/main");
     await git.checkoutTracking("/work/repo", "feature/x");
+    await git.fetchPullHead("/work/repo", 42, "pr/42");
     assert.deepEqual(await git.remoteBranches("/repos/repo"), ["origin/main", "origin/feature/x"]);
     assert.equal(await git.currentBranch("/work/repo"), "feature/x");
     assert.equal(await git.isDirty("/work/repo"), true);
@@ -53,6 +54,7 @@ describe("git adapter", () => {
         ["git", ["clean", "-fd"]],
         ["git", ["checkout", "-b", "feature/new", "origin/main"]],
         ["git", ["checkout", "feature/x"]],
+        ["git", ["fetch", "origin", "+refs/pull/42/head:refs/heads/pr/42"]],
         ["git", ["for-each-ref", "--format=%(refname:short)", "refs/remotes/origin"]],
         ["git", ["branch", "--show-current"]],
         ["git", ["status", "--porcelain", "--untracked-files=normal"]],
@@ -116,5 +118,19 @@ describe("git adapter", () => {
         error.code === "git" &&
         error.message.includes("fatal: repository missing"),
     );
+  });
+
+  test("validates pull request fetch inputs before invoking git", async () => {
+    const shell = createFakeShell();
+    const git = createGit(shell, createNullLogger());
+    await assert.rejects(
+      git.fetchPullHead("/repo", 0, "pr/0"),
+      (error) => error instanceof SwarmError && error.code === "validation",
+    );
+    await assert.rejects(
+      git.fetchPullHead("/repo", 1, "bad branch"),
+      (error) => error instanceof SwarmError && error.code === "validation",
+    );
+    assert.equal(shell.calls.length, 0);
   });
 });

@@ -3,6 +3,9 @@ import type {
   Config,
   Context,
   ContextId,
+  PrRepoSlice,
+  PrTab,
+  PullRequest,
   RemoteRepo,
   Repo,
   RepoId,
@@ -53,6 +56,12 @@ export interface AppState {
   worktrees: Worktree[];
   statuses: Record<WorktreeId, WorktreeStatus>;
   activeContextId?: ContextId;
+  screen: "main" | "prs";
+  prTab: PrTab;
+  prCursor: number;
+  prFilter: string;
+  prScope: { kind: "all" } | { kind: "repo"; repoId: RepoId };
+  prs: Record<PrTab, Record<RepoId, PrRepoSlice>>;
   pane: Pane;
   mode: Mode;
   repoCursor: number;
@@ -81,6 +90,15 @@ export type Action =
   | { type: "focus"; pane: Pane }
   | { type: "setMode"; mode: Mode }
   | { type: "setFilter"; filter: string }
+  | {
+      type: "setScreen";
+      screen: AppState["screen"];
+      scope?: AppState["prScope"];
+      cursor?: number;
+    }
+  | { type: "setPrTab"; tab: PrTab }
+  | { type: "setPrFilter"; filter: string }
+  | { type: "prSlice"; tab: PrTab; repoId: RepoId; slice: PrRepoSlice }
   | { type: "setContext"; contextId: ContextId }
   | { type: "openDialog"; dialog: DialogKind }
   | { type: "closeDialog" }
@@ -98,6 +116,14 @@ export interface Selectors {
   visibleWorktrees(state: AppState): Worktree[];
   selectedRepo(state: AppState): Repo | undefined;
   selectedWorktree(state: AppState): Worktree | undefined;
+  prsInScope(state: AppState, tab: PrTab): PullRequest[];
+  prErrorsInScope(state: AppState, tab: PrTab): Array<{ repoId: RepoId; error: string }>;
+  prLoadingInScope(state: AppState, tab: PrTab): boolean;
+  selectedPr(state: AppState): PullRequest | undefined;
+  prWorktree(state: AppState, pr: PullRequest): Worktree | undefined;
+  worktreePr(state: AppState, worktree: Worktree): PullRequest | undefined;
+  reviewCount(state: AppState): number;
+  prHints(state: AppState): Array<{ key: string; label: string }>;
 }
 
 export interface Controller {
@@ -118,6 +144,13 @@ export interface Controller {
   saveConfig(patch: Partial<Config>): Promise<void>;
   getConfig(): Config;
   yankPath(): Promise<void>;
+  openPrs(): Promise<void>;
+  refreshPrs(opts: { force: boolean }): Promise<void>;
+  openSelectedPr(opts: { keepPrevious: boolean }): Promise<void>;
+  browseSelectedPr(): Promise<void>;
+  yankSelectedPr(): Promise<void>;
+  backToMain(): void;
+  setPrTab(tab: PrTab): void;
   dispose(): void;
 }
 
@@ -138,6 +171,11 @@ export type Command =
   | "halfUp"
   | "left"
   | "right"
+  | "prs"
+  | "back"
+  | "nextTab"
+  | "prevTab"
+  | "browse"
   | "open"
   | "openKeep"
   | "new"
@@ -164,7 +202,7 @@ export type ResolveKey = (
   mode: Mode,
   pending: string,
   event: KeyEvent,
-  context: { hasFilter: boolean },
+  context: { hasFilter: boolean; screen: AppState["screen"] },
 ) => { command: Command; pending: string };
 
 export interface UiDeps {

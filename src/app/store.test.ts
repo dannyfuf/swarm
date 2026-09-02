@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import type { AppState, Operation } from "../core/app.ts";
 import { defaultConfig, type WorktreeStatus } from "../core/types.ts";
-import { makeAppState } from "../testing/fixtures.ts";
+import { makeAppState, pullRequest } from "../testing/fixtures.ts";
 import { selectedRepo, selectedWorktree, visibleRepos, visibleWorktrees } from "./selectors.ts";
 import { createStore, reduce } from "./store.ts";
 
@@ -112,6 +112,56 @@ describe("reduce", () => {
     assert.equal(result.repoCursor, 0);
     assert.equal(result.worktreeCursor, 0);
     assert.equal(result.filter, "");
+  });
+
+  test("manages PR screen state and clamps its cursor to the visible list", () => {
+    const pr = pullRequest();
+    let current = state({
+      prs: {
+        mine: {
+          [pr.repoId]: { prs: [pr, pullRequest({ number: 43 })], loading: false },
+        },
+        review: {},
+      },
+    });
+    current = reduce(current, {
+      type: "setScreen",
+      screen: "prs",
+      scope: { kind: "repo", repoId: pr.repoId },
+      cursor: 1,
+    });
+    assert.equal(current.screen, "prs");
+    assert.equal(current.prCursor, 1);
+    current = reduce(current, { type: "move", pane: "repos", delta: 99 });
+    assert.equal(current.prCursor, 1);
+    current = reduce(current, { type: "setPrFilter", filter: "#42" });
+    assert.equal(current.prCursor, 0);
+    assert.equal(current.prFilter, "#42");
+    current = reduce(current, { type: "setPrTab", tab: "review" });
+    assert.equal(current.prTab, "review");
+    assert.equal(current.prCursor, 0);
+    current = reduce(current, {
+      type: "prSlice",
+      tab: "review",
+      repoId: pr.repoId,
+      slice: { prs: [pr], loading: false },
+    });
+    assert.deepEqual(current.prs.review[pr.repoId]?.prs, [pr]);
+  });
+
+  test("re-scopes to all repos when changing context on the PR screen", () => {
+    const result = reduce(
+      state({
+        screen: "prs",
+        prTab: "review",
+        prCursor: 3,
+        prScope: { kind: "repo", repoId: "bukhr/payroll" },
+      }),
+      { type: "setContext", contextId: "personal" },
+    );
+    assert.deepEqual(result.prScope, { kind: "all" });
+    assert.equal(result.prCursor, 0);
+    assert.equal(result.prTab, "review");
   });
 
   test("opens and closes dialogs while synchronizing mode", () => {

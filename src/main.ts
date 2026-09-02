@@ -18,6 +18,7 @@ import type { Clock, Logger, Shell, ShellResult } from "./core/ports.ts";
 import type { UnmountReport } from "./core/services.ts";
 import type { Config, State, Worktree } from "./core/types.ts";
 import { createContextService } from "./services/contexts.ts";
+import { createPrService } from "./services/prs.ts";
 import { createRepoService } from "./services/repos.ts";
 import { createSessionService } from "./services/sessions.ts";
 import { createStatusService } from "./services/status.ts";
@@ -160,6 +161,7 @@ async function createRuntime(env: NodeJS.ProcessEnv): Promise<Runtime> {
     home,
   });
   const contexts = createContextService({ state, clock, repoService: repos });
+  const prs = createPrService({ github, ttlSeconds: configValue.github.prTtlSeconds });
   const sessions = createSessionService({
     tmux,
     process: processPort,
@@ -180,6 +182,7 @@ async function createRuntime(env: NodeJS.ProcessEnv): Promise<Runtime> {
     store,
     contexts,
     repos,
+    prs,
     worktrees,
     sessions,
     status,
@@ -187,6 +190,7 @@ async function createRuntime(env: NodeJS.ProcessEnv): Promise<Runtime> {
     state,
     tmux,
     clipboard,
+    process: processPort,
     clock,
     logger,
   });

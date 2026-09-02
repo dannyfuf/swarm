@@ -3,6 +3,8 @@ import { createRoot, useKeyboard, useTerminalDimensions } from "@opentui/react";
 import { useEffect, useRef, useSyncExternalStore } from "react";
 import { resolveKey } from "../app/keymap.ts";
 import {
+  prsInScope,
+  selectedPr,
   selectedRepo,
   selectedWorktree,
   visibleRepoItems,
@@ -62,6 +64,7 @@ export function App({ store, controller, onExit, home = process.env.HOME ?? "" }
   const pending = useRef("");
   const repoScroll = useRef(0);
   const worktreeScroll = useRef(0);
+  const prScroll = useRef(0);
 
   const worktrees = visibleWorktrees(state);
   repoScroll.current = nextScroll(
@@ -75,6 +78,12 @@ export function App({ store, controller, onExit, home = process.env.HOME ?? "" }
     state.worktreeCursor,
     layout.listRows,
     worktrees.length,
+  );
+  prScroll.current = nextScroll(
+    prScroll.current,
+    state.prCursor,
+    layout.listRows,
+    prsInScope(state, state.prTab).length,
   );
 
   useEffect(() => {
@@ -114,6 +123,7 @@ export function App({ store, controller, onExit, home = process.env.HOME ?? "" }
   function runCommand(command: Command): void {
     const current = store.getState();
     const halfPage = Math.max(1, Math.floor(layout.listRows / 2));
+    const onPrs = current.screen === "prs";
 
     if (command.startsWith("context:")) {
       switchContext(Number(command.slice("context:".length)) - 1);
@@ -145,8 +155,30 @@ export function App({ store, controller, onExit, home = process.env.HOME ?? "" }
       case "right":
         store.dispatch({ type: "focus", pane: "worktrees" });
         return;
+      case "prs":
+        guard(() => controller.openPrs());
+        return;
+      case "back":
+        controller.backToMain();
+        return;
+      case "nextTab":
+      case "prevTab":
+        // Two tabs: either direction is the same toggle.
+        controller.setPrTab(current.prTab === "mine" ? "review" : "mine");
+        return;
+      case "browse":
+        guard(() => controller.browseSelectedPr());
+        return;
       case "open":
       case "openKeep": {
+        if (onPrs) {
+          if (!selectedPr(current)) return;
+          guard(async () => {
+            await controller.openSelectedPr({ keepPrevious: command === "openKeep" });
+            onExit("opened");
+          });
+          return;
+        }
         if (current.pane === "repos") {
           store.dispatch({ type: "focus", pane: "worktrees" });
           return;
@@ -219,14 +251,16 @@ export function App({ store, controller, onExit, home = process.env.HOME ?? "" }
         return;
       }
       case "refresh":
-        guard(() => controller.refresh());
+        guard(() => (onPrs ? controller.refreshPrs({ force: true }) : controller.refresh()));
         return;
       case "filter":
-        store.dispatch({ type: "focus", pane: "worktrees" });
+        if (!onPrs) store.dispatch({ type: "focus", pane: "worktrees" });
         store.dispatch({ type: "setMode", mode: "filter" });
         return;
       case "clearFilter":
-        store.dispatch({ type: "setFilter", filter: "" });
+        store.dispatch(
+          onPrs ? { type: "setPrFilter", filter: "" } : { type: "setFilter", filter: "" },
+        );
         return;
       case "palette":
         store.dispatch({ type: "openDialog", dialog: { kind: "palette" } });
@@ -238,7 +272,7 @@ export function App({ store, controller, onExit, home = process.env.HOME ?? "" }
         store.dispatch({ type: "openDialog", dialog: { kind: "help" } });
         return;
       case "yank":
-        guard(() => controller.yankPath());
+        guard(() => (onPrs ? controller.yankSelectedPr() : controller.yankPath()));
         return;
       case "nextContext":
       case "prevContext": {
@@ -277,7 +311,8 @@ export function App({ store, controller, onExit, home = process.env.HOME ?? "" }
     }
 
     const resolution = resolveKey(current.mode, pending.current, event, {
-      hasFilter: current.filter !== "",
+      hasFilter: (current.screen === "prs" ? current.prFilter : current.filter) !== "",
+      screen: current.screen,
     });
     pending.current = resolution.pending;
     if (resolution.command === "none") return;
@@ -293,11 +328,14 @@ export function App({ store, controller, onExit, home = process.env.HOME ?? "" }
     home,
     repoScroll: repoScroll.current,
     worktreeScroll: worktreeScroll.current,
+    prScroll: prScroll.current,
     ghosted: state.dialog !== undefined,
   });
 
-  const filterLeft = layout.rightColumn + 3;
-  const filterWidth = Math.max(8, layout.rightWidth - 14);
+  const onPrs = state.screen === "prs";
+  // The filter input is laid over the pane header of whichever list it filters.
+  const filterLeft = onPrs ? 4 : layout.rightColumn + 3;
+  const filterWidth = Math.max(8, (onPrs ? width - 2 : layout.rightWidth) - 14);
 
   return (
     <box width={width} height={height} flexDirection="column">
@@ -309,9 +347,13 @@ export function App({ store, controller, onExit, home = process.env.HOME ?? "" }
           top={layout.headerRow}
           width={filterWidth}
           focused
-          value={state.filter}
-          placeholder="branch…"
-          onInput={(value: string) => store.dispatch({ type: "setFilter", filter: value })}
+          value={onPrs ? state.prFilter : state.filter}
+          placeholder={onPrs ? "pull request…" : "branch…"}
+          onInput={(value: string) =>
+            store.dispatch(
+              onPrs ? { type: "setPrFilter", filter: value } : { type: "setFilter", filter: value },
+            )
+          }
           backgroundColor="transparent"
           focusedBackgroundColor="transparent"
           textColor={theme.strong}

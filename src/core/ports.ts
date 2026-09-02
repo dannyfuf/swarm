@@ -1,4 +1,4 @@
-import type { Config, RemoteRepo, State } from "./types.ts";
+import type { Config, PrTab, PullRequest, RemoteRepo, State } from "./types.ts";
 
 export interface ShellResult {
   code: number;
@@ -39,6 +39,7 @@ export interface GitPort {
   resetToRemote(repoPath: string, branch: string): Promise<void>;
   checkoutNewBranch(path: string, branch: string, from: string): Promise<void>;
   checkoutTracking(path: string, branch: string): Promise<void>;
+  fetchPullHead(path: string, number: number, localBranch: string): Promise<void>;
   remoteBranches(repoPath: string): Promise<string[]>;
   currentBranch(path: string): Promise<string>;
   isDirty(path: string, opts?: { signal?: AbortSignal }): Promise<boolean>;
@@ -107,11 +108,22 @@ export interface ProcessPort {
   descendants(root: number, snapshot: ProcInfo[]): ProcInfo[];
   listeningPorts(pids: number[]): Promise<Map<number, number[]>>;
   isAlive(pid: number): Promise<boolean>;
+  openUrl(url: string): Promise<void>;
 }
 
 export interface GithubPort {
   viewer(): Promise<{ login: string }>;
   listRepos(owner: string, opts?: { signal?: AbortSignal; force?: boolean }): Promise<RemoteRepo[]>;
+  readCachedPullRequests(
+    repo: { owner: string; name: string },
+    tab: PrTab,
+    opts?: { ttlSeconds?: number },
+  ): Promise<{ prs: PullRequest[]; fetchedAt: string; stale: boolean } | undefined>;
+  listPullRequests(
+    repo: { owner: string; name: string },
+    tab: PrTab,
+    opts?: { signal?: AbortSignal },
+  ): Promise<{ prs: PullRequest[]; fetchedAt: string }>;
 }
 
 export interface StatePort {

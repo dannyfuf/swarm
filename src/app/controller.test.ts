@@ -6,19 +6,32 @@ import type { ConfigPort, StatePort, TmuxPort } from "../core/ports.ts";
 import type {
   ContextService,
   OnEvent,
+  PrService,
   RepoService,
   SessionService,
   StatusService,
   WorktreeService,
 } from "../core/services.ts";
-import type { CloneJob, State, Worktree, WorktreeId, WorktreeStatus } from "../core/types.ts";
+import type {
+  CloneJob,
+  PrRepoSlice,
+  PrTab,
+  PullRequest,
+  RepoId,
+  State,
+  Worktree,
+  WorktreeId,
+  WorktreeStatus,
+} from "../core/types.ts";
 import { createFakeClipboard } from "../testing/fakeClipboard.ts";
+import { createFakeProcess } from "../testing/fakeProcess.ts";
 import { createFixedClock, type FixedClock } from "../testing/fixedClock.ts";
 import {
   config,
   contexts,
   makeAppState,
   makeState,
+  pullRequest,
   remoteRepos,
   repos,
   worktrees,
@@ -43,6 +56,7 @@ interface Harness {
     deleteWorktree: WorktreeService["delete"];
     open: SessionService["open"];
     setContext: ContextService["setActive"];
+    loadPr: PrService["load"];
   };
   calls: {
     snapshots: Worktree[][];
@@ -53,6 +67,9 @@ interface Harness {
     intervals: number[];
     clearedIntervals: unknown[];
     reconciliations: number;
+    prLoads: Array<{ repoIds: RepoId[]; tab: PrTab; force?: boolean }>;
+    clipboardCopies: string[];
+    openedUrls: string[];
   };
   setPersisted(state: State): void;
 }
@@ -100,6 +117,9 @@ function createHarness(initial: State = makeState()): Harness {
     intervals: [],
     clearedIntervals: [],
     reconciliations: 0,
+    prLoads: [],
+    clipboardCopies: [],
+    openedUrls: [],
   };
 
   const behavior: Harness["behavior"] = {
@@ -133,6 +153,7 @@ function createHarness(initial: State = makeState()): Harness {
     async deleteWorktree() {},
     async open() {},
     async setContext() {},
+    async loadPr() {},
   };
 
   const state: StatePort = {
@@ -226,6 +247,12 @@ function createHarness(initial: State = makeState()): Harness {
       return behavior.snapshot(items);
     },
   };
+  const prService: PrService = {
+    async load(repoIds, tab, opts) {
+      calls.prLoads.push({ repoIds: [...repoIds], tab, force: opts.force });
+      return behavior.loadPr(repoIds, tab, opts);
+    },
+  };
   const tmux: TmuxPort = {
     insideTmux: () => true,
     async currentSession() {
@@ -268,17 +295,23 @@ function createHarness(initial: State = makeState()): Harness {
     clockClearInterval(handle);
   };
 
+  const clipboard = createFakeClipboard();
+  calls.clipboardCopies = clipboard.copies;
+  const process = createFakeProcess();
+  calls.openedUrls = process.openedUrls;
   const controller = createController({
     store,
     contexts: contextService,
     repos: repoService,
+    prs: prService,
     worktrees: worktreeService,
     sessions: sessionService,
     status: statusService,
     config: configPort,
     state,
     tmux,
-    clipboard: createFakeClipboard(),
+    clipboard,
+    process,
     clock,
     logger: createNullLogger(),
   });
@@ -316,6 +349,21 @@ async function flush(): Promise<void> {
   await new Promise<void>((resolve) => setImmediate(resolve));
 }
 
+function seedPrs(
+  harness: Harness,
+  tab: PrTab,
+  repoId: RepoId,
+  prs: PullRequest[],
+  overrides: Partial<PrRepoSlice> = {},
+): void {
+  harness.store.dispatch({
+    type: "prSlice",
+    tab,
+    repoId,
+    slice: { prs, fetchedAt: "2026-01-01T00:00:00.000Z", loading: false, ...overrides },
+  });
+}
+
 describe("createController", () => {
   test("init hydrates before streaming statuses and starts polling", async () => {
     const harness = createHarness(makeState({ activeContextId: undefined }));
@@ -336,6 +384,24 @@ describe("createController", () => {
 
     harness.controller.dispose();
     assert.equal(harness.calls.clearedIntervals.length, 1);
+  });
+
+  test("init starts both PR tabs in the background without awaiting them", async () => {
+    const harness = createHarness();
+    const pending = deferred<void>();
+    harness.behavior.loadPr = async () => pending.promise;
+
+    await harness.controller.init();
+
+    assert.deepEqual(
+      harness.calls.prLoads.map(({ repoIds, tab, force }) => ({ repoIds, tab, force })),
+      [
+        { repoIds: ["bukhr/payroll", "bukhr/platform"], tab: "mine", force: false },
+        { repoIds: ["bukhr/payroll", "bukhr/platform"], tab: "review", force: false },
+      ],
+    );
+    harness.controller.dispose();
+    pending.resolve();
   });
 
   test("polling skips ticks while a snapshot is in flight", async () => {
@@ -362,13 +428,44 @@ describe("createController", () => {
     harness.controller.dispose();
   });
 
-  test("setContext updates the persisted context through the service and the store", async () => {
+  test("setContext updates the store and background-loads both tabs for the new context", async () => {
     const harness = createHarness();
+    const pending = deferred<void>();
+    harness.behavior.loadPr = async () => pending.promise;
+    harness.store.dispatch({
+      type: "setScreen",
+      screen: "main",
+      scope: { kind: "repo", repoId: "bukhr/payroll" },
+    });
 
     await harness.controller.setContext("personal");
 
     assert.equal(harness.store.getState().activeContextId, "personal");
     assert.equal(harness.store.getState().repoCursor, 0);
+    assert.deepEqual(
+      harness.calls.prLoads.map(({ repoIds, tab, force }) => ({ repoIds, tab, force })),
+      [
+        { repoIds: ["dannyfuf/dotfiles"], tab: "mine", force: false },
+        { repoIds: ["dannyfuf/dotfiles"], tab: "review", force: false },
+      ],
+    );
+
+    harness.store.dispatch({
+      type: "setScreen",
+      screen: "prs",
+      scope: { kind: "repo", repoId: "dannyfuf/dotfiles" },
+    });
+    await harness.controller.setContext("buk");
+    assert.deepEqual(harness.store.getState().prScope, { kind: "all" });
+    assert.deepEqual(
+      harness.calls.prLoads.slice(-2).map(({ repoIds, tab }) => ({ repoIds, tab })),
+      [
+        { repoIds: ["bukhr/payroll", "bukhr/platform"], tab: "mine" },
+        { repoIds: ["bukhr/payroll", "bukhr/platform"], tab: "review" },
+      ],
+    );
+    pending.resolve();
+    await flush();
   });
 
   test("setContext failures are persisted as visible error toasts", async () => {
@@ -656,5 +753,115 @@ describe("createController", () => {
       level: "error",
       text: "tmux server unavailable",
     });
+  });
+
+  test("openSelectedPr opens a linked worktree with the requested sleep behavior", async () => {
+    const harness = createHarness();
+    const linked = worktrees[1];
+    assert.ok(linked);
+    const pr = pullRequest({ repoId: linked.repoId, headRefName: linked.branch });
+    seedPrs(harness, "mine", pr.repoId, [pr]);
+    harness.store.dispatch({ type: "setScreen", screen: "prs" });
+
+    await harness.controller.openSelectedPr({ keepPrevious: true });
+
+    assert.deepEqual(harness.calls.opened, [
+      { worktree: linked, options: { sleepPrevious: false } },
+    ]);
+    assert.equal(harness.calls.created.length, 0);
+  });
+
+  test("openSelectedPr creates and opens same-repo and fork worktrees", async () => {
+    const sameRepoHarness = createHarness();
+    const sameRepo = pullRequest({ number: 80, headRefName: "feat/new-pr" });
+    seedPrs(sameRepoHarness, "review", sameRepo.repoId, [sameRepo]);
+    sameRepoHarness.store.dispatch({ type: "setPrTab", tab: "review" });
+    sameRepoHarness.store.dispatch({ type: "setScreen", screen: "prs" });
+
+    await sameRepoHarness.controller.openSelectedPr({ keepPrevious: false });
+
+    assert.deepEqual(sameRepoHarness.calls.created[0]?.input, {
+      repoId: sameRepo.repoId,
+      branch: sameRepo.headRefName,
+    });
+    assert.equal(sameRepoHarness.calls.opened[0]?.options?.sleepPrevious, true);
+
+    const forkHarness = createHarness();
+    const fork = pullRequest({ number: 81, isCrossRepository: true });
+    seedPrs(forkHarness, "review", fork.repoId, [fork]);
+    forkHarness.store.dispatch({ type: "setPrTab", tab: "review" });
+    forkHarness.store.dispatch({ type: "setScreen", screen: "prs" });
+
+    await forkHarness.controller.openSelectedPr({ keepPrevious: true });
+
+    assert.deepEqual(forkHarness.calls.created[0]?.input, {
+      repoId: fork.repoId,
+      branch: "pr/81",
+      source: { kind: "pull", number: 81 },
+    });
+    assert.equal(forkHarness.calls.opened[0]?.options?.sleepPrevious, false);
+  });
+
+  test("openPrs derives repo scope, preselects a worktree PR, and loads both tabs", async () => {
+    const harness = createHarness();
+    const linked = worktrees[1];
+    assert.ok(linked);
+    const other = pullRequest({ number: 90, updatedAt: "2026-03-01T00:00:00.000Z" });
+    const pr = pullRequest({
+      number: 91,
+      headRefName: linked.branch,
+      updatedAt: "2026-02-01T00:00:00.000Z",
+    });
+    seedPrs(harness, "mine", pr.repoId, [pr, other]);
+    harness.store.dispatch({ type: "moveTo", pane: "repos", index: 1 });
+    harness.store.dispatch({ type: "moveTo", pane: "worktrees", index: 1 });
+
+    await harness.controller.openPrs();
+
+    const state = harness.store.getState();
+    assert.equal(state.screen, "prs");
+    assert.equal(state.prTab, "mine");
+    assert.deepEqual(state.prScope, { kind: "repo", repoId: "bukhr/payroll" });
+    assert.equal(state.prCursor, 1);
+    assert.deepEqual(
+      harness.calls.prLoads.map(({ repoIds, tab }) => ({ repoIds, tab })),
+      [
+        { repoIds: ["bukhr/payroll"], tab: "mine" },
+        { repoIds: ["bukhr/payroll"], tab: "review" },
+      ],
+    );
+  });
+
+  test("refreshPrs force-refreshes both tabs in scope", async () => {
+    const harness = createHarness();
+    harness.store.dispatch({
+      type: "setScreen",
+      screen: "prs",
+      scope: { kind: "repo", repoId: "bukhr/platform" },
+    });
+
+    await harness.controller.refreshPrs({ force: true });
+
+    assert.deepEqual(
+      harness.calls.prLoads.map(({ repoIds, tab, force }) => ({ repoIds, tab, force })),
+      [
+        { repoIds: ["bukhr/platform"], tab: "mine", force: true },
+        { repoIds: ["bukhr/platform"], tab: "review", force: true },
+      ],
+    );
+  });
+
+  test("browses and copies the selected PR URL", async () => {
+    const harness = createHarness();
+    const pr = pullRequest();
+    seedPrs(harness, "mine", pr.repoId, [pr]);
+    harness.store.dispatch({ type: "setScreen", screen: "prs" });
+
+    await harness.controller.browseSelectedPr();
+    await harness.controller.yankSelectedPr();
+
+    assert.deepEqual(harness.calls.openedUrls, [pr.url]);
+    assert.deepEqual(harness.calls.clipboardCopies, [pr.url]);
+    assert.equal(harness.store.getState().toasts.at(-1)?.text, "Copied PR URL");
   });
 });

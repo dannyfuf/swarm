@@ -46,6 +46,7 @@ describe("config adapter", () => {
     assert.deepEqual(config.sleep.keepAlive, defaultConfig(home).sleep.keepAlive);
     assert.deepEqual(config.windows, defaultConfig(home).windows);
     assert.equal(config.github.cacheTtlSeconds, 3600);
+    assert.equal(config.github.prTtlSeconds, 90);
     assert.equal(config.github.cloneProtocol, "ssh");
     assert.equal(config.ui.statusRefreshMs, 5000);
   });

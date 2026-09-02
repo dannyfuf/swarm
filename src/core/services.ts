@@ -3,6 +3,8 @@ import type {
   CloneJob,
   Context,
   ContextId,
+  PrRepoSlice,
+  PrTab,
   RemoteRepo,
   Repo,
   RepoId,
@@ -44,11 +46,27 @@ export interface WorktreeService {
   list(repoId?: RepoId): Promise<Worktree[]>;
   remoteBranches(repoId: RepoId): Promise<string[]>;
   create(
-    input: { repoId: RepoId; branch: string; baseRef?: string },
+    input: {
+      repoId: RepoId;
+      branch: string;
+      baseRef?: string;
+      source?: { kind: "pull"; number: number };
+    },
     onEvent?: OnEvent,
   ): Promise<Worktree>;
   delete(worktreeId: WorktreeId, onEvent?: OnEvent): Promise<void>;
   touch(worktreeId: WorktreeId): Promise<void>;
+}
+
+export interface PrService {
+  load(
+    repoIds: RepoId[],
+    tab: PrTab,
+    opts: {
+      force?: boolean;
+      onSlice: (repoId: RepoId, slice: PrRepoSlice) => void;
+    },
+  ): Promise<void>;
 }
 
 export interface SessionService {

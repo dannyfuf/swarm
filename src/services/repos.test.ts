@@ -114,6 +114,12 @@ describe("createRepoService", () => {
         if (owner === "bad" || failGood) throw new Error(`${owner} failed`);
         return [remote("good", "one")];
       },
+      async readCachedPullRequests() {
+        return undefined;
+      },
+      async listPullRequests() {
+        return { prs: [], fetchedAt: "2026-01-01T00:00:00.000Z" };
+      },
     };
     const service = createRepoService({
       state,

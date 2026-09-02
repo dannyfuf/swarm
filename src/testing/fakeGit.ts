@@ -57,6 +57,10 @@ export function createFakeGit(options: FakeGitOptions = {}): FakeGit {
       calls.push({ method: "checkoutTracking", args: [path, branch] });
       currentBranches.set(path, branch.replace(/^origin\//, ""));
     },
+    async fetchPullHead(path, number, localBranch) {
+      calls.push({ method: "fetchPullHead", args: [path, number, localBranch] });
+      currentBranches.set(path, localBranch);
+    },
     async remoteBranches(repoPath) {
       calls.push({ method: "remoteBranches", args: [repoPath] });
       return [...(branches.get(repoPath) ?? [])];

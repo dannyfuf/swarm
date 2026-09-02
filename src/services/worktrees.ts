@@ -11,6 +11,7 @@ import type {
   StatePort,
   TmuxPort,
 } from "../core/ports.ts";
+import { validateBranch } from "../core/prs.ts";
 import type { WorktreeService } from "../core/services.ts";
 import type { Config, State, Worktree } from "../core/types.ts";
 import { mutateState } from "./stateMutation.ts";
@@ -29,20 +30,6 @@ export interface WorktreeServiceDependencies {
 
 function toSwarmError(error: unknown, code: "fs" | "git" | "tmux", message: string): SwarmError {
   return error instanceof SwarmError ? error : new SwarmError(code, message, { cause: error });
-}
-
-function validateBranch(branch: string): void {
-  const invalid =
-    branch.length === 0 ||
-    branch.startsWith("-") ||
-    branch.endsWith("/") ||
-    branch.endsWith(".lock") ||
-    /\s/u.test(branch) ||
-    branch.includes("..") ||
-    /[~^:?*]/u.test(branch) ||
-    branch.includes("[") ||
-    branch.includes("\\");
-  if (invalid) throw new SwarmError("validation", `Invalid branch name: ${branch}`);
 }
 
 function errorMessage(error: unknown): string {
@@ -112,6 +99,12 @@ export function createWorktreeService({
 
     async create(input, onEvent) {
       validateBranch(input.branch);
+      if (
+        input.source?.kind === "pull" &&
+        (!Number.isInteger(input.source.number) || input.source.number <= 0)
+      ) {
+        throw new SwarmError("validation", `Invalid pull request number: ${input.source.number}`);
+      }
       let destination: string | undefined;
       let copyStarted = false;
       try {
@@ -167,25 +160,37 @@ export function createWorktreeService({
             throw toSwarmError(error, "fs", `Failed to copy worktree: ${id}`);
           }
 
-          onEvent?.({ type: "step", label: "Creating branch" });
-          let branches: string[];
-          try {
-            branches = await git.remoteBranches(destination);
-          } catch (error) {
-            throw toSwarmError(error, "git", `Failed to inspect remote branches for: ${id}`);
-          }
-          const remoteBranch = `origin/${input.branch}`;
-          const resolvedBaseRef = branches.includes(remoteBranch)
-            ? remoteBranch
-            : (input.baseRef ?? `origin/${repo.defaultBranch}`);
-          try {
-            if (branches.includes(remoteBranch)) {
+          let resolvedBaseRef: string;
+          if (input.source?.kind === "pull") {
+            resolvedBaseRef = `pull/${input.source.number}/head`;
+            onEvent?.({ type: "step", label: "Fetching PR head" });
+            try {
+              await git.fetchPullHead(destination, input.source.number, input.branch);
               await git.checkoutTracking(destination, input.branch);
-            } else {
-              await git.checkoutNewBranch(destination, input.branch, resolvedBaseRef);
+            } catch (error) {
+              throw toSwarmError(error, "git", `Failed to fetch pull request head: ${id}`);
             }
-          } catch (error) {
-            throw toSwarmError(error, "git", `Failed to create worktree branch: ${input.branch}`);
+          } else {
+            onEvent?.({ type: "step", label: "Creating branch" });
+            let branches: string[];
+            try {
+              branches = await git.remoteBranches(destination);
+            } catch (error) {
+              throw toSwarmError(error, "git", `Failed to inspect remote branches for: ${id}`);
+            }
+            const remoteBranch = `origin/${input.branch}`;
+            resolvedBaseRef = branches.includes(remoteBranch)
+              ? remoteBranch
+              : (input.baseRef ?? `origin/${repo.defaultBranch}`);
+            try {
+              if (branches.includes(remoteBranch)) {
+                await git.checkoutTracking(destination, input.branch);
+              } else {
+                await git.checkoutNewBranch(destination, input.branch, resolvedBaseRef);
+              }
+            } catch (error) {
+              throw toSwarmError(error, "git", `Failed to create worktree branch: ${input.branch}`);
+            }
           }
 
           onEvent?.({ type: "step", label: "Running hooks" });
