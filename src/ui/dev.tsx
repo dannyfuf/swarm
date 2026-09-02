@@ -65,7 +65,7 @@ async function main(): Promise<void> {
   const empty = process.env.SWARM_DEV_EMPTY === "1";
   const store = createStore();
   const state = empty
-    ? { version: 1 as const, contexts: [], repos: [], worktrees: [] }
+    ? { version: 1 as const, contexts: [], repos: [], clones: [], worktrees: [] }
     : makeState();
   const controller = createFakeController(store, { state, operationDelayMs: 1500 });
   await controller.init();

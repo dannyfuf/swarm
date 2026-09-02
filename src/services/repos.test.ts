@@ -7,6 +7,7 @@ import type { RemoteRepo } from "../core/types.ts";
 import { createFakeFiles } from "../testing/fakeFiles.ts";
 import { createFakeGit } from "../testing/fakeGit.ts";
 import { createFakeGithub } from "../testing/fakeGithub.ts";
+import { createFakeProcess } from "../testing/fakeProcess.ts";
 import { createFakeShell } from "../testing/fakeShell.ts";
 import { createFakeTmux } from "../testing/fakeTmux.ts";
 import { createFixedClock } from "../testing/fixedClock.ts";
@@ -76,6 +77,7 @@ describe("createRepoService", () => {
       config: createMemoryConfig(),
       github,
       git: createFakeGit(),
+      process: createFakeProcess(),
       files: createFakeFiles(),
       worktreeService: createWorktreeStub(),
       clock: createFixedClock(),
@@ -118,6 +120,7 @@ describe("createRepoService", () => {
       config: createMemoryConfig(),
       github,
       git: createFakeGit(),
+      process: createFakeProcess(),
       files: createFakeFiles(),
       worktreeService: createWorktreeStub(),
       clock: createFixedClock(),
@@ -132,12 +135,13 @@ describe("createRepoService", () => {
     );
   });
 
-  test("clones a repository, streams events, detects its default branch, and persists it", async () => {
+  test("persists a detached clone job and later promotes the completed clone", async () => {
     const state = createMemoryState(
       makeState({ contexts: [contexts[0]], repos: [], worktrees: [], activeContextId: "buk" }),
     );
     const destination = "/home/test/.swarm/repos/bukhr/benefits";
     const git = createFakeGit();
+    const process = createFakeProcess();
     const files = createFakeFiles();
     git.defaultBranch = async (path) => {
       git.calls.push({ method: "defaultBranch", args: [path] });
@@ -148,6 +152,7 @@ describe("createRepoService", () => {
       config: createMemoryConfig(),
       github: createFakeGithub(),
       git,
+      process,
       files,
       worktreeService: createWorktreeStub(),
       clock: createFixedClock("2026-03-02T00:00:00.000Z"),
@@ -155,21 +160,37 @@ describe("createRepoService", () => {
     });
     const events: string[] = [];
 
-    const cloned = await service.clone(remoteRepos[0], "buk", (event) => {
+    const job = await service.clone(remoteRepos[0], "buk", (event) => {
       events.push(
         event.type === "step" ? event.label : event.type === "log" ? event.line : event.type,
       );
     });
 
-    assert.equal(cloned.defaultBranch, "trunk");
-    assert.equal(cloned.path, destination);
-    assert.equal(cloned.url, remoteRepos[0]?.sshUrl);
-    const cloneCall = git.calls.find(({ method }) => method === "clone");
+    assert.equal(job.path, destination);
+    assert.equal(job.url, remoteRepos[0]?.sshUrl);
+    assert.equal(job.pid, 4242);
+    assert.equal(job.status, "cloning");
+    assert.match(job.logPath, /\/logs\/clone-bukhr-benefits-.*\.log$/);
+    const cloneCall = git.calls.find(({ method }) => method === "cloneDetached");
     assert.equal(cloneCall?.args[0], remoteRepos[0]?.sshUrl);
     assert.match(String(cloneCall?.args[1]), new RegExp(`^${destination}\\.staging-`));
+    assert.equal(cloneCall?.args[2], job.logPath);
+    assert.deepEqual(events, ["Starting background clone", "done"]);
+    assert.deepEqual(state.state.clones, [job]);
+    assert.equal(state.state.repos.length, 0);
+
+    process.alive.add(job.pid ?? 0);
+    files.paths.add(`${job.stagingPath}/.git`);
+    await service.reconcileClones();
+    assert.deepEqual(state.state.clones, [job]);
+
+    process.alive.delete(job.pid ?? 0);
+    await service.reconcileClones();
+
+    assert.deepEqual(state.state.clones, []);
+    assert.equal(state.state.repos[0]?.id, job.id);
+    assert.equal(state.state.repos[0]?.defaultBranch, "trunk");
     assert.ok(files.calls.some(({ method, args }) => method === "move" && args[1] === destination));
-    assert.deepEqual(events, ["Cloning", "Cloning", "done"]);
-    assert.deepEqual(state.state.repos, [cloned]);
   });
 
   test("clones and persists the GitHub HTTPS URL when configured", async () => {
@@ -186,6 +207,7 @@ describe("createRepoService", () => {
       config,
       github: createFakeGithub(),
       git,
+      process: createFakeProcess(),
       files: createFakeFiles(),
       worktreeService: createWorktreeStub(),
       clock: createFixedClock(),
@@ -195,18 +217,19 @@ describe("createRepoService", () => {
     const cloned = await service.clone(remoteRepos[0], "buk");
 
     const httpsUrl = "https://github.com/bukhr/benefits.git";
-    assert.equal(git.calls.find(({ method }) => method === "clone")?.args[0], httpsUrl);
+    assert.equal(git.calls.find(({ method }) => method === "cloneDetached")?.args[0], httpsUrl);
     assert.equal(cloned.url, httpsUrl);
-    assert.equal(state.state.repos[0]?.url, httpsUrl);
+    assert.equal(state.state.clones[0]?.url, httpsUrl);
   });
 
-  test("rejects clone conflicts without cleanup and removes partial clones after git failure", async () => {
+  test("rejects clone conflicts and marks an exited partial clone as failed", async () => {
     const conflictFiles = createFakeFiles();
     const conflictService = createRepoService({
       state: createMemoryState(makeState()),
       config: createMemoryConfig(),
       github: createFakeGithub(),
       git: createFakeGit(),
+      process: createFakeProcess(),
       files: conflictFiles,
       worktreeService: createWorktreeStub(),
       clock: createFixedClock(),
@@ -220,26 +243,28 @@ describe("createRepoService", () => {
 
     const destination = "/home/test/.swarm/repos/bukhr/benefits";
     const git = createFakeGit();
-    git.defaultBranch = async () => {
-      throw new Error("broken origin HEAD");
-    };
     const files = createFakeFiles();
+    const failedState = createMemoryState(
+      makeState({ contexts: [contexts[0]], repos: [], worktrees: [] }),
+    );
     const failureService = createRepoService({
-      state: createMemoryState(makeState({ contexts: [contexts[0]], repos: [], worktrees: [] })),
+      state: failedState,
       config: createMemoryConfig(),
       github: createFakeGithub(),
       git,
+      process: createFakeProcess(),
       files,
       worktreeService: createWorktreeStub(),
       clock: createFixedClock(),
       logger: createNullLogger(),
     });
-    await assert.rejects(
-      failureService.clone(remoteRepos[0], "buk"),
-      (error) => error instanceof SwarmError && error.code === "git",
-    );
+    const job = await failureService.clone(remoteRepos[0], "buk");
+    await failureService.reconcileClones();
+
+    assert.equal(failedState.state.clones[0]?.status, "failed");
+    assert.match(failedState.state.clones[0]?.error ?? "", /valid repository/);
     assert.equal(files.removed.length, 1);
-    assert.match(files.removed[0] ?? "", new RegExp(`^${destination}\\.staging-`));
+    assert.equal(files.removed[0], job.stagingPath);
     assert.ok(!files.removed.includes(destination));
   });
 
@@ -252,6 +277,7 @@ describe("createRepoService", () => {
       config: createMemoryConfig(),
       github: createFakeGithub(),
       git,
+      process: createFakeProcess(),
       files,
       worktreeService: createWorktreeStub(),
       clock: createFixedClock(),
@@ -276,6 +302,7 @@ describe("createRepoService", () => {
       config: createMemoryConfig(),
       github: createFakeGithub(),
       git: createFakeGit(),
+      process: createFakeProcess(),
       files,
       worktreeService: createWorktreeStub(),
       clock: createFixedClock(),
@@ -331,6 +358,7 @@ describe("createRepoService", () => {
       config,
       github: createFakeGithub(),
       git: createFakeGit(),
+      process: createFakeProcess(),
       files,
       worktreeService,
       clock,

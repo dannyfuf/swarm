@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, realpath, rm } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, test } from "node:test";
@@ -8,6 +8,43 @@ import { createNullLogger } from "./logger.ts";
 import { createShell, type RunOptionsWithInput } from "./shell.ts";
 
 describe("shell adapter", () => {
+  test("returns a detached child pid and redirects both output streams to a log", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "swarm-detached-"));
+    const logPath = join(cwd, "clone.log");
+    let pid: number | undefined;
+    try {
+      const shell = createShell(createNullLogger());
+      pid = await shell.spawnDetached(
+        process.execPath,
+        [
+          "-e",
+          'process.stdout.write("clone stdout\\n"); process.stderr.write("clone stderr\\n"); setTimeout(() => {}, 1000)',
+        ],
+        { cwd, logPath },
+      );
+
+      assert.ok(pid > 0);
+
+      let output = "";
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        output = await readFile(logPath, "utf8").catch(() => "");
+        if (output.includes("clone stdout") && output.includes("clone stderr")) break;
+        await new Promise<void>((resolve) => setTimeout(resolve, 10));
+      }
+      assert.match(output, /clone stdout/);
+      assert.match(output, /clone stderr/);
+    } finally {
+      if (pid !== undefined) {
+        try {
+          process.kill(pid, "SIGTERM");
+        } catch {
+          // The detached test process may have already exited.
+        }
+      }
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
   test("collects UTF-8 output, writes input, merges env, and streams stderr lines", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "swarm-shell-"));
     try {

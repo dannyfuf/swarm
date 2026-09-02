@@ -5,7 +5,7 @@ import { resolveKey } from "../app/keymap.ts";
 import {
   selectedRepo,
   selectedWorktree,
-  visibleRepos,
+  visibleRepoItems,
   visibleWorktrees,
 } from "../app/selectors.ts";
 import type { AppState, Command, UiDeps, UiExit } from "../core/app.ts";
@@ -56,18 +56,19 @@ export function App({ store, controller, onExit, home = process.env.HOME ?? "" }
   const { width, height } = useTerminalDimensions();
   const layout = layoutOf(width, height);
   const now = useNow();
-  const tick = useTick(state.operations.length > 0);
+  const tick = useTick(
+    state.operations.length > 0 || state.clones.some((clone) => clone.status !== "failed"),
+  );
   const pending = useRef("");
   const repoScroll = useRef(0);
   const worktreeScroll = useRef(0);
 
-  const repos = visibleRepos(state);
   const worktrees = visibleWorktrees(state);
   repoScroll.current = nextScroll(
     repoScroll.current,
     state.repoCursor,
     layout.bodyRows,
-    repos.length + 1,
+    visibleRepoItems(state).length + 1,
   );
   worktreeScroll.current = nextScroll(
     worktreeScroll.current,

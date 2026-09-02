@@ -10,7 +10,7 @@ node_bin=""
 if command -v node >/dev/null 2>&1 && node -e '
   const [major, minor] = process.versions.node.split(".").map(Number);
   process.exit(major > 26 || (major === 26 && minor >= 4) ? 0 : 1);
-'; then
+' >/dev/null 2>&1; then
   node_bin=$(command -v node)
 else
   node_score=0
@@ -43,7 +43,7 @@ export SWARM_CWD="$swarm_cwd"
 cd "$repo_root"
 
 if [ -f dist/swarm.mjs ]; then
-  exec "$node_bin" --experimental-ffi dist/swarm.mjs "$@"
+  exec "$node_bin" --experimental-ffi --no-warnings=ExperimentalWarning dist/swarm.mjs "$@"
 fi
 
-exec "$node_bin" --experimental-ffi --import tsx src/main.ts "$@"
+exec "$node_bin" --experimental-ffi --no-warnings=ExperimentalWarning --import tsx src/main.ts "$@"

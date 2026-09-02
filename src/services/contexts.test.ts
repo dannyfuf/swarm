@@ -22,6 +22,9 @@ function createRepoStub(
     async clone() {
       throw new SwarmError("unsupported", "not used");
     },
+    async reconcileClones() {
+      return [];
+    },
     async assign() {
       throw new SwarmError("unsupported", "not used");
     },

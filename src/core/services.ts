@@ -1,5 +1,6 @@
 import type { SwarmError } from "./errors.ts";
 import type {
+  CloneJob,
   Context,
   ContextId,
   RemoteRepo,
@@ -33,7 +34,8 @@ export interface RepoService {
     query: string,
     opts?: { refresh?: boolean; signal?: AbortSignal },
   ): Promise<RemoteRepo[]>;
-  clone(remote: RemoteRepo, contextId: ContextId, onEvent?: OnEvent): Promise<Repo>;
+  clone(remote: RemoteRepo, contextId: ContextId, onEvent?: OnEvent): Promise<CloneJob>;
+  reconcileClones(): Promise<CloneJob[]>;
   assign(repoId: RepoId, contextId: ContextId): Promise<Repo>;
   delete(repoId: RepoId, onEvent?: OnEvent): Promise<void>;
 }

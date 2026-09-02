@@ -6,13 +6,11 @@ import { createNullLogger } from "../testing/nullLogger.ts";
 import { createGit } from "./git.ts";
 
 describe("git adapter", () => {
-  test("uses exact argv and streams clone progress", async () => {
-    const progress: string[] = [];
+  test("uses exact argv and launches clones detached with a log file", async () => {
     const shell = createFakeShell([
       {
         match: () => true,
-        result: (_cmd, args, opts) => {
-          if (args[0] === "clone") opts?.onStderrLine?.("Receiving objects: 50%");
+        result: (_cmd, args) => {
           if (args[0] === "for-each-ref") {
             return { stdout: "origin\norigin/HEAD\norigin/main\norigin/feature/x\n" };
           }
@@ -24,9 +22,11 @@ describe("git adapter", () => {
     ]);
     const git = createGit(shell, createNullLogger());
 
-    await git.clone("git@example.test:owner/repo.git", "/repos/repo", {
-      onProgress: (line) => progress.push(line),
-    });
+    const clonePid = await git.cloneDetached(
+      "git@example.test:owner/repo.git",
+      "/repos/repo",
+      "/logs/clone.log",
+    );
     await git.fetch("/repos/repo", { prune: true });
     await git.resetToRemote("/repos/repo", "main");
     await git.checkoutNewBranch("/work/repo", "feature/new", "origin/main");
@@ -35,7 +35,14 @@ describe("git adapter", () => {
     assert.equal(await git.currentBranch("/work/repo"), "feature/x");
     assert.equal(await git.isDirty("/work/repo"), true);
 
-    assert.deepEqual(progress, ["Receiving objects: 50%"]);
+    assert.equal(clonePid, 4242);
+    assert.deepEqual(shell.detachedCalls, [
+      {
+        cmd: "git",
+        args: ["clone", "--progress", "git@example.test:owner/repo.git", "/repos/repo"],
+        opts: { logPath: "/logs/clone.log" },
+      },
+    ]);
     assert.deepEqual(
       shell.calls.map(({ cmd, args }) => [cmd, args]),
       [

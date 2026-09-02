@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { closeSync, openSync } from "node:fs";
 import { SwarmError } from "../core/errors.ts";
 import type { Logger, RunOptions, Shell, ShellResult } from "../core/ports.ts";
 
@@ -143,16 +144,19 @@ export function createShell(logger: Logger): Shell {
       });
     },
 
-    async spawnDetached(cmd, args, opts): Promise<void> {
-      await new Promise<void>((resolve, reject) => {
+    async spawnDetached(cmd, args, opts): Promise<number> {
+      return await new Promise<number>((resolve, reject) => {
         let child: ReturnType<typeof spawn>;
+        let logFd: number | undefined;
         try {
+          logFd = opts?.logPath ? openSync(opts.logPath, "a", 0o600) : undefined;
           child = spawn(cmd, args, {
             cwd: opts?.cwd,
             detached: true,
-            stdio: "ignore",
+            stdio: logFd === undefined ? "ignore" : ["ignore", logFd, logFd],
           });
         } catch (error) {
+          if (logFd !== undefined) closeSync(logFd);
           log.error("Failed to spawn detached command", { cmd, error: errorMessage(error) });
           reject(
             new SwarmError("fs", `Failed to spawn ${cmd}: ${errorMessage(error)}`, {
@@ -161,7 +165,11 @@ export function createShell(logger: Logger): Shell {
           );
           return;
         }
+        let settled = false;
         child.once("error", (error) => {
+          if (settled) return;
+          settled = true;
+          if (logFd !== undefined) closeSync(logFd);
           log.error("Failed to spawn detached command", { cmd, error: errorMessage(error) });
           reject(
             new SwarmError("fs", `Failed to spawn ${cmd}: ${errorMessage(error)}`, {
@@ -170,8 +178,16 @@ export function createShell(logger: Logger): Shell {
           );
         });
         child.once("spawn", () => {
+          if (settled) return;
+          settled = true;
+          if (logFd !== undefined) closeSync(logFd);
+          const pid = child.pid;
+          if (pid === undefined) {
+            reject(new SwarmError("fs", `Failed to obtain pid for ${cmd}`));
+            return;
+          }
           child.unref();
-          resolve();
+          resolve(pid);
         });
       });
     },

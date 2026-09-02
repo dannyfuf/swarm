@@ -35,6 +35,23 @@ export const RepoSchema = z.object({
 });
 export type Repo = z.infer<typeof RepoSchema>;
 
+export const CloneJobSchema = z.object({
+  id: RepoId,
+  owner: z.string(),
+  name: z.string(),
+  url: z.string(),
+  contextId: ContextId,
+  defaultBranch: z.string(),
+  path: z.string(),
+  stagingPath: z.string(),
+  logPath: z.string(),
+  pid: z.number().int().positive().optional(),
+  startedAt: z.string().datetime(),
+  status: z.enum(["starting", "cloning", "failed"]),
+  error: z.string().optional(),
+});
+export type CloneJob = z.infer<typeof CloneJobSchema>;
+
 export const WorktreeSchema = z.object({
   id: WorktreeId,
   repoId: RepoId,
@@ -52,6 +69,7 @@ export const StateSchema = z.object({
   version: z.literal(1),
   contexts: z.array(ContextSchema),
   repos: z.array(RepoSchema),
+  clones: z.array(CloneJobSchema).default([]),
   worktrees: z.array(WorktreeSchema),
   activeContextId: ContextId.optional(),
 });
@@ -157,6 +175,7 @@ export function defaultState(): State {
     version: 1,
     contexts: [],
     repos: [],
+    clones: [],
     worktrees: [],
   };
 }

@@ -92,7 +92,7 @@ export function CloneRepoDialog({
       if (remote && !submitted.current) {
         submitted.current = true;
         store.dispatch({ type: "closeDialog" });
-        void controller.cloneRepo(remote);
+        void controller.cloneRepo(remote).catch(() => undefined);
       }
     }
   });

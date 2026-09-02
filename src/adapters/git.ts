@@ -43,11 +43,14 @@ export function createGit(shell: Shell, logger: Logger): GitPort {
   };
 
   return {
-    async clone(url, dest, opts): Promise<void> {
-      await run(["clone", "--progress", url, dest], {
-        signal: opts?.signal,
-        onStderrLine: opts?.onProgress,
-      });
+    async cloneDetached(url, dest, logPath): Promise<number> {
+      try {
+        return await shell.spawnDetached("git", ["clone", "--progress", url, dest], { logPath });
+      } catch (error) {
+        const wrapped = gitError(["clone", "--progress", url, dest], "", error);
+        log.error(wrapped.message);
+        throw wrapped;
+      }
     },
 
     async fetch(repoPath, opts): Promise<void> {

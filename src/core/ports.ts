@@ -17,7 +17,11 @@ export interface RunOptions {
 
 export interface Shell {
   run(cmd: string, args: string[], opts?: RunOptions): Promise<ShellResult>;
-  spawnDetached(cmd: string, args: string[], opts?: { cwd?: string }): Promise<void>;
+  spawnDetached(
+    cmd: string,
+    args: string[],
+    opts?: { cwd?: string; logPath?: string },
+  ): Promise<number>;
   exec(cmd: string, args: string[]): Promise<never>;
 }
 
@@ -29,11 +33,7 @@ export interface Logger {
 }
 
 export interface GitPort {
-  clone(
-    url: string,
-    dest: string,
-    opts?: { signal?: AbortSignal; onProgress?: (line: string) => void },
-  ): Promise<void>;
+  cloneDetached(url: string, dest: string, logPath: string): Promise<number>;
   fetch(repoPath: string, opts?: { prune?: boolean; signal?: AbortSignal }): Promise<void>;
   defaultBranch(repoPath: string): Promise<string>;
   resetToRemote(repoPath: string, branch: string): Promise<void>;
@@ -126,6 +126,8 @@ export interface ConfigPort {
 
 export interface Clock {
   now(): Date;
+  setInterval(callback: () => void, intervalMs: number): unknown;
+  clearInterval(handle: unknown): void;
 }
 
 export interface Clipboard {

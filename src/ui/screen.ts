@@ -1,13 +1,17 @@
 import { KEY_HINTS } from "../app/keymap.ts";
 import {
+  isCloneJob,
+  type RepoListItem,
+  selectedClone,
   selectedRepo,
   selectedWorktree,
+  visibleRepoItems,
   visibleRepos,
   visibleWorktrees,
 } from "../app/selectors.ts";
 import type { AppState, Operation } from "../core/app.ts";
 import { fuzzyFilter } from "../core/fuzzy.ts";
-import type { Repo, SessionState, Worktree } from "../core/types.ts";
+import type { SessionState, Worktree } from "../core/types.ts";
 import { aggregateSession, relativeTime, runningLabel, stateGlyph, tildePath } from "./format.ts";
 import {
   type Cell,
@@ -231,7 +235,7 @@ function paneTitle(text: string, focused: boolean): Cell {
 
 function reposHeader(state: AppState, layout: ScreenLayout): Line {
   const focused = state.pane === "repos";
-  const repos = visibleRepos(state);
+  const repos = visibleRepoItems(state);
   return spread(
     [cell(" ", {}), paneTitle("REPOS", focused)],
     [cell(`${repos.length}`, { fg: theme.dim }), cell(" ", {})],
@@ -287,29 +291,33 @@ function repoRow(
   layout: ScreenLayout,
   context: ScreenContext,
   index: number,
-  repo: Repo | undefined,
+  item: RepoListItem | undefined,
   ambiguousNames: Set<string>,
 ): Line {
   const focused = state.pane === "repos";
   const selected = state.repoCursor === index;
   const width = layout.leftWidth;
-  const nameWidth = Math.max(4, width - 10);
 
-  const worktrees = repo
-    ? state.worktrees.filter((worktree) => worktree.repoId === repo.id)
-    : state.worktrees.filter((worktree) =>
-        visibleRepos(state).some((candidate) => candidate.id === worktree.repoId),
-      );
+  const clone = item && isCloneJob(item) ? item : undefined;
+  const repo = item && !isCloneJob(item) ? item : undefined;
+  const nameWidth = Math.max(4, width - (clone ? 16 : 10));
+  const worktrees = clone
+    ? []
+    : repo
+      ? state.worktrees.filter((worktree) => worktree.repoId === repo.id)
+      : state.worktrees.filter((worktree) =>
+          visibleRepos(state).some((candidate) => candidate.id === worktree.repoId),
+        );
   const session = aggregateSession(worktrees.map((worktree) => sessionOf(state, worktree)));
   const glyph = stateGlyph(session);
   const operation = repo ? operationFor(state, repo.id) : undefined;
 
-  const label = repo
-    ? ambiguousNames.has(repo.name)
-      ? `${repo.owner}/${repo.name}`
-      : repo.name
+  const label = item
+    ? ambiguousNames.has(item.name)
+      ? `${item.owner}/${item.name}`
+      : item.name
     : "All";
-  const nameFg = selected ? theme.cursorFg : repo ? theme.text : theme.muted;
+  const nameFg = selected ? theme.cursorFg : item ? theme.text : theme.muted;
 
   const line: Line = [
     cell(" ", {}),
@@ -317,7 +325,16 @@ function repoRow(
     cell(" ", {}),
   ];
 
-  if (operation) {
+  if (clone) {
+    line.push(cell(pad(truncate(label, nameWidth), nameWidth), { fg: nameFg }));
+    line.push(cell(" ", {}));
+    line.push(
+      clone.status === "failed"
+        ? cell("! failed", { fg: theme.red, bold: true })
+        : cell(`${spinnerFrame(context.tick)} cloning…`, { fg: theme.accent }),
+    );
+    line.push(cell(" ", {}));
+  } else if (operation) {
     line.push(cell(pad(truncate(label, nameWidth), nameWidth), { fg: nameFg, bold: !repo }));
     line.push(cell(" ", {}));
     line.push(cell(padStart(spinnerFrame(context.tick), 3), { fg: theme.accent }));
@@ -338,7 +355,7 @@ function repoRow(
 }
 
 function reposPaneRows(state: AppState, layout: ScreenLayout, context: ScreenContext): Line[] {
-  const repos = visibleRepos(state);
+  const repos = visibleRepoItems(state);
   const rows: Line[] = [];
   const seen = new Map<string, number>();
   for (const repo of repos) seen.set(repo.name, (seen.get(repo.name) ?? 0) + 1);
@@ -351,7 +368,7 @@ function reposPaneRows(state: AppState, layout: ScreenLayout, context: ScreenCon
     return rows;
   }
 
-  const entries: Array<Repo | undefined> = [undefined, ...repos];
+  const entries: Array<RepoListItem | undefined> = [undefined, ...repos];
   const visible = entries.slice(context.repoScroll, context.repoScroll + layout.bodyRows);
   visible.forEach((repo, offset) => {
     rows.push(repoRow(state, layout, context, context.repoScroll + offset, repo, ambiguous));
@@ -524,6 +541,31 @@ function detailLines(state: AppState, layout: ScreenLayout, context: ScreenConte
   const lines: Line[] = [];
   const worktree = selectedWorktree(state);
   const repo = selectedRepo(state);
+  const clone = selectedClone(state);
+
+  if (state.pane === "repos" && clone) {
+    lines.push([
+      cell(" ", {}),
+      cell(clone.name, { fg: theme.strong, bold: true }),
+      cell(` ${glyphs.sep} `, { fg: theme.dim }),
+      cell(clone.status === "failed" ? "clone failed" : "cloning…", {
+        fg: clone.status === "failed" ? theme.red : theme.accent,
+      }),
+    ]);
+    lines.push([
+      cell(" ", {}),
+      cell(truncateStart(tildePath(clone.path, context.home), width - 2), { fg: theme.dim }),
+    ]);
+    lines.push([
+      cell(" ", {}),
+      cell(`log ${truncateStart(tildePath(clone.logPath, context.home), width - 6)}`, {
+        fg: theme.ghost,
+      }),
+    ]);
+    if (clone.error)
+      lines.push([cell(" ", {}), cell(truncate(clone.error, width - 2), { fg: theme.red })]);
+    return lines.slice(0, layout.detailRows).map((line) => fitLine(line, width));
+  }
 
   if (state.pane === "repos" && repo) {
     const repoWorktrees = state.worktrees.filter((item) => item.repoId === repo.id);

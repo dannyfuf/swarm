@@ -147,6 +147,7 @@ export function makeState(overrides: Partial<State> = {}): State {
     version: 1,
     contexts,
     repos,
+    clones: [],
     worktrees,
     activeContextId: "buk",
     ...overrides,
@@ -158,6 +159,7 @@ export function makeAppState(overrides: Partial<AppState> = {}): Partial<AppStat
   return structuredClone({
     contexts: state.contexts,
     repos: state.repos,
+    clones: state.clones,
     worktrees: state.worktrees,
     activeContextId: state.activeContextId,
     config,

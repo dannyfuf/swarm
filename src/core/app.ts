@@ -1,4 +1,5 @@
 import type {
+  CloneJob,
   Config,
   Context,
   ContextId,
@@ -48,6 +49,7 @@ export interface Operation {
 export interface AppState {
   contexts: Context[];
   repos: Repo[];
+  clones: CloneJob[];
   worktrees: Worktree[];
   statuses: Record<WorktreeId, WorktreeStatus>;
   activeContextId?: ContextId;

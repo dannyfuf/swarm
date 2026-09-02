@@ -1,4 +1,4 @@
-import type { Controller, Operation, Store, Toast } from "../core/app.ts";
+import type { Action, Controller, Operation, Store, Toast } from "../core/app.ts";
 import { SwarmError } from "../core/errors.ts";
 import { slugify, worktreeId } from "../core/paths.ts";
 import type { Clipboard, Clock, ConfigPort, Logger, StatePort, TmuxPort } from "../core/ports.ts";
@@ -26,16 +26,18 @@ export interface ControllerDeps {
   clipboard: Clipboard;
   clock: Clock;
   logger: Logger;
-  setInterval?: typeof globalThis.setInterval;
-  clearInterval?: typeof globalThis.clearInterval;
 }
 
 function stateFields(
   state: State,
-): Pick<ReturnType<Store["getState"]>, "contexts" | "repos" | "worktrees" | "activeContextId"> {
+): Pick<
+  ReturnType<Store["getState"]>,
+  "contexts" | "repos" | "clones" | "worktrees" | "activeContextId"
+> {
   return {
     contexts: state.contexts,
     repos: state.repos,
+    clones: state.clones,
     worktrees: state.worktrees,
     activeContextId: state.activeContextId ?? state.contexts[0]?.id,
   };
@@ -55,14 +57,20 @@ function asSwarmError(error: unknown): SwarmError {
 
 export function createController(deps: ControllerDeps): Controller {
   const minimumRefreshMs = 500;
-  const setIntervalFn = deps.setInterval ?? globalThis.setInterval;
-  const clearIntervalFn = deps.clearInterval ?? globalThis.clearInterval;
+  const cloneRefreshMs = 2_000;
   let currentConfig = deps.store.getState().config;
-  let interval: ReturnType<typeof globalThis.setInterval> | undefined;
+  let statusInterval: unknown;
+  let cloneInterval: unknown;
   let snapshotInFlight: Promise<void> | undefined;
+  let cloneReconcileInFlight: Promise<State> | undefined;
+  let clonePollInFlight: Promise<void> | undefined;
   let disposed = false;
   let sequence = 0;
   const inFlightTargets = new Set<string>();
+
+  const dispatch = (action: Action): void => {
+    if (!disposed) deps.store.dispatch(action);
+  };
 
   const nextId = (prefix: "op" | "toast"): string => {
     sequence += 1;
@@ -70,7 +78,7 @@ export function createController(deps: ControllerDeps): Controller {
   };
 
   const toast = (level: Toast["level"], text: string): void => {
-    deps.store.dispatch({
+    dispatch({
       type: "toast",
       toast: { id: nextId("toast"), level, text },
     });
@@ -94,7 +102,7 @@ export function createController(deps: ControllerDeps): Controller {
     const task = deps.status
       .snapshot(worktrees)
       .then((statuses) => {
-        if (!disposed) deps.store.dispatch({ type: "statuses", statuses: statusRecord(statuses) });
+        dispatch({ type: "statuses", statuses: statusRecord(statuses) });
       })
       .catch((error: unknown) => {
         if (!disposed) reportError(error);
@@ -104,9 +112,77 @@ export function createController(deps: ControllerDeps): Controller {
     if (snapshotInFlight === task) snapshotInFlight = undefined;
   };
 
+  const hasActiveClone = (): boolean =>
+    deps.store.getState().clones.some((clone) => clone.status !== "failed");
+
+  const reconcileCloneState = (): Promise<State> => {
+    if (cloneReconcileInFlight) return cloneReconcileInFlight;
+    const task = (async () => {
+      await deps.repos.reconcileClones();
+      return deps.state.load();
+    })();
+    cloneReconcileInFlight = task;
+    void task.then(
+      () => {
+        if (cloneReconcileInFlight === task) cloneReconcileInFlight = undefined;
+      },
+      () => {
+        if (cloneReconcileInFlight === task) cloneReconcileInFlight = undefined;
+      },
+    );
+    return task;
+  };
+
+  const stopClonePolling = (): void => {
+    if (cloneInterval === undefined) return;
+    deps.clock.clearInterval(cloneInterval);
+    cloneInterval = undefined;
+  };
+
+  const pollClones = (): Promise<void> => {
+    if (clonePollInFlight) return clonePollInFlight;
+    if (disposed || !hasActiveClone()) {
+      stopClonePolling();
+      return Promise.resolve();
+    }
+    const task = reconcileCloneState()
+      .then((persisted) => {
+        if (disposed) return;
+        dispatch({ type: "hydrate", state: stateFields(persisted) });
+        if (!hasActiveClone()) stopClonePolling();
+      })
+      .catch((error: unknown) => {
+        if (!disposed) reportError(error);
+      });
+    clonePollInFlight = task;
+    void task.then(
+      () => {
+        if (clonePollInFlight === task) clonePollInFlight = undefined;
+      },
+      () => {
+        if (clonePollInFlight === task) clonePollInFlight = undefined;
+      },
+    );
+    return task;
+  };
+
+  const syncClonePolling = (): void => {
+    if (disposed || !hasActiveClone()) {
+      stopClonePolling();
+      return;
+    }
+    if (cloneInterval !== undefined) return;
+    cloneInterval = deps.clock.setInterval(() => {
+      void pollClones();
+    }, cloneRefreshMs);
+  };
+
   const refresh = async (): Promise<void> => {
-    const persisted = await deps.state.load();
-    deps.store.dispatch({ type: "hydrate", state: stateFields(persisted) });
+    if (disposed) return;
+    const persisted = await reconcileCloneState();
+    if (disposed) return;
+    dispatch({ type: "hydrate", state: stateFields(persisted) });
+    syncClonePolling();
     await snapshot(persisted.worktrees, false);
   };
 
@@ -131,7 +207,7 @@ export function createController(deps: ControllerDeps): Controller {
       targetId: options.targetId,
       startedAt,
     };
-    deps.store.dispatch({ type: "opStart", op: operation });
+    dispatch({ type: "opStart", op: operation });
 
     let step = operation.step;
     let eventError: SwarmError | undefined;
@@ -141,13 +217,14 @@ export function createController(deps: ControllerDeps): Controller {
       if (logTimer !== undefined) clearTimeout(logTimer);
       logTimer = undefined;
       if (pendingLog === undefined) return;
-      deps.store.dispatch({ type: "opStep", id, step, line: pendingLog });
+      dispatch({ type: "opStep", id, step, line: pendingLog });
       pendingLog = undefined;
     };
     const onEvent: OnEvent = (event) => {
+      if (disposed) return;
       if (event.type === "step") {
         step = event.label;
-        deps.store.dispatch({ type: "opStep", id, step });
+        dispatch({ type: "opStep", id, step });
       } else if (event.type === "log") {
         pendingLog = event.line;
         logTimer ??= setTimeout(flushLog, 16);
@@ -165,11 +242,11 @@ export function createController(deps: ControllerDeps): Controller {
       reportError(error);
     } finally {
       flushLog();
-      deps.store.dispatch({ type: "opEnd", id });
+      dispatch({ type: "opEnd", id });
       if (options.targetId) inFlightTargets.delete(options.targetId);
     }
 
-    if (!succeeded) return;
+    if (!succeeded || disposed) return;
     try {
       await refresh();
       toast("success", options.success);
@@ -185,23 +262,27 @@ export function createController(deps: ControllerDeps): Controller {
   };
 
   const closeAndRun = (operation: () => Promise<void>): void => {
-    deps.store.dispatch({ type: "closeDialog" });
+    dispatch({ type: "closeDialog" });
     void operation();
   };
 
   const controller: Controller = {
     async init() {
       disposed = false;
-      if (interval !== undefined) clearIntervalFn(interval);
+      if (statusInterval !== undefined) {
+        deps.clock.clearInterval(statusInterval);
+        statusInterval = undefined;
+      }
+      stopClonePolling();
 
       try {
         const [config, persisted, currentSession] = await Promise.all([
           deps.config.load(),
-          deps.state.load(),
+          reconcileCloneState(),
           deps.tmux.currentSession(),
         ]);
         currentConfig = config;
-        deps.store.dispatch({
+        dispatch({
           type: "hydrate",
           state: {
             ...stateFields(persisted),
@@ -212,8 +293,9 @@ export function createController(deps: ControllerDeps): Controller {
           },
         });
 
+        syncClonePolling();
         void snapshot(persisted.worktrees, true);
-        interval = setIntervalFn(
+        statusInterval = deps.clock.setInterval(
           () => {
             if (deps.store.getState().operations.length > 0) return;
             void snapshot(deps.store.getState().worktrees, true);
@@ -222,7 +304,7 @@ export function createController(deps: ControllerDeps): Controller {
         );
       } catch (error) {
         const swarmError = reportError(error);
-        deps.store.dispatch({
+        dispatch({
           type: "hydrate",
           state: { loading: false, error: swarmError.message },
         });
@@ -235,7 +317,7 @@ export function createController(deps: ControllerDeps): Controller {
     async setContext(id) {
       try {
         await deps.contexts.setActive(id);
-        deps.store.dispatch({ type: "setContext", contextId: id });
+        dispatch({ type: "setContext", contextId: id });
       } catch (error) {
         throw reportError(error);
       }
@@ -276,7 +358,7 @@ export function createController(deps: ControllerDeps): Controller {
     async killSelected() {
       const worktree = requireWorktree();
       if (!worktree) return;
-      deps.store.dispatch({
+      dispatch({
         type: "openDialog",
         dialog: {
           kind: "confirm",
@@ -326,7 +408,7 @@ export function createController(deps: ControllerDeps): Controller {
           return;
         }
         const status = state.statuses[worktree.id];
-        deps.store.dispatch({
+        dispatch({
           type: "openDialog",
           dialog: {
             kind: "confirm",
@@ -363,7 +445,7 @@ export function createController(deps: ControllerDeps): Controller {
         .filter((worktree) => state.statuses[worktree.id]?.session !== "none")
         .filter((worktree) => state.statuses[worktree.id] !== undefined)
         .map((worktree) => worktree.session);
-      deps.store.dispatch({
+      dispatch({
         type: "openDialog",
         dialog: {
           kind: "confirm",
@@ -398,7 +480,7 @@ export function createController(deps: ControllerDeps): Controller {
       await runOperation({
         label: "Cloning repo",
         targetId: remote.fullName,
-        success: `Cloned ${remote.fullName}`,
+        success: `Cloning ${remote.fullName} in background`,
         execute: (onEvent) => deps.repos.clone(remote, contextId, onEvent),
       });
     },
@@ -423,7 +505,7 @@ export function createController(deps: ControllerDeps): Controller {
       try {
         if (input.id) {
           await deps.contexts.update(input.id, { name: input.name, owners: input.owners });
-          deps.store.dispatch({ type: "closeDialog" });
+          dispatch({ type: "closeDialog" });
           await refresh();
           toast("success", `Updated context ${input.name}`);
           return;
@@ -431,9 +513,9 @@ export function createController(deps: ControllerDeps): Controller {
 
         const context = await deps.contexts.create({ name: input.name, owners: input.owners });
         await deps.contexts.setActive(context.id);
-        deps.store.dispatch({ type: "closeDialog" });
+        dispatch({ type: "closeDialog" });
         await refresh();
-        deps.store.dispatch({ type: "setContext", contextId: context.id });
+        dispatch({ type: "setContext", contextId: context.id });
         toast("success", `Created context ${context.name}`);
       } catch (error) {
         reportError(error);
@@ -456,7 +538,7 @@ export function createController(deps: ControllerDeps): Controller {
           state.statuses[worktree.id]?.session !== undefined &&
           state.statuses[worktree.id]?.session !== "none",
       ).length;
-      deps.store.dispatch({
+      dispatch({
         type: "openDialog",
         dialog: {
           kind: "confirm",
@@ -488,8 +570,8 @@ export function createController(deps: ControllerDeps): Controller {
       try {
         await deps.config.save(next);
         currentConfig = next;
-        deps.store.dispatch({ type: "setConfig", config: next });
-        deps.store.dispatch({ type: "closeDialog" });
+        dispatch({ type: "setConfig", config: next });
+        dispatch({ type: "closeDialog" });
         toast("success", "Settings saved");
       } catch (error) {
         reportError(error);
@@ -513,10 +595,11 @@ export function createController(deps: ControllerDeps): Controller {
 
     dispose() {
       disposed = true;
-      if (interval !== undefined) {
-        clearIntervalFn(interval);
-        interval = undefined;
+      if (statusInterval !== undefined) {
+        deps.clock.clearInterval(statusInterval);
+        statusInterval = undefined;
       }
+      stopClonePolling();
     },
   };
 

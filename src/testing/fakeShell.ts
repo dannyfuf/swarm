@@ -11,7 +11,7 @@ export interface FakeShellRule {
 export interface FakeShellCall {
   cmd: string;
   args: string[];
-  opts?: RunOptions | { cwd?: string };
+  opts?: RunOptions | { cwd?: string; logPath?: string };
 }
 
 export type FakeShell = Shell & {
@@ -38,6 +38,7 @@ export function createFakeShell(rules: FakeShellRule[] = []): FakeShell {
       const call = { cmd, args: [...args], opts };
       calls.push(call);
       detachedCalls.push(call);
+      return 4242 + detachedCalls.length - 1;
     },
     async exec(cmd, args): Promise<never> {
       calls.push({ cmd, args: [...args] });

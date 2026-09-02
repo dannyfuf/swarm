@@ -1,14 +1,16 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { access, mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { describe, test } from "node:test";
 import { SwarmError } from "../core/errors.ts";
+import type { Logger } from "../core/ports.ts";
 import type { State } from "../core/types.ts";
 import { defaultState } from "../core/types.ts";
 import { createFakeFiles } from "../testing/fakeFiles.ts";
+import { createFakeProcess } from "../testing/fakeProcess.ts";
 import { createNullLogger } from "../testing/nullLogger.ts";
-import { createStateStore } from "./state.ts";
+import { createStateStore, type StateStoreOptions } from "./state.ts";
 
 const statePath = "/swarm/state.json";
 
@@ -34,18 +36,43 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
   return { promise, resolve: resolvePromise };
 }
 
+function createTestStore(
+  files = createFakeFiles(),
+  path = statePath,
+  logger: Logger = createNullLogger(),
+  options: Partial<StateStoreOptions> = {},
+) {
+  const { process: processOverride, ...lockOptions } = options;
+  const processPort = createFakeProcess([
+    { pid: globalThis.process.pid, ppid: 0, command: "node --test" },
+  ]);
+  return createStateStore(files, path, logger, {
+    process: processOverride ?? processPort,
+    ...lockOptions,
+  });
+}
+
 describe("state adapter", () => {
   test("loads default state when the state file is missing", async () => {
-    const store = createStateStore(createFakeFiles(), statePath, createNullLogger());
+    const store = createTestStore();
 
     assert.deepEqual(await store.load(), defaultState());
+  });
+
+  test("loads pre-background-clone state with an empty clone job list", async () => {
+    const legacy = defaultState();
+    const { clones: _clones, ...withoutClones } = legacy;
+    const files = createFakeFiles({ texts: { [statePath]: JSON.stringify(withoutClones) } });
+    const store = createTestStore(files);
+
+    assert.deepEqual((await store.load()).clones, []);
   });
 
   test("quarantines a broken state file before throwing validation details", async () => {
     const broken = JSON.stringify({ ...defaultState(), version: 2 });
     const files = createFakeFiles({ texts: { [statePath]: broken } });
     const logger = createNullLogger();
-    const store = createStateStore(files, statePath, logger);
+    const store = createTestStore(files, statePath, logger);
 
     await assert.rejects(store.load(), (error: unknown) => {
       assert.ok(error instanceof SwarmError);
@@ -64,7 +91,7 @@ describe("state adapter", () => {
 
   test("validates and writes state atomically", async () => {
     const files = createFakeFiles();
-    const store = createStateStore(files, statePath, createNullLogger());
+    const store = createTestStore(files);
     const state = stateWithContext("Team");
 
     await store.save(state);
@@ -92,7 +119,7 @@ describe("state adapter", () => {
       await writeTextAtomic(path, text);
       activeWrites -= 1;
     };
-    const store = createStateStore(files, statePath, createNullLogger());
+    const store = createTestStore(files);
     const first = stateWithContext("First");
     const second = stateWithContext("Second");
 
@@ -112,8 +139,8 @@ describe("state adapter", () => {
     try {
       const path = join(root, "state.json");
       const files = createFakeFiles();
-      const firstStore = createStateStore(files, path, createNullLogger());
-      const secondStore = createStateStore(files, path, createNullLogger());
+      const firstStore = createTestStore(files, path);
+      const secondStore = createTestStore(files, path);
       await firstStore.save(defaultState());
       const firstEntered = deferred();
       const releaseFirst = deferred();
@@ -138,6 +165,93 @@ describe("state adapter", () => {
         (await firstStore.load()).contexts.map(({ id }) => id),
         ["first", "second"],
       );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("reclaims a lock owned by a dead process and removes it after mutation", async () => {
+    const root = await mkdtemp(join(tmpdir(), "swarm-stale-lock-"));
+    try {
+      const path = join(root, "state.json");
+      const lockPath = `${path}.lock`;
+      const files = createFakeFiles();
+      const deadProcess = createFakeProcess();
+      const store = createTestStore(files, path, createNullLogger(), {
+        process: deadProcess,
+        lockTimeoutMs: 100,
+      });
+      await store.save(defaultState());
+      await writeFile(lockPath, "2147483647\n", "utf8");
+
+      await store.mutate((state) => {
+        const context = stateWithContext("Recovered").contexts[0];
+        assert.ok(context);
+        state.contexts.push(context);
+      });
+
+      assert.deepEqual(
+        (await store.load()).contexts.map(({ id }) => id),
+        ["recovered"],
+      );
+      await assert.rejects(access(lockPath), { code: "ENOENT" });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("does not steal a lock owned by a live process", async () => {
+    const root = await mkdtemp(join(tmpdir(), "swarm-live-lock-"));
+    try {
+      const path = join(root, "state.json");
+      const lockPath = `${path}.lock`;
+      const files = createFakeFiles();
+      const store = createTestStore(files, path, createNullLogger(), {
+        lockTimeoutMs: 75,
+        lockRetryMs: 5,
+      });
+      await store.save(defaultState());
+      await writeFile(lockPath, `${process.pid}\n`, "utf8");
+
+      await assert.rejects(
+        store.mutate(() => undefined),
+        (error: unknown) =>
+          error instanceof SwarmError &&
+          error.code === "fs" &&
+          /Timed out waiting for swarm state lock/u.test(error.message),
+      );
+      await access(lockPath);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("protects a newly-created empty lock but reclaims it after the grace period", async () => {
+    const root = await mkdtemp(join(tmpdir(), "swarm-empty-lock-"));
+    try {
+      const path = join(root, "state.json");
+      const lockPath = `${path}.lock`;
+      const files = createFakeFiles();
+      const store = createTestStore(files, path, createNullLogger(), {
+        lockTimeoutMs: 50,
+        lockRetryMs: 5,
+        emptyLockGraceMs: 1_000,
+      });
+      await store.save(defaultState());
+      await writeFile(lockPath, "", "utf8");
+
+      await assert.rejects(
+        store.mutate(() => undefined),
+        SwarmError,
+      );
+      await access(lockPath);
+
+      const old = new Date(Date.now() - 2_000);
+      await utimes(lockPath, old, old);
+      await store.mutate((state) => {
+        state.activeContextId = undefined;
+      });
+      await assert.rejects(access(lockPath), { code: "ENOENT" });
     } finally {
       await rm(root, { recursive: true, force: true });
     }

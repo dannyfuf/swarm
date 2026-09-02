@@ -26,6 +26,7 @@ export function createMemoryState(initial: State = defaultState()): MemoryState 
       if (active) {
         active.contexts = structuredClone(state.contexts);
         active.repos = structuredClone(state.repos);
+        active.clones = structuredClone(state.clones);
         active.worktrees = structuredClone(state.worktrees);
         active.activeContextId = state.activeContextId;
         return;

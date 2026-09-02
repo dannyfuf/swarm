@@ -10,10 +10,11 @@ import type {
   GithubPort,
   GitPort,
   Logger,
+  ProcessPort,
   StatePort,
 } from "../core/ports.ts";
 import type { OnEvent, RepoService, WorktreeService } from "../core/services.ts";
-import type { Config, RemoteRepo, Repo, State } from "../core/types.ts";
+import type { CloneJob, Config, RemoteRepo, Repo, State } from "../core/types.ts";
 import { mutateState } from "./stateMutation.ts";
 
 export interface RepoServiceDependencies {
@@ -21,6 +22,7 @@ export interface RepoServiceDependencies {
   config: ConfigPort;
   github: GithubPort;
   git: GitPort;
+  process: ProcessPort;
   files: FilesPort;
   worktreeService: WorktreeService;
   clock: Clock;
@@ -59,6 +61,7 @@ export function createRepoService({
   config,
   github,
   git,
+  process,
   files,
   worktreeService,
   clock,
@@ -100,7 +103,10 @@ export function createRepoService({
         logger.warn("Skipping an owner whose repositories could not be listed", failure.reason);
       }
 
-      const cloned = new Set(current.repos.map((repo) => repo.id));
+      const cloned = new Set([
+        ...current.repos.map((repo) => repo.id),
+        ...current.clones.filter((job) => job.status !== "failed").map((job) => job.id),
+      ]);
       const available = settled.flatMap((result) =>
         result.status === "fulfilled"
           ? result.value.filter((remote) => !cloned.has(remote.fullName))
@@ -112,95 +118,175 @@ export function createRepoService({
     },
 
     async clone(remote: RemoteRepo, contextId, onEvent) {
-      let staging: string | undefined;
-      let cloneStarted = false;
+      const id = makeRepoId(remote.owner, remote.name);
+      let job: CloneJob | undefined;
       try {
-        const repo = await mutateState(state, async (next) => {
+        let loadedConfig: Config;
+        try {
+          loadedConfig = await config.load();
+        } catch (error) {
+          throw toSwarmError(error, "fs", "Failed to load swarm configuration");
+        }
+
+        const destination = repoPath(loadedConfig, remote.owner, remote.name);
+        const cloneUrl =
+          loadedConfig.github.cloneProtocol === "https"
+            ? `https://github.com/${remote.owner}/${remote.name}.git`
+            : remote.sshUrl;
+        const unique = randomUUID();
+        const stagingPath = `${destination}.staging-${globalThis.process.pid}-${unique}`;
+        const logsDir = join(home ?? dirname(loadedConfig.reposDir), "logs");
+        const logPath = join(logsDir, `clone-${remote.owner}-${remote.name}-${unique}.log`);
+        const previousFailure = (await loadState()).clones.find(
+          (candidate) => candidate.id === id && candidate.status === "failed",
+        );
+        if (previousFailure) {
+          await files.removeDetached(previousFailure.stagingPath).catch((error: unknown) => {
+            logger.error("Failed to clean up the previous clone attempt", error);
+          });
+        }
+
+        try {
+          if (await files.exists(destination)) {
+            throw new SwarmError("conflict", `Repository path already exists: ${destination}`);
+          }
+          await Promise.all([files.ensureDir(dirname(destination)), files.ensureDir(logsDir)]);
+        } catch (error) {
+          throw toSwarmError(error, "fs", `Failed to inspect repository path: ${destination}`);
+        }
+
+        job = await mutateState(state, (next) => {
           if (!next.contexts.some((context) => context.id === contextId)) {
             throw new SwarmError("not-found", `Context not found: ${contextId}`);
           }
-
-          const id = makeRepoId(remote.owner, remote.name);
-          if (next.repos.some((repo) => repo.id === id)) {
+          const existingClone = next.clones.find((candidate) => candidate.id === id);
+          if (
+            next.repos.some((repo) => repo.id === id) ||
+            (existingClone !== undefined && existingClone.status !== "failed")
+          ) {
             throw new SwarmError("conflict", `Repository already exists: ${id}`);
           }
-
-          let loadedConfig: Config;
-          try {
-            loadedConfig = await config.load();
-          } catch (error) {
-            throw toSwarmError(error, "fs", "Failed to load swarm configuration");
-          }
-          const destination = repoPath(loadedConfig, remote.owner, remote.name);
-          const cloneUrl =
-            loadedConfig.github.cloneProtocol === "https"
-              ? `https://github.com/${remote.owner}/${remote.name}.git`
-              : remote.sshUrl;
-          try {
-            if (await files.exists(destination)) {
-              throw new SwarmError("conflict", `Repository path already exists: ${destination}`);
-            }
-            await files.ensureDir(dirname(destination));
-          } catch (error) {
-            throw toSwarmError(error, "fs", `Failed to inspect repository path: ${destination}`);
-          }
-
-          staging = `${destination}.staging-${process.pid}-${randomUUID()}`;
-          onEvent?.({ type: "step", label: "Cloning" });
-          cloneStarted = true;
-          try {
-            await git.clone(cloneUrl, staging, {
-              onProgress: (line) => onEvent?.({ type: "log", line }),
-            });
-          } catch (error) {
-            throw toSwarmError(error, "git", `Failed to clone repository: ${id}`);
-          }
-
-          let defaultBranch: string;
-          try {
-            defaultBranch = await git.defaultBranch(staging);
-          } catch (error) {
-            throw toSwarmError(error, "git", `Failed to detect the default branch for: ${id}`);
-          }
-
-          try {
-            await files.move(staging, destination);
-            staging = undefined;
-          } catch (error) {
-            throw toSwarmError(error, "fs", `Failed to install cloned repository: ${id}`);
-          }
-
-          const created: Repo = {
+          next.clones = next.clones.filter((candidate) => candidate.id !== id);
+          const starting: CloneJob = {
             id,
             owner: remote.owner,
             name: remote.name,
             url: cloneUrl,
             contextId,
-            defaultBranch,
+            defaultBranch: remote.defaultBranch,
             path: destination,
-            clonedAt: clock.now().toISOString(),
-            hooks: { postCreate: [] },
+            stagingPath,
+            logPath,
+            startedAt: clock.now().toISOString(),
+            status: "starting",
           };
-          next.repos.push(created);
-          return created;
+          next.clones.push(starting);
+          return starting;
+        });
+
+        onEvent?.({ type: "step", label: "Starting background clone" });
+        const pid = await git.cloneDetached(cloneUrl, stagingPath, logPath);
+        const launched = await mutateState(state, (next) => {
+          const index = next.clones.findIndex((candidate) => candidate.id === id);
+          const current = next.clones[index];
+          if (!current) throw new SwarmError("not-found", `Clone job not found: ${id}`);
+          const updated: CloneJob = { ...current, pid, status: "cloning" };
+          next.clones[index] = updated;
+          return updated;
         });
         onEvent?.({ type: "done" });
-        return repo;
+        return launched;
       } catch (error) {
         const failure =
           error instanceof SwarmError
             ? error
             : new SwarmError("git", "Failed to clone repository", { cause: error });
-        if (cloneStarted && staging) {
+        if (job) {
           try {
-            await files.removeDetached(staging);
-          } catch (cleanupError) {
-            logger.error("Failed to clean up a partial repository clone", cleanupError);
+            await mutateState(state, (next) => {
+              const index = next.clones.findIndex((candidate) => candidate.id === job?.id);
+              const current = next.clones[index];
+              if (!current) return;
+              next.clones[index] = { ...current, status: "failed", error: failure.message };
+            });
+          } catch (stateError) {
+            logger.error("Failed to persist background clone failure", stateError);
           }
         }
         onEvent?.({ type: "error", error: failure });
         throw failure;
       }
+    },
+
+    async reconcileClones() {
+      const current = await loadState();
+      for (const clone of current.clones) {
+        if (clone.status === "failed") continue;
+        if (clone.pid !== undefined && (await process.isAlive(clone.pid))) continue;
+
+        try {
+          const stagingComplete = await files.exists(join(clone.stagingPath, ".git"));
+          const installedComplete = await files.exists(join(clone.path, ".git"));
+          const completedPath = stagingComplete
+            ? clone.stagingPath
+            : installedComplete
+              ? clone.path
+              : undefined;
+          if (!completedPath) {
+            const message = `Clone process exited before producing a valid repository; see ${clone.logPath}`;
+            await mutateState(state, (next) => {
+              const index = next.clones.findIndex((candidate) => candidate.id === clone.id);
+              const existing = next.clones[index];
+              if (existing) next.clones[index] = { ...existing, status: "failed", error: message };
+            });
+            await files.removeDetached(clone.stagingPath).catch((error: unknown) => {
+              logger.error("Failed to clean up a partial repository clone", error);
+            });
+            continue;
+          }
+
+          const defaultBranch = await git.defaultBranch(completedPath);
+          if (completedPath === clone.stagingPath) await files.move(clone.stagingPath, clone.path);
+          await mutateState(state, (next) => {
+            if (!next.repos.some((repo) => repo.id === clone.id)) {
+              const created: Repo = {
+                id: clone.id,
+                owner: clone.owner,
+                name: clone.name,
+                url: clone.url,
+                contextId: clone.contextId,
+                defaultBranch,
+                path: clone.path,
+                clonedAt: clock.now().toISOString(),
+                hooks: { postCreate: [] },
+              };
+              next.repos.push(created);
+            }
+            next.clones = next.clones.filter((candidate) => candidate.id !== clone.id);
+          });
+          logger.info("Background clone completed", { id: clone.id, path: clone.path });
+        } catch (error) {
+          const failure = toSwarmError(
+            error,
+            "git",
+            `Failed to finish repository clone: ${clone.id}`,
+          );
+          const installed = await files.exists(join(clone.path, ".git")).catch(() => false);
+          if (installed) {
+            logger.error(`${failure.message}; reconciliation will retry`, failure);
+            continue;
+          }
+          await mutateState(state, (next) => {
+            const index = next.clones.findIndex((candidate) => candidate.id === clone.id);
+            const existing = next.clones[index];
+            if (existing) {
+              next.clones[index] = { ...existing, status: "failed", error: failure.message };
+            }
+          });
+          logger.error(failure.message, failure);
+        }
+      }
+      return (await loadState()).clones;
     },
 
     async assign(repoId, contextId) {

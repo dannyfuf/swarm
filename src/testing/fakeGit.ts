@@ -1,6 +1,7 @@
 import type { GitPort } from "../core/ports.ts";
 
 export interface FakeGitOptions {
+  detachedPid?: number;
   defaultBranches?: Record<string, string>;
   remoteBranches?: Record<string, string[]>;
   currentBranches?: Record<string, string>;
@@ -32,9 +33,9 @@ export function createFakeGit(options: FakeGitOptions = {}): FakeGit {
     branches,
     currentBranches,
     dirtyPaths,
-    async clone(url, dest, opts) {
-      calls.push({ method: "clone", args: [url, dest, opts] });
-      opts?.onProgress?.("Cloning");
+    async cloneDetached(url, dest, logPath) {
+      calls.push({ method: "cloneDetached", args: [url, dest, logPath] });
+      return options.detachedPid ?? 4242;
     },
     async fetch(repoPath, opts) {
       calls.push({ method: "fetch", args: [repoPath, opts] });

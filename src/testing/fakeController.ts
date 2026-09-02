@@ -88,6 +88,7 @@ export function createFakeController(
       patchState({
         contexts: fixtureState.contexts,
         repos: fixtureState.repos,
+        clones: fixtureState.clones,
         worktrees: fixtureState.worktrees,
         activeContextId: fixtureState.activeContextId,
         config,

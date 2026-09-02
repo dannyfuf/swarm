@@ -14,7 +14,7 @@ import { createController } from "./app/controller.ts";
 import { createStore } from "./app/store.ts";
 import { SwarmError } from "./core/errors.ts";
 import { swarmHome } from "./core/paths.ts";
-import type { Logger, Shell, ShellResult } from "./core/ports.ts";
+import type { Clock, Logger, Shell, ShellResult } from "./core/ports.ts";
 import type { UnmountReport } from "./core/services.ts";
 import type { Config, State, Worktree } from "./core/types.ts";
 import { createContextService } from "./services/contexts.ts";
@@ -95,6 +95,16 @@ async function createRuntime(env: NodeJS.ProcessEnv): Promise<Runtime> {
   const githubCacheDir = join(home, "cache", "github");
   const logger = createLogger(join(logsDir, "swarm.log"), "main");
   const shell = createShell(logger);
+  const processPort = createProcess(shell, process.platform);
+  const clock: Clock = {
+    now: () => new Date(),
+    setInterval(callback, intervalMs) {
+      return globalThis.setInterval(callback, intervalMs);
+    },
+    clearInterval(handle) {
+      globalThis.clearInterval(handle as ReturnType<typeof globalThis.setInterval>);
+    },
+  };
   const removalRoots = [join(home, "trash")];
   const files = createFiles(shell, logger, process.platform, removalRoots);
 
@@ -115,11 +125,11 @@ async function createRuntime(env: NodeJS.ProcessEnv): Promise<Runtime> {
     [configValue.reposDir, configValue.worktreesDir].map((path) => files.ensureDir(path)),
   );
 
-  const state = createStateStore(files, join(home, "state.json"), logger);
+  const state = createStateStore(files, join(home, "state.json"), logger, {
+    process: processPort,
+  });
   const git = createGit(shell, logger);
   const tmux = createTmux(shell, logger, env);
-  const processPort = createProcess(shell, process.platform);
-  const clock = { now: () => new Date() };
   const github = createGithub(shell, files, logger, {
     cacheDir: githubCacheDir,
     cacheTtlSeconds: configValue.github.cacheTtlSeconds,
@@ -142,6 +152,7 @@ async function createRuntime(env: NodeJS.ProcessEnv): Promise<Runtime> {
     config,
     github,
     git,
+    process: processPort,
     files,
     worktreeService: worktrees,
     clock,

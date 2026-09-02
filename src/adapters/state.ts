@@ -2,7 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { open, unlink } from "node:fs/promises";
 import { z } from "zod";
 import { SwarmError } from "../core/errors.ts";
-import type { FilesPort, Logger, StatePort } from "../core/ports.ts";
+import type { FilesPort, Logger, ProcessPort, StatePort } from "../core/ports.ts";
 import { defaultState, type State, StateSchema } from "../core/types.ts";
 
 function formatValidationError(error: unknown): string {
@@ -27,11 +27,26 @@ const wait = async (ms: number): Promise<void> => {
   await new Promise<void>((resolve) => setTimeout(resolve, ms));
 };
 
+function hasCode(error: unknown, code: string): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === code;
+}
+
+export interface StateStoreOptions {
+  process: Pick<ProcessPort, "isAlive">;
+  lockTimeoutMs?: number;
+  lockRetryMs?: number;
+  emptyLockGraceMs?: number;
+}
+
 export function createStateStore(
   files: FilesPort,
   path: string,
   logger: Logger,
+  options: StateStoreOptions,
 ): TransactionalStatePort {
+  const lockTimeoutMs = options.lockTimeoutMs ?? 3_000;
+  const lockRetryMs = options.lockRetryMs ?? 25;
+  const emptyLockGraceMs = options.emptyLockGraceMs ?? 1_000;
   let saveChain: Promise<void> = Promise.resolve();
   const transaction = new AsyncLocalStorage<State>();
   const lockPath = `${path}.lock`;
@@ -67,24 +82,80 @@ export function createStateStore(
   };
 
   const withFileLock = async <T>(operation: () => Promise<T>): Promise<T> => {
-    const deadline = Date.now() + 30_000;
+    const deadline = Date.now() + lockTimeoutMs;
     let handle: Awaited<ReturnType<typeof open>>;
     while (true) {
       try {
-        handle = await open(lockPath, "wx");
-        await handle.writeFile(`${process.pid}\n`, "utf8");
+        const candidate = await open(lockPath, "wx");
+        try {
+          await candidate.writeFile(`${process.pid}\n`, "utf8");
+        } catch (cause) {
+          await candidate.close().catch(() => undefined);
+          await unlink(lockPath).catch(() => undefined);
+          throw cause;
+        }
+        handle = candidate;
         break;
       } catch (cause) {
-        if (
-          typeof cause !== "object" ||
-          cause === null ||
-          !("code" in cause) ||
-          cause.code !== "EEXIST" ||
-          Date.now() >= deadline
-        ) {
+        if (!hasCode(cause, "EEXIST")) {
           throw new SwarmError("fs", `Failed to lock swarm state: ${path}`, { cause });
         }
-        await wait(25);
+
+        let owner: string;
+        let modifiedAt: number;
+        try {
+          const existing = await open(lockPath, "r");
+          try {
+            const [contents, metadata] = await Promise.all([
+              existing.readFile("utf8"),
+              existing.stat(),
+            ]);
+            owner = contents.trim();
+            modifiedAt = metadata.mtimeMs;
+          } finally {
+            await existing.close().catch(() => undefined);
+          }
+        } catch (readError) {
+          if (hasCode(readError, "ENOENT")) continue;
+          if (Date.now() >= deadline) {
+            throw new SwarmError("fs", `Failed to inspect swarm state lock: ${path}`, {
+              cause: readError,
+            });
+          }
+          await wait(lockRetryMs);
+          continue;
+        }
+
+        const emptyOwnerIsFresh = owner === "" && Date.now() - modifiedAt < emptyLockGraceMs;
+        const ownerPid = /^\d+$/u.test(owner) ? Number(owner) : Number.NaN;
+        const validOwnerPid = Number.isSafeInteger(ownerPid) && ownerPid > 0;
+        const ownerIsAlive = validOwnerPid ? await options.process.isAlive(ownerPid) : false;
+        const stale = !emptyOwnerIsFresh && (!validOwnerPid || !ownerIsAlive);
+        if (stale) {
+          try {
+            await unlink(lockPath);
+            logger.warn("Reclaimed stale swarm state lock", {
+              path: lockPath,
+              owner: owner || "missing",
+            });
+          } catch (unlinkError) {
+            if (!hasCode(unlinkError, "ENOENT")) {
+              throw new SwarmError("fs", `Failed to reclaim swarm state lock: ${path}`, {
+                cause: unlinkError,
+              });
+            }
+          }
+          continue;
+        }
+
+        if (Date.now() >= deadline) {
+          throw new SwarmError(
+            "fs",
+            `Timed out waiting for swarm state lock after ${lockTimeoutMs}ms: ${path}`,
+            { cause },
+          );
+        }
+        await wait(lockRetryMs);
       }
     }
 

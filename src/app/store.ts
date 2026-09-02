@@ -1,11 +1,12 @@
 import type { Action, AppState, Pane, Store } from "../core/app.ts";
 import { defaultConfig } from "../core/types.ts";
-import { visibleRepos, visibleWorktrees } from "./selectors.ts";
+import { visibleRepoItems, visibleWorktrees } from "./selectors.ts";
 
 function initialState(initial: Partial<AppState> = {}): AppState {
   return {
     contexts: [],
     repos: [],
+    clones: [],
     worktrees: [],
     statuses: {},
     pane: "worktrees",
@@ -27,7 +28,7 @@ function clamp(value: number, maximum: number): number {
 
 function cursorMaximum(state: AppState, pane: Pane): number {
   return pane === "repos"
-    ? visibleRepos(state).length
+    ? visibleRepoItems(state).length
     : Math.max(0, visibleWorktrees(state).length - 1);
 }
 

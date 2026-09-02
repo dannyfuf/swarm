@@ -99,6 +99,13 @@ export const RepoSchema = z.object({
   hooks: z.object({ postCreate: z.array(z.string()).default([]) }).default({ postCreate: [] }),
 });
 
+export const CloneJobSchema = z.object({
+  id: RepoId, owner: z.string(), name: z.string(), url: z.string(), contextId: ContextId,
+  defaultBranch: z.string(), path: z.string(), stagingPath: z.string(), logPath: z.string(),
+  pid: z.number().int().positive().optional(), startedAt: z.string().datetime(),
+  status: z.enum(["starting", "cloning", "failed"]), error: z.string().optional(),
+});
+
 export const WorktreeSchema = z.object({
   id: WorktreeId,                // "owner/name#slug"
   repoId: RepoId,
@@ -115,6 +122,7 @@ export const StateSchema = z.object({
   version: z.literal(1),
   contexts: z.array(ContextSchema),
   repos: z.array(RepoSchema),
+  clones: z.array(CloneJobSchema).default([]),
   worktrees: z.array(WorktreeSchema),
   activeContextId: ContextId.optional(),
 });
@@ -175,13 +183,13 @@ export interface ShellResult { code: number; stdout: string; stderr: string }
 export interface RunOptions { cwd?: string; env?: Record<string,string>; input?: string; timeoutMs?: number; signal?: AbortSignal; onStderrLine?: (line: string) => void }
 export interface Shell {
   run(cmd: string, args: string[], opts?: RunOptions): Promise<ShellResult>;           // never throws on non-zero exit
-  spawnDetached(cmd: string, args: string[], opts?: { cwd?: string }): Promise<void>;  // fire and forget (rm -rf of trash)
+  spawnDetached(cmd: string, args: string[], opts?: { cwd?: string; logPath?: string }): Promise<number>; // new process group, ignored stdin, optional file-backed stdout/stderr, unref
   exec(cmd: string, args: string[]): Promise<never>;                                   // replace current process stdio (tmux attach outside tmux)
 }
 export interface Logger { info(msg: string, data?: unknown): void; warn(...): void; error(...): void; child(scope: string): Logger }
 
 export interface GitPort {
-  clone(url: string, dest: string, opts?: { signal?: AbortSignal; onProgress?: (line: string) => void }): Promise<void>;
+  cloneDetached(url: string, dest: string, logPath: string): Promise<number>;
   fetch(repoPath: string, opts?: { prune?: boolean; signal?: AbortSignal }): Promise<void>;
   defaultBranch(repoPath: string): Promise<string>;                 // from refs/remotes/origin/HEAD, fallback main/master
   resetToRemote(repoPath: string, branch: string): Promise<void>;   // checkout -B branch origin/branch && reset --hard origin/branch && clean -fd
@@ -234,7 +242,7 @@ export interface GithubPort {
 }
 export interface StatePort  { load(): Promise<State>;  save(state: State): Promise<void> }   // validated, atomic
 export interface ConfigPort { load(): Promise<Config>; save(config: Config): Promise<void> }
-export interface Clock { now(): Date }
+export interface Clock { now(): Date; setInterval(callback: () => void, intervalMs: number): unknown; clearInterval(handle: unknown): void }
 export interface Clipboard { copy(text: string): Promise<void> }   // pbcopy / xclip / wl-copy
 ```
 
@@ -259,7 +267,8 @@ export interface ContextService {
 export interface RepoService {
   list(contextId?: ContextId): Promise<Repo[]>;
   searchRemote(contextId: ContextId, query: string, opts?: { refresh?: boolean; signal?: AbortSignal }): Promise<RemoteRepo[]>; // fuzzy over cached owners lists, excludes already-cloned
-  clone(remote: RemoteRepo, contextId: ContextId, onEvent?: OnEvent): Promise<Repo>; // uses github.cloneProtocol
+  clone(remote: RemoteRepo, contextId: ContextId, onEvent?: OnEvent): Promise<CloneJob>; // persists, then launches detached using github.cloneProtocol
+  reconcileClones(): Promise<CloneJob[]>; // running pid stays pending; completed .git is promoted; missing .git becomes failed
   assign(repoId: RepoId, contextId: ContextId): Promise<Repo>;
   delete(repoId: RepoId, onEvent?: OnEvent): Promise<void>;                    // kills sessions, trashes worktrees + base
 }
@@ -286,10 +295,14 @@ export type FuzzyFilter = <T>(query: string, items: T[], key: (t: T) => string) 
 export const fuzzyFilter: FuzzyFilter; // src/core/fuzzy.ts, pure, fzf-like (subsequence, bonus for word starts / consecutive), empty query → all in input order
 ```
 
-Repository clones are first written to a unique sibling directory named
-`<destination>.staging-<pid>-<uuid>`. The service detects the default branch there, then
-atomically renames the complete clone into its final path. A failed clone removes only its
-own staging directory, never a pre-existing destination. `github.cloneProtocol` selects
+Repository clones run in a detached process group and are first written to a unique sibling
+directory named `<destination>.staging-<pid>-<uuid>`. Before launch, the service persists a
+`CloneJob`; after spawn it records the child pid. Child stdout/stderr append to a per-clone file
+under `SWARM_HOME/logs`. On startup/refresh, and every two seconds while an active clone remains,
+reconciliation leaves live pids pending, detects a finished clone by its `.git`, detects the
+default branch, then atomically renames the complete clone into its final path and promotes the
+job to a `Repo`. A dead child without a valid clone is marked failed and only its own staging
+directory is removed. `github.cloneProtocol` selects
 `remote.sshUrl` or `https://github.com/<owner>/<name>.git`; the selected URL is persisted.
 
 All service state changes go through `src/services/stateMutation.ts`. It delegates to the
@@ -327,7 +340,7 @@ export type DialogKind =
 export interface Toast { id: string; level: "info"|"success"|"error"; text: string }
 export interface Operation { id: string; label: string; step: string; log: string[]; targetId?: string; startedAt: number }
 export interface AppState {
-  contexts: Context[]; repos: Repo[]; worktrees: Worktree[];
+  contexts: Context[]; repos: Repo[]; clones: CloneJob[]; worktrees: Worktree[];
   statuses: Record<WorktreeId, WorktreeStatus>;
   activeContextId?: ContextId;
   pane: Pane; mode: Mode;
@@ -436,3 +449,13 @@ state glyph, branch, what is running, recency. Everything else lives in the deta
 Rows of in-flight operations show a spinner + step text instead of columns. Empty states carry
 the next action ("No repos in buk — press n to clone one"). Colors: a single accent for the
 cursor row, green for attached, yellow for running agents, red only for danger dialogs.
+
+## 10. Integration notes
+
+- 2026-09-02: repository cloning became a persisted detached background job. `Shell.spawnDetached`
+  now returns a pid and can redirect output to a log; `GitPort` exposes `cloneDetached`; `State`
+  and `AppState` include clone jobs; and `RepoService.reconcileClones` promotes or fails them on
+  startup, refresh, or the controller's active-clone timer. Existing version-1 state remains
+  compatible because `clones` defaults to an empty array. State mutations also reclaim lock files
+  whose recorded process is dead or invalid, while protecting live and newly-created empty locks;
+  interactive lock acquisition times out after three seconds.

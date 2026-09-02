@@ -4,13 +4,14 @@ import type { TestRendererSetup } from "@opentui/core/testing";
 import { testRender } from "@opentui/react/test-utils";
 import { createStore } from "../app/store.ts";
 import type { Store, UiExit } from "../core/app.ts";
-import { createFakeController } from "../testing/fakeController.ts";
+import { createFakeController, type FakeController } from "../testing/fakeController.ts";
 import { config as fixtureConfig, makeAppState } from "../testing/fixtures.ts";
 import { App } from "./App.tsx";
 
 interface Harness {
   setup: TestRendererSetup;
   store: Store;
+  controller: FakeController;
   exits: UiExit[];
   frame: () => string;
   stop: () => void;
@@ -46,6 +47,7 @@ async function mount(width = 110, height = 32): Promise<Harness> {
   return {
     setup,
     store,
+    controller,
     exits,
     frame: () => setup.captureCharFrame(),
     stop: () => setup.renderer.destroy(),
@@ -154,6 +156,37 @@ test("q asks the host to quit", async () => {
     assert.deepEqual(harness.exits, ["quit"]);
   } finally {
     harness.stop();
+  }
+});
+
+test("q during an in-flight clone stays clean even if the clone promise rejects later", async () => {
+  const harness = await mount();
+  let stopped = false;
+  let rejectClone: (error: Error) => void = () => undefined;
+  harness.controller.cloneRepo = async () =>
+    new Promise<void>((_resolve, reject) => {
+      rejectClone = reject;
+    });
+  try {
+    harness.setup.mockInput.pressKey("h");
+    harness.setup.mockInput.pressKey("n");
+    await harness.setup.flush();
+    assert.equal(harness.store.getState().dialog?.kind, "clone-repo");
+
+    harness.setup.mockInput.pressEnter();
+    await harness.setup.flush();
+    assert.equal(harness.store.getState().dialog, undefined);
+
+    harness.setup.mockInput.pressKey("q");
+    await harness.setup.flush();
+    assert.deepEqual(harness.exits, ["quit"]);
+
+    harness.stop();
+    stopped = true;
+    rejectClone(new Error("late clone failure"));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  } finally {
+    if (!stopped) harness.stop();
   }
 });
 

@@ -160,6 +160,36 @@ test("an empty context explains the next keystroke", () => {
   assert.ok(lines.some((line) => line.includes("clone one")));
 });
 
+test("persisted clone jobs render their background status and log path", () => {
+  const state = stateWith({
+    repos: [],
+    worktrees: [],
+    statuses: {},
+    pane: "repos",
+    repoCursor: 1,
+    clones: [
+      {
+        id: "bukhr/benefits",
+        owner: "bukhr",
+        name: "benefits",
+        url: "git@github.com:bukhr/benefits.git",
+        contextId: "buk",
+        defaultBranch: "main",
+        path: "/home/test/.swarm/repos/bukhr/benefits",
+        stagingPath: "/home/test/.swarm/repos/bukhr/benefits.staging",
+        logPath: "/home/test/.swarm/logs/clone-benefits.log",
+        pid: 4242,
+        startedAt: "2026-09-02T11:00:00.000Z",
+        status: "cloning",
+      },
+    ],
+  });
+  const lines = buildScreen(state, context()).map(lineText);
+
+  assert.ok(lines.some((line) => line.includes("benefits") && line.includes("cloning")));
+  assert.ok(lines.some((line) => line.includes("logs/clone-benefits.log")));
+});
+
 test("a filter with no match points at Esc", () => {
   const lines = buildScreen(stateWith({ filter: "zzzz" }), context()).map(lineText);
   assert.ok(lines.some((line) => line.includes("Nothing matches")));
