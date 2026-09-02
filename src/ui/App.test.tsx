@@ -82,6 +82,27 @@ const reviewPr = pullRequest({
   updatedAt: "2026-09-02T08:00:00.000Z",
 });
 
+test("App paints a loading frame before startup data arrives", async () => {
+  const store = createStore();
+  const controller = createFakeController(store);
+  const setup = await testRender(
+    <App
+      store={store}
+      controller={controller}
+      config={fixtureConfig}
+      home="/home/test"
+      onExit={() => undefined}
+    />,
+    { width: 80, height: 24 },
+  );
+  try {
+    await setup.flush();
+    assert.match(setup.captureCharFrame(), /Loading workspace/u);
+  } finally {
+    setup.renderer.destroy();
+  }
+});
+
 function seedPrs(harness: Harness, tab: "mine" | "review", prs: PullRequest[]): void {
   const byRepo = new Map<string, PullRequest[]>();
   for (const pr of prs) byRepo.set(pr.repoId, [...(byRepo.get(pr.repoId) ?? []), pr]);

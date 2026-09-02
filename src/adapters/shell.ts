@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { closeSync, openSync } from "node:fs";
 import { SwarmError } from "../core/errors.ts";
 import type { Logger, RunOptions, Shell, ShellResult } from "../core/ports.ts";
+import { noStartupTiming, type StartupTiming } from "../core/startup.ts";
 
 export type RunOptionsWithInput = RunOptions;
 
@@ -11,10 +12,10 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-export function createShell(logger: Logger): Shell {
+export function createShell(logger: Logger, startup: StartupTiming = noStartupTiming): Shell {
   const log = logger.child("shell");
 
-  return {
+  const shell: Shell = {
     async run(cmd, args, opts?: RunOptionsWithInput): Promise<ShellResult> {
       if (opts?.signal?.aborted) {
         throw new SwarmError("cancelled", `Command cancelled before start: ${cmd}`);
@@ -215,6 +216,13 @@ export function createShell(logger: Logger): Shell {
         child.once("close", (exitCode) => resolve(exitCode ?? 1));
       });
       process.exit(code);
+    },
+  };
+
+  return {
+    ...shell,
+    run(cmd, args, opts) {
+      return startup.measure(`shell.${cmd}`, () => shell.run(cmd, args, opts));
     },
   };
 }

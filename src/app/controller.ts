@@ -20,6 +20,7 @@ import type {
   StatusService,
   WorktreeService,
 } from "../core/services.ts";
+import { noStartupTiming, type StartupTiming } from "../core/startup.ts";
 import type { PrTab, State, Worktree, WorktreeId, WorktreeStatus } from "../core/types.ts";
 import {
   prsInScope,
@@ -46,6 +47,7 @@ export interface ControllerDeps {
   process: ProcessPort;
   clock: Clock;
   logger: Logger;
+  startup?: StartupTiming;
 }
 
 function stateFields(
@@ -76,6 +78,7 @@ function asSwarmError(error: unknown): SwarmError {
 }
 
 export function createController(deps: ControllerDeps): Controller {
+  const startup = deps.startup ?? noStartupTiming;
   const minimumRefreshMs = 500;
   const cloneRefreshMs = 2_000;
   let currentConfig = deps.store.getState().config;
@@ -119,8 +122,8 @@ export function createController(deps: ControllerDeps): Controller {
       if (disposed) return;
     }
 
-    const task = deps.status
-      .snapshot(worktrees)
+    const task = startup
+      .measure("background.statusSnapshot", () => deps.status.snapshot(worktrees))
       .then((statuses) => {
         dispatch({ type: "statuses", statuses: statusRecord(statuses) });
       })
@@ -226,17 +229,19 @@ export function createController(deps: ControllerDeps): Controller {
   ): Promise<void> => {
     await Promise.all(
       tabs.map((tab) =>
-        deps.prs.load(repoIds, tab, {
-          force,
-          onSlice(repoId, slice) {
-            const previousError = deps.store.getState().prs[tab][repoId]?.error;
-            dispatch({ type: "prSlice", tab, repoId, slice });
-            if (slice.error && previousError === undefined) {
-              deps.logger.error(slice.error, { repoId, tab });
-              toast("error", slice.error);
-            }
-          },
-        }),
+        startup.measure(`background.prs.${tab}`, () =>
+          deps.prs.load(repoIds, tab, {
+            force,
+            onSlice(repoId, slice) {
+              const previousError = deps.store.getState().prs[tab][repoId]?.error;
+              dispatch({ type: "prSlice", tab, repoId, slice });
+              if (slice.error && previousError === undefined) {
+                deps.logger.error(slice.error, { repoId, tab });
+                toast("error", slice.error);
+              }
+            },
+          }),
+        ),
       ),
     );
   };
@@ -331,31 +336,43 @@ export function createController(deps: ControllerDeps): Controller {
       stopClonePolling();
 
       try {
-        const [config, persisted, currentSession] = await Promise.all([
-          deps.config.load(),
-          reconcileCloneState(),
-          deps.tmux.currentSession(),
-        ]);
-        currentConfig = config;
+        const currentSession = startup
+          .measure("controller.tmuxCurrentSession", () => deps.tmux.currentSession())
+          .then((session) => {
+            dispatch({ type: "setCurrentSession", session: session ?? undefined });
+          })
+          .catch((error: unknown) => {
+            if (!disposed) reportError(error);
+          });
+        void currentSession;
+
+        const persisted = await startup.measure("controller.stateLoad", () => deps.state.load());
         dispatch({
           type: "hydrate",
           state: {
             ...stateFields(persisted),
-            config,
-            currentSession: currentSession ?? undefined,
             loading: false,
             error: undefined,
           },
         });
 
         syncClonePolling();
+        void startup
+          .measure("controller.cloneReconcile", reconcileCloneState)
+          .then((reconciled) => {
+            dispatch({ type: "hydrate", state: stateFields(reconciled) });
+            syncClonePolling();
+          })
+          .catch((error: unknown) => {
+            if (!disposed) reportError(error);
+          });
         void snapshot(persisted.worktrees, true);
         statusInterval = deps.clock.setInterval(
           () => {
             if (deps.store.getState().operations.length > 0) return;
             void snapshot(deps.store.getState().worktrees, true);
           },
-          Math.max(minimumRefreshMs, config.ui.statusRefreshMs),
+          Math.max(minimumRefreshMs, currentConfig.ui.statusRefreshMs),
         );
         void loadPrTabs(["mine", "review"], false, activeContextRepoIds());
       } catch (error) {

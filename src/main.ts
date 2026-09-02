@@ -1,30 +1,15 @@
-import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { createClipboard } from "./adapters/clipboard.ts";
-import { createConfigStore } from "./adapters/config.ts";
-import { createFiles } from "./adapters/files.ts";
-import { createGit } from "./adapters/git.ts";
-import { createGithub } from "./adapters/github.ts";
-import { createLogger, createNullLogger } from "./adapters/logger.ts";
-import { createProcess } from "./adapters/process.ts";
-import { createShell } from "./adapters/shell.ts";
-import { createStateStore } from "./adapters/state.ts";
-import { createTmux } from "./adapters/tmux.ts";
-import { createController } from "./app/controller.ts";
-import { createStore } from "./app/store.ts";
 import { SwarmError } from "./core/errors.ts";
-import { swarmHome } from "./core/paths.ts";
-import type { Clock, Logger, Shell, ShellResult } from "./core/ports.ts";
+import type { Shell, ShellResult } from "./core/ports.ts";
 import type { UnmountReport } from "./core/services.ts";
-import type { Config, State, Worktree } from "./core/types.ts";
-import { createContextService } from "./services/contexts.ts";
-import { createPrService } from "./services/prs.ts";
-import { createRepoService } from "./services/repos.ts";
-import { createSessionService } from "./services/sessions.ts";
-import { createStatusService } from "./services/status.ts";
-import { createWorktreeService } from "./services/worktrees.ts";
+import { createStartupProfiler } from "./core/startup.ts";
+import type { State, Worktree } from "./core/types.ts";
+import type { Runtime } from "./runtime.ts";
 
 export const VERSION = "0.1.0";
+
+const startupProfiler = createStartupProfiler(process.env.SWARM_STARTUP_PROFILE);
+startupProfiler.mark("main.moduleLoaded");
 
 export type CliCommand =
   | { kind: "tui" }
@@ -33,17 +18,6 @@ export type CliCommand =
   | { kind: "doctor" }
   | { kind: "version" }
   | { kind: "help" };
-
-interface Runtime {
-  home: string;
-  configValue: Config;
-  logger: Logger;
-  state: ReturnType<typeof createStateStore>;
-  tmux: ReturnType<typeof createTmux>;
-  sessions: ReturnType<typeof createSessionService>;
-  controller: ReturnType<typeof createController>;
-  store: ReturnType<typeof createStore>;
-}
 
 interface DoctorCheck {
   name: string;
@@ -90,114 +64,6 @@ function errorLogData(error: unknown): unknown {
   };
 }
 
-async function createRuntime(env: NodeJS.ProcessEnv): Promise<Runtime> {
-  const home = swarmHome(env);
-  const logsDir = join(home, "logs");
-  const githubCacheDir = join(home, "cache", "github");
-  const logger = createLogger(join(logsDir, "swarm.log"), "main");
-  const shell = createShell(logger);
-  const processPort = createProcess(shell, process.platform);
-  const clock: Clock = {
-    now: () => new Date(),
-    setInterval(callback, intervalMs) {
-      return globalThis.setInterval(callback, intervalMs);
-    },
-    clearInterval(handle) {
-      globalThis.clearInterval(handle as ReturnType<typeof globalThis.setInterval>);
-    },
-  };
-  const removalRoots = [join(home, "trash")];
-  const files = createFiles(shell, logger, process.platform, removalRoots);
-
-  await Promise.all(
-    [home, logsDir, githubCacheDir, join(home, "trash")].map((path) => files.ensureDir(path)),
-  );
-
-  const config = createConfigStore(
-    files,
-    join(home, "config.json"),
-    home,
-    logger,
-    env.HOME ?? home,
-  );
-  const configValue = await config.load();
-  removalRoots.push(configValue.reposDir, configValue.worktreesDir);
-  await Promise.all(
-    [configValue.reposDir, configValue.worktreesDir].map((path) => files.ensureDir(path)),
-  );
-
-  const state = createStateStore(files, join(home, "state.json"), logger, {
-    process: processPort,
-  });
-  const git = createGit(shell, logger);
-  const tmux = createTmux(shell, logger, env);
-  const github = createGithub(shell, files, logger, {
-    cacheDir: githubCacheDir,
-    cacheTtlSeconds: configValue.github.cacheTtlSeconds,
-    clock,
-  });
-  const clipboard = createClipboard(shell, process.platform);
-  const worktrees = createWorktreeService({
-    state,
-    config,
-    git,
-    files,
-    tmux,
-    shell,
-    clock,
-    logger,
-    home,
-  });
-  const repos = createRepoService({
-    state,
-    config,
-    github,
-    git,
-    process: processPort,
-    files,
-    worktreeService: worktrees,
-    clock,
-    logger,
-    home,
-  });
-  const contexts = createContextService({ state, clock, repoService: repos });
-  const prs = createPrService({ github, ttlSeconds: configValue.github.prTtlSeconds });
-  const sessions = createSessionService({
-    tmux,
-    process: processPort,
-    config,
-    state,
-    worktrees,
-    clock,
-    logger,
-  });
-  const status = createStatusService({
-    tmux,
-    process: processPort,
-    config,
-    logger,
-  });
-  const store = createStore({ config: configValue });
-  const controller = createController({
-    store,
-    contexts,
-    repos,
-    prs,
-    worktrees,
-    sessions,
-    status,
-    config,
-    state,
-    tmux,
-    clipboard,
-    process: processPort,
-    clock,
-    logger,
-  });
-
-  return { home, configValue, logger, state, tmux, sessions, controller, store };
-}
-
 function findWorktree(state: State, target: string): Worktree {
   const worktree = state.worktrees.find(
     (candidate) => candidate.id === target || candidate.session === target,
@@ -227,6 +93,10 @@ async function safeRun(shell: Shell, cmd: string, args: string[]): Promise<Shell
 }
 
 async function doctorChecks(): Promise<DoctorCheck[]> {
+  const [{ createShell }, { createNullLogger }] = await Promise.all([
+    import("./adapters/shell.ts"),
+    import("./adapters/logger.ts"),
+  ]);
   const shell = createShell(createNullLogger());
   const [tmux, git, gh, cloneCopy] = await Promise.all([
     safeRun(shell, "tmux", ["-V"]),
@@ -302,21 +172,6 @@ async function runRuntimeCommand(runtime: Runtime, command: CliCommand): Promise
     process.stdout.write(`${formatUnmountReport(report)}\n`);
     return;
   }
-
-  if (command.kind === "tui") {
-    try {
-      await runtime.controller.init();
-      const { runTui } = await import("./ui/App.tsx");
-      await runTui({
-        store: runtime.store,
-        controller: runtime.controller,
-        config: runtime.configValue,
-        home: process.env.HOME ?? runtime.home,
-      });
-    } finally {
-      runtime.controller.dispose();
-    }
-  }
 }
 
 export async function main(argv: string[] = process.argv.slice(2)): Promise<number> {
@@ -337,13 +192,58 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
       return checks.every(({ ok }) => ok) ? 0 : 1;
     }
 
-    runtime = await createRuntime(process.env);
-    await runRuntimeCommand(runtime, command);
+    if (command.kind === "tui") {
+      try {
+        const { runTui } = await startupProfiler.measure(
+          "ui.moduleImport",
+          () => import("./ui/runTui.tsx"),
+        );
+        await runTui({
+          startup: startupProfiler,
+          async load() {
+            const { createRuntime } = await startupProfiler.measure(
+              "runtime.moduleImport",
+              () => import("./runtime.ts"),
+            );
+            const created = await startupProfiler.measure("runtime.create", () =>
+              createRuntime(process.env, startupProfiler),
+            );
+            startupProfiler.mark("runtime.created");
+            runtime = created;
+            return {
+              store: created.store,
+              controller: created.controller,
+              config: created.configValue,
+              home: process.env.HOME ?? created.home,
+              startup: startupProfiler,
+              initialize: () =>
+                startupProfiler.measure("controller.init", () => created.controller.init()),
+            };
+          },
+        });
+      } finally {
+        runtime?.controller.dispose();
+      }
+      return 0;
+    }
+
+    const { createRuntime } = await startupProfiler.measure(
+      "runtime.moduleImport",
+      () => import("./runtime.ts"),
+    );
+    const createdRuntime = await startupProfiler.measure("runtime.create", () =>
+      createRuntime(process.env, startupProfiler),
+    );
+    startupProfiler.mark("runtime.created");
+    runtime = createdRuntime;
+    await runRuntimeCommand(createdRuntime, command);
     return 0;
   } catch (error) {
     runtime?.logger.error("Fatal error", errorLogData(error));
     process.stderr.write(`swarm: ${errorMessage(error)}\n`);
     return 1;
+  } finally {
+    startupProfiler.flush();
   }
 }
 
