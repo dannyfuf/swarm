@@ -133,6 +133,10 @@ export interface ProcessPort {
 export interface GithubPort {
   viewer(): Promise<{ login: string }>;
   listRepos(owner: string, opts?: { signal?: AbortSignal; force?: boolean }): Promise<RemoteRepo[]>;
+  findPullRequest(
+    repo: { owner: string; name: string },
+    branch: string,
+  ): Promise<PullRequest | undefined>;
   readCachedPullRequests(
     repo: { owner: string; name: string },
     tab: PrTab,

@@ -255,6 +255,7 @@ export interface ProcessPort {
 export interface GithubPort {
   viewer(): Promise<{ login: string }>;
   listRepos(owner: string, opts?: { signal?: AbortSignal; force?: boolean }): Promise<RemoteRepo[]>;  // force bypasses the cache
+  findPullRequest(repo: { owner: string; name: string }, branch: string): Promise<PullRequest | undefined>; // targeted open-PR lookup by head branch
 }
 export interface StatePort  { load(): Promise<State>;  save(state: State): Promise<void> }   // validated, atomic
 export interface ConfigPort { load(): Promise<Config>; save(config: Config): Promise<void> }
@@ -298,6 +299,10 @@ export interface WorktreeService {
     // fallback: fetch base → resetToRemote(default) → cloneTree → checkout branch → hooks.postCreate → persist
   delete(worktreeId: WorktreeId, onEvent?: OnEvent): Promise<void>;           // killSession → move to trash → removeDetached → persist
   touch(worktreeId: WorktreeId): Promise<void>;                                // lastOpenedAt = now
+}
+export interface PrService {
+  findByBranch(repoId: RepoId, branch: string): Promise<PullRequest | undefined>;
+  // load(...) streams cached and refreshed PR slices for a repo scope and tab
 }
 export interface SessionService {
   mount(worktree: Worktree): Promise<void>;        // ensure session + windows in configured order (append missing, swap into place, select first)
@@ -434,6 +439,7 @@ export interface Controller {                           // src/app/controller.ts
   saveContext(input: { id?: ContextId; name: string; owners: string[] }): Promise<void>; deleteContext(id: ContextId): Promise<void>;
   saveConfig(patch: Partial<Config>): Promise<void>; getConfig(): Config;
   yankPath(): Promise<void>;
+  browseSelectedWorktreePr(): Promise<void>;            // cached association, then targeted branch lookup; no PR is a silent no-op
   update(): Promise<void>;                              // clean main → pull, install, build → request exit 75
   dispose(): void;
 }
@@ -467,6 +473,7 @@ export type UiExit = "quit" | "opened";
 | `:` | command palette (fuzzy list of all commands + contexts) |
 | `,` | settings (sleep policy; windows and clone protocol are read-only) |
 | `gt` / `gT`, `1`-`9` | next / prev / nth context |
+| `b` | open the selected worktree branch's PR in the browser, if one exists |
 | `y` | yank worktree path |
 | `?` | help overlay |
 | `q`, `Esc`, `ctrl-c` | quit popup |
@@ -506,6 +513,10 @@ cursor row, green for attached, yellow for running agents, red only for danger d
   `.hot.staging`, and the TUI entrypoint flushes profiling, logging, stdout, and stderr before
   explicitly exiting after renderer/controller teardown so unrelated in-flight handles cannot
   hold the tmux popup open.
+- 2026-09-03: the worktree screen now reuses `b` from the PR screen to open the selected
+  worktree branch's open PR without leaving the screen. Resolution first uses the existing
+  in-memory worktree/PR association, then performs a targeted repo-and-head-branch GitHub lookup
+  so PRs outside the authored/review-requested caches are still found; no match is a silent no-op.
 - 2026-09-03: worktree creation gained a per-repository single-slot hot-copy pool. Complete
   copies are staged under `.hot.staging`, atomically published as `.hot`, consumed by rename,
   refreshed in their destination, and rebuilt by controller-managed background operations.

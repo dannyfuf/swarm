@@ -333,6 +333,37 @@ export function createGithub(
       return repos;
     },
 
+    async findPullRequest(repo, branch) {
+      const repoId = `${repo.owner}/${repo.name}`;
+      let result: ShellResult;
+      try {
+        result = await shell.run("gh", [
+          "pr",
+          "list",
+          "--repo",
+          repoId,
+          "--state",
+          "open",
+          "--head",
+          branch,
+          "--limit",
+          "1",
+          "--json",
+          PR_FIELDS,
+        ]);
+      } catch (cause) {
+        result = {
+          code: 1,
+          stdout: "",
+          stderr: cause instanceof Error ? cause.message : "",
+        };
+      }
+      if (result.code !== 0) {
+        throw githubFailure(`Unable to find a pull request for ${repoId}:${branch}`, result);
+      }
+      return mapPullRequests(result.stdout, repoId)[0];
+    },
+
     async readCachedPullRequests(repo, tab, opts = {}) {
       const cachePath = join(options.cacheDir, "prs", repo.owner, repo.name, `${tab}.json`);
       const cacheText = await files.readText(cachePath);

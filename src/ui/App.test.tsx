@@ -365,6 +365,20 @@ test("y on the PR screen copies the PR url instead of a worktree path", async ()
   }
 });
 
+test("b opens the selected worktree PR without changing screens", async () => {
+  const harness = await mountWithPrs();
+  try {
+    harness.store.dispatch({ type: "moveTo", pane: "worktrees", index: 2 });
+    harness.setup.mockInput.pressKey("b");
+    await harness.setup.flush();
+
+    assert.equal(harness.store.getState().screen, "main");
+    assert.deepEqual(harness.controller.browsedPrUrls, [linkedPr.url]);
+  } finally {
+    harness.stop();
+  }
+});
+
 test("/ on the PR screen edits the PR filter, not the worktree filter", async () => {
   const harness = await mountWithPrs();
   try {
@@ -436,6 +450,7 @@ test("the help dialog documents the pull request keys", async () => {
     assert.ok(frame.includes("swarm 0.1.0+dev"));
     assert.ok(frame.includes("PULL REQUESTS"));
     assert.ok(frame.includes("Pull requests"), "p is listed in the normal section");
+    assert.ok(frame.includes("Open PR in browser"));
     assert.ok(frame.includes("Back to worktrees"));
   } finally {
     harness.stop();

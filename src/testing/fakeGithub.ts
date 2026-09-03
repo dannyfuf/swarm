@@ -6,6 +6,7 @@ export type FakeGithub = GithubPort & {
   reposByOwner: Map<string, RemoteRepo[]>;
   prsByRepoTab: Map<string, PullRequest[]>;
   prCacheByRepoTab: Map<string, { prs: PullRequest[]; fetchedAt: string; stale: boolean }>;
+  prsByRepoBranch: Map<string, PullRequest>;
   prErrors: Map<string, Error>;
 };
 
@@ -13,6 +14,7 @@ export interface FakeGithubOptions {
   reposByOwner?: Record<string, RemoteRepo[]>;
   prsByRepoTab?: Record<string, PullRequest[]>;
   prCacheByRepoTab?: Record<string, { prs: PullRequest[]; fetchedAt: string; stale: boolean }>;
+  prsByRepoBranch?: Record<string, PullRequest>;
   prErrors?: Record<string, Error>;
   viewerLogin?: string;
 }
@@ -28,6 +30,7 @@ function isOptions(
     "reposByOwner" in input ||
     "prsByRepoTab" in input ||
     "prCacheByRepoTab" in input ||
+    "prsByRepoBranch" in input ||
     "prErrors" in input ||
     "viewerLogin" in input
   );
@@ -54,6 +57,12 @@ export function createFakeGithub(
     ]),
   );
   const prErrors = new Map(Object.entries(options.prErrors ?? {}));
+  const prsByRepoBranch = new Map(
+    Object.entries(options.prsByRepoBranch ?? {}).map(([key, item]) => [
+      key,
+      { ...item, labels: [...item.labels] },
+    ]),
+  );
   const prCache = new Map(
     Object.entries(options.prCacheByRepoTab ?? {}).map(([key, entry]) => [
       key,
@@ -68,6 +77,7 @@ export function createFakeGithub(
     calls,
     reposByOwner: repos,
     prsByRepoTab: prs,
+    prsByRepoBranch,
     prCacheByRepoTab: prCache,
     prErrors,
     async viewer() {
@@ -77,6 +87,14 @@ export function createFakeGithub(
     async listRepos(owner, opts) {
       calls.push({ method: "listRepos", args: [owner, opts] });
       return (repos.get(owner) ?? []).map((item) => ({ ...item }));
+    },
+    async findPullRequest(repo, branch) {
+      calls.push({ method: "findPullRequest", args: [repo, branch] });
+      const repoId = `${repo.owner}/${repo.name}`;
+      const error = prErrors.get(`${repoId}:${branch}`) ?? prErrors.get(repoId);
+      if (error) throw error;
+      const item = prsByRepoBranch.get(`${repoId}:${branch}`);
+      return item ? { ...item, labels: [...item.labels] } : undefined;
     },
     async readCachedPullRequests(repo, tab, opts) {
       calls.push({ method: "readCachedPullRequests", args: [repo, tab, opts] });

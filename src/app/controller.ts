@@ -822,6 +822,22 @@ export function createController(deps: ControllerDeps): Controller {
       }
     },
 
+    async browseSelectedWorktreePr() {
+      const state = deps.store.getState();
+      if (state.pane !== "worktrees") return;
+      const worktree = selectedWorktree(state);
+      if (!worktree) return;
+      try {
+        const pr =
+          worktreePr(state, worktree) ??
+          (await deps.prs.findByBranch(worktree.repoId, worktree.branch));
+        if (!pr) return;
+        await deps.process.openUrl(pr.url);
+      } catch (error) {
+        reportError(error);
+      }
+    },
+
     async yankSelectedPr() {
       const pr = selectedPr(deps.store.getState());
       if (!pr) {

@@ -24,6 +24,22 @@ async function flush(): Promise<void> {
 }
 
 describe("createPrService", () => {
+  test("finds an open PR by repository and branch", async () => {
+    const pr = pullRequest({ repoId: "acme/app", headRefName: "feat/exports" });
+    const github = createFakeGithub({
+      prsByRepoBranch: { "acme/app:feat/exports": pr },
+    });
+    const service = createPrService({ github, ttlSeconds: 90 });
+
+    assert.deepEqual(await service.findByBranch("acme/app", "feat/exports"), pr);
+    assert.deepEqual(github.calls, [
+      {
+        method: "findPullRequest",
+        args: [{ owner: "acme", name: "app" }, "feat/exports"],
+      },
+    ]);
+  });
+
   test("shares a four-call limiter across tabs and overlapping loads", async () => {
     const github = createFakeGithub();
     let active = 0;
