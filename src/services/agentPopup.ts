@@ -1,12 +1,7 @@
 import { SwarmError } from "../core/errors.ts";
+import type { AgentName } from "../core/types.ts";
 
-export const AGENT_NAMES = ["claude", "opencode"] as const;
-
-export type AgentName = (typeof AGENT_NAMES)[number];
-
-export function isAgentName(value: string | undefined): value is AgentName {
-  return AGENT_NAMES.some((agent) => agent === value);
-}
+export { AGENT_NAMES, type AgentName, isAgentName } from "../core/types.ts";
 
 export function agentSessionName(agent: AgentName): string {
   return `swarm-agent-${agent}`;

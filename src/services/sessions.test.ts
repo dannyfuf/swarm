@@ -112,10 +112,23 @@ describe("SessionService.mount", () => {
     );
     assert.deepEqual(tmux.sentKeys, [
       { target: `=${target.session}:0`, keys: ["nvim ."], enter: true },
-      { target: `=${target.session}:1`, keys: ["cc"], enter: true },
+      { target: `=${target.session}:1`, keys: ["claude"], enter: true },
       { target: `=${target.session}:2`, keys: ["lazygit"], enter: true },
     ]);
     assert.equal(tmux.calls.at(-1)?.method, "selectWindow");
+  });
+
+  test("starts the selected agent in the stable cc window", async () => {
+    const tmux = createFakeTmux();
+    const { service } = serviceOptions(tmux, { config: configured({ agent: "opencode" }) });
+
+    await service.mount(target);
+
+    assert.deepEqual(tmux.sentKeys[1], {
+      target: `=${target.session}:1`,
+      keys: ["opencode"],
+      enter: true,
+    });
   });
 
   test("repairs and reorders a partial session from its lowest index", async () => {

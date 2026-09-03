@@ -15,8 +15,9 @@ change a contract without recording it in `INTEGRATION NOTES`.
 - **Worktree**: a copy-on-write copy of the base (`worktreesDir/<owner>/<name>/<slug>`)
   with its own branch, and exactly one tmux session named `<name>/<slug>`.
   Not a `git worktree`: a full independent copy (APFS `cp -c` clonefile / reflink).
-- **Mount** a worktree = ensure its tmux session exists with the configured windows
-  (default: `nvim`, `cc` → `claude`, `lg` → `lazygit`) and switch the client to it.
+- **Mount** a worktree = ensure its tmux session exists with the configured windows, resolving
+  `{agent}` to the configured coding agent (default: `nvim`, `cc` → `claude`, `lg` → `lazygit`),
+  and switch the client to it.
 - **Unmount / sleep** a worktree = apply the sleep policy to its session: keep windows whose
   process tree matches a keep-alive rule (default: `claude`, `opencode`, `codex`, and any
   process listening on a TCP port); gracefully close the rest (nvim gets `:qa`; if it refuses
@@ -57,9 +58,9 @@ PATH binary needs a version-probe process.
 ```
 bin/swarm                 launcher (runs dist or src, restarts in place when the TUI returns 75)
 tmux/tmux.conf            full tmux config (theme, persistence) with swarm and persistent agent popup bindings
-src/main.ts               CLI entry: `swarm` (TUI), `swarm open <repo>/<slug>`, `swarm sleep <session>`, `swarm agent <claude|opencode>`, `swarm doctor`
+src/main.ts               CLI entry: `swarm` (TUI), `swarm open <repo>/<slug>`, `swarm sleep <session>`, `swarm agent [claude|opencode]`, `swarm doctor`
 src/core/                 contracts and pure helpers; no I/O
-  types.ts                domain zod schemas + inferred types (section 4)
+  types.ts                domain zod schemas + inferred types, agent names, window resolution (section 4)
   ports.ts                infrastructure port interfaces (section 5)
   services.ts             service interfaces + operation events (section 6)
   app.ts                  AppState, Action, Store, Keymap contracts (section 7)
@@ -68,7 +69,7 @@ src/core/                 contracts and pure helpers; no I/O
   errors.ts               SwarmError with `code` union
 src/adapters/             one file per port, shell-based; each has *.test.ts using FakeShell
 src/services/             one file per service interface; tests use fakes from src/testing
-  agentPopup.ts           pure agent names/commands, tmux attach argv/socket parsing, and env stripping
+  agentPopup.ts           agent-name re-exports, commands, tmux attach argv/socket parsing, and env stripping
 src/app/                  store.ts (createStore), keymap.ts, controller.ts (wires services→store)
 src/ui/                   OpenTUI React components; depends only on src/core
 src/testing/              fakes for every port (FakeShell, FakeGit, FakeFiles, FakeTmux, FakeProcess, FakeGithub, MemoryState, MemoryConfig) and fixtures
@@ -154,7 +155,8 @@ export const SleepPolicySchema = z.object({
 export const ConfigSchema = z.object({
   version: z.literal(1),
   reposDir: z.string(), worktreesDir: z.string(),       // absolute; defaults under SWARM_HOME
-  windows: z.array(WindowSpecSchema),                     // default nvim/cc/lg
+  agent: z.enum(["claude", "opencode"]).default("claude"),
+  windows: z.array(WindowSpecSchema),                     // default nvim/{agent}/lazygit
   sleep: SleepPolicySchema,
   github: z.object({
     cacheTtlSeconds: z.number().int().default(3600),
@@ -164,6 +166,9 @@ export const ConfigSchema = z.object({
 });
 export function defaultConfig(home: string): Config;   // fills all defaults
 export function defaultState(): State;
+export const AGENT_NAMES = ["claude", "opencode"] as const;
+export function resolveWindowCommand(spec: WindowSpec, agent: AgentName): WindowSpec;
+export function resolveWindows(config: Pick<Config, "agent" | "windows">): WindowSpec[];
 
 // Runtime (computed, never persisted)
 export type SessionState = "none" | "detached" | "attached";
@@ -471,7 +476,7 @@ export type UiExit = "quit" | "opened";
 | `U` | update swarm from a clean `main`, rebuild, and restart |
 | `/` | filter (Enter opens selected match; Esc exits input, keeps filter; Esc again clears) |
 | `:` | command palette (fuzzy list of all commands + contexts) |
-| `,` | settings (sleep policy; windows and clone protocol are read-only) |
+| `,` | settings (coding agent and sleep policy; windows and clone protocol are read-only) |
 | `gt` / `gT`, `1`-`9` | next / prev / nth context |
 | `b` | open the selected worktree branch's PR in the browser, if one exists |
 | `y` | yank worktree path |
@@ -507,6 +512,11 @@ cursor row, green for attached, yellow for running agents, red only for danger d
 
 ## 10. Integration notes
 
+- 2026-09-03: `Config.agent` now selects `claude` or `opencode` (default `claude`) for worktree
+  sessions. The default `cc` window retains its name but stores `{agent}` as its command; core
+  resolves placeholders at mount time, and config loading normalizes one legacy exact
+  `cc`/`claude`/`opencode` window when no placeholder exists. Settings edits the agent alongside
+  sleep policy, while argument-less `swarm agent` uses the same configured default.
 - 2026-09-03: hot-copy rebuilds now run as detached `cp && mv` workers with per-repo pid files,
   log output, failure cleanup, restart-safe live-worker detection, and unref'd/cancellable
   completion polling. Worktree creation waits for a tracked worker but never consumes
