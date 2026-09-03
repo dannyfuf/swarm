@@ -6,7 +6,14 @@ import { LinesView } from "../components/LineView.tsx";
 import { isEnter, isEscape, isListDown, isListUp, isSpace, toKeyEvent } from "../keys.ts";
 import { cell, fitLine, type Line, pad, truncate } from "../text.ts";
 import { glyphs, theme } from "../theme.ts";
-import { DialogFrame, SectionLabel, Spacer, useDialogInnerWidth } from "./chrome.tsx";
+import {
+  DialogFrame,
+  FieldLabel,
+  SectionLabel,
+  Spacer,
+  TextField,
+  useDialogInnerWidth,
+} from "./chrome.tsx";
 
 function checkbox(checked: boolean, selected: boolean): Line {
   return [
@@ -19,6 +26,9 @@ function checkbox(checked: boolean, selected: boolean): Line {
 
 export function SettingsDialog({ store, controller }: { store: Store; controller: Controller }) {
   const [agent, setAgent] = useState<AgentName>(() => controller.getConfig().agent);
+  const [agentCommands, setAgentCommands] = useState<Record<AgentName, string>>(() => ({
+    ...controller.getConfig().agentCommands,
+  }));
   const [policy, setPolicy] = useState<SleepPolicy>(() => {
     const current = controller.getConfig().sleep;
     return { ...current, keepAlive: current.keepAlive.map((rule) => ({ ...rule })) };
@@ -26,8 +36,9 @@ export function SettingsDialog({ store, controller }: { store: Store; controller
   const [cursor, setCursor] = useState(0);
   const config = controller.getConfig();
   const inner = useDialogInnerWidth(78);
-  const rowCount = 2 + policy.keepAlive.length;
+  const rowCount = 3 + policy.keepAlive.length;
   const clamped = Math.min(cursor, rowCount - 1);
+  const commandFocused = clamped === 1;
   const submitted = useRef(false);
 
   const cycleAgent = (delta: number) => {
@@ -42,11 +53,12 @@ export function SettingsDialog({ store, controller }: { store: Store; controller
       cycleAgent(1);
       return;
     }
-    if (clamped === 1) {
+    if (clamped === 2) {
       setPolicy((current) => ({ ...current, enabled: !current.enabled }));
       return;
     }
-    const index = clamped - 2;
+    if (commandFocused) return;
+    const index = clamped - 3;
     setPolicy((current) => ({
       ...current,
       keepAlive: current.keepAlive.map((rule, position) =>
@@ -62,22 +74,12 @@ export function SettingsDialog({ store, controller }: { store: Store; controller
       store.dispatch({ type: "closeDialog" });
       return;
     }
-    if (isSpace(event)) {
-      raw.preventDefault();
-      toggle();
-      return;
-    }
-    if (clamped === 0 && (event.name === "left" || event.name === "right")) {
-      raw.preventDefault();
-      cycleAgent(event.name === "left" ? -1 : 1);
-      return;
-    }
-    if (isListDown(event, false)) {
+    if (isListDown(event, commandFocused)) {
       raw.preventDefault();
       setCursor((value) => Math.min(value + 1, rowCount - 1));
       return;
     }
-    if (isListUp(event, false)) {
+    if (isListUp(event, commandFocused)) {
       raw.preventDefault();
       setCursor((value) => Math.max(0, value - 1));
       return;
@@ -86,9 +88,28 @@ export function SettingsDialog({ store, controller }: { store: Store; controller
       raw.preventDefault();
       if (!submitted.current) {
         submitted.current = true;
+        const normalizedCommands = { ...agentCommands };
+        for (const name of AGENT_NAMES) {
+          normalizedCommands[name] = normalizedCommands[name].trim() || name;
+        }
         store.dispatch({ type: "closeDialog" });
-        void controller.saveConfig({ agent, sleep: policy });
+        void controller.saveConfig({
+          agent,
+          agentCommands: normalizedCommands,
+          sleep: policy,
+        });
       }
+      return;
+    }
+    if (commandFocused) return;
+    if (isSpace(event)) {
+      raw.preventDefault();
+      toggle();
+      return;
+    }
+    if (clamped === 0 && (event.name === "left" || event.name === "right")) {
+      raw.preventDefault();
+      cycleAgent(event.name === "left" ? -1 : 1);
     }
   });
 
@@ -104,10 +125,10 @@ export function SettingsDialog({ store, controller }: { store: Store; controller
 
   const sleepRows: Line[] = [
     [
-      ...checkbox(policy.enabled, clamped === 1),
+      ...checkbox(policy.enabled, clamped === 2),
       cell(pad("sleep on switch", 22), {
-        fg: clamped === 1 ? theme.strong : theme.text,
-        bold: clamped === 1,
+        fg: clamped === 2 ? theme.strong : theme.text,
+        bold: clamped === 2,
       }),
       cell("close windows when leaving a worktree", { fg: theme.dim }),
     ],
@@ -119,7 +140,7 @@ export function SettingsDialog({ store, controller }: { store: Store; controller
   ];
 
   const ruleRows: Line[] = policy.keepAlive.map((rule, index) => {
-    const selected = clamped === index + 2;
+    const selected = clamped === index + 3;
     return [
       ...checkbox(rule.enabled, selected),
       cell(pad(truncate(rule.label, 14), 16), {
@@ -143,7 +164,7 @@ export function SettingsDialog({ store, controller }: { store: Store; controller
       title="Settings"
       width={78}
       hints={[
-        { key: "space/←→", label: "change" },
+        { key: "type/space/←→", label: "change" },
         { key: glyphs.enter, label: "save" },
         { key: "↑↓", label: "select" },
         { key: "Esc", label: "cancel" },
@@ -152,6 +173,20 @@ export function SettingsDialog({ store, controller }: { store: Store; controller
       <Spacer />
       <SectionLabel text="  AGENT" />
       <LinesView lines={[fitLine(agentRow, inner)]} />
+      <box height={1} flexDirection="row">
+        <box width={28} paddingLeft={1}>
+          <FieldLabel text="start command" focused={commandFocused} />
+        </box>
+        <box flexGrow={1}>
+          <TextField
+            key={agent}
+            value={agentCommands[agent]}
+            placeholder={agent}
+            focused={commandFocused}
+            onInput={(value) => setAgentCommands((current) => ({ ...current, [agent]: value }))}
+          />
+        </box>
+      </box>
       <Spacer />
       <SectionLabel text="  SLEEP POLICY" />
       <LinesView lines={sleepRows.map((line) => fitLine(line, inner))} />

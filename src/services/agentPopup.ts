@@ -7,8 +7,8 @@ export function agentSessionName(agent: AgentName): string {
   return `swarm-agent-${agent}`;
 }
 
-export function agentCommandArgv(agent: AgentName): string[] {
-  return [agent];
+export function agentCommandArgv(command: string): string[] {
+  return [command];
 }
 
 export function parseTmuxSocket(value: string | undefined): string | undefined {

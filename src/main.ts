@@ -4,7 +4,7 @@ import { SwarmError } from "./core/errors.ts";
 import type { Shell, ShellResult } from "./core/ports.ts";
 import type { UnmountReport } from "./core/services.ts";
 import { createStartupProfiler } from "./core/startup.ts";
-import type { State, Worktree } from "./core/types.ts";
+import { agentCommand, type State, type Worktree } from "./core/types.ts";
 import { VERSION } from "./core/version.ts";
 import type { Runtime } from "./runtime.ts";
 import {
@@ -245,10 +245,11 @@ async function attachAgentSession(session: string, env: NodeJS.ProcessEnv): Prom
   });
 }
 
-async function runAgentCommand(
-  runtime: Runtime,
+export async function runAgentCommand(
+  runtime: Pick<Runtime, "configValue" | "tmux">,
   agent: AgentName,
   env: NodeJS.ProcessEnv,
+  attach: typeof attachAgentSession = attachAgentSession,
 ): Promise<number> {
   const session = agentSessionName(agent);
   let exists: boolean;
@@ -267,11 +268,13 @@ async function runAgentCommand(
     });
     const windows = await runtime.tmux.listWindows(session);
     const firstIndex = Math.min(...windows.map(({ index }) => index));
-    await runtime.tmux.sendKeys(`=${session}:${firstIndex}`, agentCommandArgv(agent), {
-      enter: true,
-    });
+    await runtime.tmux.sendKeys(
+      `=${session}:${firstIndex}`,
+      agentCommandArgv(agentCommand(runtime.configValue, agent)),
+      { enter: true },
+    );
   }
-  return await attachAgentSession(session, env);
+  return await attach(session, env);
 }
 
 export async function main(argv: string[] = process.argv.slice(2)): Promise<number> {

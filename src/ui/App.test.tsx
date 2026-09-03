@@ -205,7 +205,7 @@ test("settings shows the read-only clone protocol beside the config file note", 
   }
 });
 
-test("settings cycles the agent and saves it together with the sleep policy", async () => {
+test("settings preserves per-agent command edits while switching agents and saves with Enter", async () => {
   const harness = await mount();
   try {
     harness.setup.mockInput.pressKey(",");
@@ -216,16 +216,34 @@ test("settings cycles the agent and saves it together with the sleep policy", as
       act(input);
       await harness.setup.flush();
     };
-    await press(() => harness.setup.mockInput.pressKey(" "));
-    await press(() => harness.setup.mockInput.pressArrow("left"));
     await press(() => harness.setup.mockInput.pressArrow("right"));
     await press(() => harness.setup.mockInput.pressArrow("down"));
+    await harness.setup.mockInput.typeText(" --model sonnet");
+    await harness.setup.flush();
+    await press(() => harness.setup.mockInput.pressArrow("left"));
+    await press(() => harness.setup.mockInput.pressArrow("right"));
+    await press(() => harness.setup.mockInput.pressArrow("up"));
+    await press(() => harness.setup.mockInput.pressArrow("left"));
+    await press(() => harness.setup.mockInput.pressArrow("down"));
+    await harness.setup.mockInput.typeText(" --dangerously-skip-permissions");
+    await harness.setup.flush();
+    await press(() => harness.setup.mockInput.pressArrow("up"));
+    await press(() => harness.setup.mockInput.pressArrow("right"));
+    await press(() => harness.setup.mockInput.pressArrow("down"));
+
+    assert.ok(harness.frame().includes("opencode --model sonnet"), harness.frame());
+    await press(() => harness.setup.mockInput.pressArrow("down"));
     await press(() => harness.setup.mockInput.pressKey(" "));
+    await press(() => harness.setup.mockInput.pressArrow("up"));
     await press(() => harness.setup.mockInput.pressEnter());
 
     assert.deepEqual(harness.controller.savedConfigPatches, [
       {
         agent: "opencode",
+        agentCommands: {
+          claude: "claude --dangerously-skip-permissions",
+          opencode: "opencode --model sonnet",
+        },
         sleep: { ...fixtureConfig.sleep, enabled: false },
       },
     ]);

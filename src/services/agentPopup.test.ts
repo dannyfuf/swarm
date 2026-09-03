@@ -17,8 +17,10 @@ describe("agent popup helpers", () => {
     assert.equal(isAgentName("codex"), false);
     assert.equal(agentSessionName("claude"), "swarm-agent-claude");
     assert.equal(agentSessionName("opencode"), "swarm-agent-opencode");
-    assert.deepEqual(agentCommandArgv("claude"), ["claude"]);
-    assert.deepEqual(agentCommandArgv("opencode"), ["opencode"]);
+    assert.deepEqual(agentCommandArgv("claude --dangerously-skip-permissions"), [
+      "claude --dangerously-skip-permissions",
+    ]);
+    assert.deepEqual(agentCommandArgv("opencode --model sonnet"), ["opencode --model sonnet"]);
   });
 
   test("parses the socket path from TMUX, including paths containing commas", () => {

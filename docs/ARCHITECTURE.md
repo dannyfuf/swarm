@@ -18,8 +18,8 @@ change a contract without recording it in `INTEGRATION NOTES`.
 - **Prepared-copy pool**: zero or more pristine-base copies with repo `prepare` hooks already run.
   Creation claims the lowest slot by rename and immediately replenishes it from the base clone.
 - **Mount** a worktree = ensure its tmux session exists with the configured windows, resolving
-  `{agent}` to the configured coding agent (default: `nvim`, `cc` → `claude`, `lg` → `lazygit`),
-  and switch the client to it.
+  `{agent}` to the selected coding agent's configured start command (default: `nvim`,
+  `cc` → `claude`, `lg` → `lazygit`), and switch the client to it.
 - **Unmount / sleep** a worktree = apply the sleep policy to its session: keep windows whose
   process tree matches a keep-alive rule (default: `claude`, `opencode`, `codex`, and any
   process listening on a TCP port); gracefully close the rest (nvim gets `:qa`; if it refuses
@@ -77,7 +77,7 @@ src/core/                 contracts and pure helpers; no I/O
   errors.ts               SwarmError with `code` union
 src/adapters/             one file per port, shell-based; each has *.test.ts using FakeShell
 src/services/             one file per service interface; tests use fakes from src/testing
-  agentPopup.ts           agent-name re-exports, commands, tmux attach argv/socket parsing, and env stripping
+  agentPopup.ts           agent-name re-exports, resolved-command argv, tmux attach argv/socket parsing, and env stripping
 src/app/                  store.ts (createStore), keymap.ts, controller.ts (wires services→store)
 src/ui/                   OpenTUI React components; depends only on src/core
 src/testing/              fakes for every port (FakeShell, FakeGit, FakeFiles, FakeTmux, FakeProcess, FakeGithub, MemoryState, MemoryConfig) and fixtures
@@ -91,7 +91,8 @@ Dependency rule (enforced by review): `core` imports nothing internal. `adapters
 
 tmux uses `prefix+s` for the control-panel popup, `prefix+a` for Claude Code, and `prefix+A`
 for OpenCode. Each agent command creates or reuses `swarm-agent-<agent>` with cwd set to
-`config.reposDir`, then attaches a nested client through the invoking popup's tmux socket. Global
+`config.reposDir`, starts it with `config.agentCommands[agent]`, then attaches a nested client
+through the invoking popup's tmux socket. Global
 `C-q` detaches that nested client only while an agent session is active, closing the popup while
 leaving the agent and scrollback alive; reopening the same binding reattaches to that session.
 
@@ -170,6 +171,10 @@ export const ConfigSchema = z.object({
   hotFreshnessMs: z.number().int().nonnegative().default(60000),
   hotRefreshIntervalMs: z.number().int().nonnegative().default(300000),
   agent: z.enum(["claude", "opencode"]).default("claude"),
+  agentCommands: z.object({
+    claude: z.string().min(1).default("claude"),
+    opencode: z.string().min(1).default("opencode"),
+  }).default({ claude: "claude", opencode: "opencode" }),
   windows: z.array(WindowSpecSchema),                     // default nvim/{agent}/lazygit
   sleep: SleepPolicySchema,
   github: z.object({
@@ -181,8 +186,9 @@ export const ConfigSchema = z.object({
 export function defaultConfig(home: string): Config;   // fills all defaults
 export function defaultState(): State;
 export const AGENT_NAMES = ["claude", "opencode"] as const;
-export function resolveWindowCommand(spec: WindowSpec, agent: AgentName): WindowSpec;
-export function resolveWindows(config: Pick<Config, "agent" | "windows">): WindowSpec[];
+export function agentCommand(config: Pick<Config, "agent" | "agentCommands">, agent?: AgentName): string;
+export function resolveWindowCommand(spec: WindowSpec, config: Pick<Config, "agent" | "agentCommands">): WindowSpec;
+export function resolveWindows(config: Pick<Config, "agent" | "agentCommands" | "windows">): WindowSpec[];
 
 // Runtime (computed, never persisted)
 export type SessionState = "none" | "detached" | "attached";
@@ -575,7 +581,7 @@ export type UiExit = "quit" | "opened";
 | `U` | update swarm from a clean `main`, rebuild, and restart |
 | `/` | filter (Enter opens selected match; Esc exits input, keeps filter; Esc again clears) |
 | `:` | command palette (fuzzy list of all commands + contexts) |
-| `,` | settings (coding agent and sleep policy; windows and clone protocol are read-only) |
+| `,` | settings (coding agent, its start command, and sleep policy; windows and clone protocol are read-only) |
 | `gt` / `gT`, `1`-`9` | next / prev / nth context |
 | `b` | open the selected worktree branch's PR in the browser, if one exists |
 | `y` | yank worktree path |
@@ -655,11 +661,13 @@ reopening the same repository cannot accept an older completion.
   Prepared copies now store `.git/swarm-hot.json`; `Config.hotFreshnessMs` defaults to 60000.
   `WorktreeService` gained deduplicated `refreshPreparedCopy` and `awaitPendingRefresh`, while
   `GitPort` gained narrow `fetchRefs`, abortable refresh methods, and `revision`.
-- 2026-09-03: `Config.agent` now selects `claude` or `opencode` (default `claude`) for worktree
-  sessions. The default `cc` window retains its name but stores `{agent}` as its command; core
-  resolves placeholders at mount time, and config loading normalizes one legacy exact
-  `cc`/`claude`/`opencode` window when no placeholder exists. Settings edits the agent alongside
-  sleep policy, while argument-less `swarm agent` uses the same configured default.
+- 2026-09-03: `Config.agent` selects `claude` or `opencode` (default `claude`) and
+  `Config.agentCommands` stores each agent's full start command, defaulting each entry to its name.
+  The default `cc` window retains its name but stores `{agent}` as its command; core resolves the
+  placeholder to the selected start command at mount time, and config loading normalizes one legacy
+  exact `cc`/`claude`/`opencode` window when no placeholder exists. Settings edits the agent, its
+  command, and sleep policy, while `swarm agent [name]` resolves the selected agent through the same
+  command map.
 - 2026-09-03: hot-copy rebuilds now run as detached `cp && mv` workers with per-repo pid files,
   log output, failure cleanup, restart-safe live-worker detection, and unref'd/cancellable
   completion polling. The numbered-pool extension and marker/hook publication details are recorded
@@ -675,8 +683,9 @@ reopening the same repository cannot accept an older completion.
   refreshed in their destination, and rebuilt by controller-managed background operations.
   Missing or failed pools use the clone-first fallback described above.
 - 2026-09-03: `swarm agent <claude|opencode>` creates or reuses a persistent tmux session rooted
-  at `config.reposDir`; `prefix+a` / `prefix+A` open those sessions in popups and `C-q` detaches
-  their nested client so the popup can close without stopping the agent.
+  at `config.reposDir` and starts the selected agent with its configured command; `prefix+a` /
+  `prefix+A` open those sessions in popups and `C-q` detaches their nested client so the popup can
+  close without stopping the agent.
 - 2026-09-02: PR cache reads and network refreshes are now separate `GithubPort` operations.
   `PrService` emits validated cached slices before refresh, retains them with a short error on
   refresh failure, and owns one four-call limiter plus repo/tab generations and abort signals
