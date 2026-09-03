@@ -230,7 +230,7 @@ describe("GitHub adapter", () => {
       "number,title,url,author,headRefName,baseRefName,isDraft,isCrossRepository,headRepository,headRepositoryOwner,reviewDecision,statusCheckRollup,additions,deletions,labels,updatedAt",
     ];
     assert.deepEqual(shell.calls[0]?.args, [...base, "--author", "@me"]);
-    assert.deepEqual(shell.calls[1]?.args, [...base, "--search", "review-requested:@me"]);
+    assert.deepEqual(shell.calls[1]?.args, [...base, "--search", "user-review-requested:@me"]);
   });
 
   test("maps review decisions, fork metadata, labels, and check rollups", async () => {
