@@ -43,6 +43,7 @@ describe("resolveKey normal mode", () => {
     ["K", key("k", { shift: true }), "kill"],
     ["m", key("m"), "move"],
     ["r", key("r"), "refresh"],
+    ["U", key("u", { shift: true }), "update"],
     ["/", key("/"), "filter"],
     [":", key(":"), "palette"],
     [",", key(","), "settings"],
@@ -141,6 +142,7 @@ describe("resolveKey PR screen", () => {
     ["q", key("q"), "back"],
     ["escape", key("escape"), "back"],
     ["ctrl-c", key("c", { ctrl: true }), "quit"],
+    ["U", key("u", { shift: true }), "update"],
   ];
 
   for (const [label, event, command] of cases) {
@@ -196,6 +198,12 @@ describe("resolveKey dialog mode", () => {
 test("footer hints exist for both panes and palette commands are unique", () => {
   assert.ok(KEY_HINTS.repos.length > 0);
   assert.ok(KEY_HINTS.worktrees.length > 0);
+  assert.ok(KEY_HINTS.repos.some(({ key: hint }) => hint === "U"));
+  assert.ok(KEY_HINTS.worktrees.some(({ key: hint }) => hint === "U"));
+  assert.deepEqual(
+    COMMANDS.find(({ command }) => command === "update"),
+    { command: "update", label: "Update swarm", keys: "U", screens: ["main", "prs"] },
+  );
   assert.equal(new Set(COMMANDS.map(({ command }) => command)).size, COMMANDS.length);
   assert.ok(COMMANDS.every(({ screens }) => screens.length > 0));
   assert.equal(resolve("normal", key("p")).command, "prs");

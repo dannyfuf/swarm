@@ -18,6 +18,7 @@ export const KEY_HINTS: Record<Pane, Array<{ key: string; label: string }>> = {
     { key: "m", label: "move" },
     { key: "p", label: "prs" },
     { key: "N", label: "new context" },
+    { key: "U", label: "update" },
     { key: ":", label: "commands" },
     { key: ",", label: "settings" },
     { key: "?", label: "help" },
@@ -33,6 +34,7 @@ export const KEY_HINTS: Record<Pane, Array<{ key: string; label: string }>> = {
     { key: "/", label: "filter" },
     { key: "y", label: "copy path" },
     { key: "p", label: "prs" },
+    { key: "U", label: "update" },
     { key: ":", label: "commands" },
     { key: ",", label: "settings" },
     { key: "?", label: "help" },
@@ -84,6 +86,7 @@ export const COMMANDS: Array<{
   { command: "kill", label: "Kill session", keys: "K", screens: ["main"] },
   { command: "move", label: "Move repo", keys: "m", screens: ["main"] },
   { command: "refresh", label: "Refresh", keys: "r", screens: ["main", "prs"] },
+  { command: "update", label: "Update swarm", keys: "U", screens: ["main", "prs"] },
   { command: "filter", label: "Filter", keys: "/", screens: ["main", "prs"] },
   { command: "palette", label: "Command palette", keys: ":", screens: ["main", "prs"] },
   { command: "settings", label: "Settings", keys: ",", screens: ["main", "prs"] },
@@ -137,6 +140,7 @@ function resolveNormalKey(event: KeyEvent, context: KeyContext): KeyResolution {
   }
   if (isUppercaseKey(event, "g")) return { command: "bottom", pending: "" };
   if (isUppercaseKey(event, "o")) return { command: "openKeep", pending: "" };
+  if (isUppercaseKey(event, "u")) return { command: "update", pending: "" };
   if (context.screen === "main" && isUppercaseKey(event, "n")) {
     return { command: "newContext", pending: "" };
   }

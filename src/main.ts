@@ -4,9 +4,10 @@ import type { Shell, ShellResult } from "./core/ports.ts";
 import type { UnmountReport } from "./core/services.ts";
 import { createStartupProfiler } from "./core/startup.ts";
 import type { State, Worktree } from "./core/types.ts";
+import { VERSION } from "./core/version.ts";
 import type { Runtime } from "./runtime.ts";
 
-export const VERSION = "0.1.0";
+export { VERSION };
 
 const startupProfiler = createStartupProfiler(process.env.SWARM_STARTUP_PROFILE);
 startupProfiler.mark("main.moduleLoaded");
@@ -198,15 +199,15 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
           "ui.moduleImport",
           () => import("./ui/runTui.tsx"),
         );
-        await runTui({
+        const exitCode = await runTui({
           startup: startupProfiler,
-          async load() {
+          async load(requestExit) {
             const { createRuntime } = await startupProfiler.measure(
               "runtime.moduleImport",
               () => import("./runtime.ts"),
             );
             const created = await startupProfiler.measure("runtime.create", () =>
-              createRuntime(process.env, startupProfiler),
+              createRuntime(process.env, startupProfiler, { requestExit }),
             );
             startupProfiler.mark("runtime.created");
             runtime = created;
@@ -221,10 +222,10 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
             };
           },
         });
+        return exitCode;
       } finally {
         runtime?.controller.dispose();
       }
-      return 0;
     }
 
     const { createRuntime } = await startupProfiler.measure(

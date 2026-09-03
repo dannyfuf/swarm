@@ -252,6 +252,9 @@ export function App({ store, controller, onExit, home = process.env.HOME ?? "" }
       case "refresh":
         guard(() => (onPrs ? controller.refreshPrs({ force: true }) : controller.refresh()));
         return;
+      case "update":
+        guard(() => controller.update());
+        return;
       case "filter":
         if (!onPrs) store.dispatch({ type: "focus", pane: "worktrees" });
         store.dispatch({ type: "setMode", mode: "filter" });

@@ -25,6 +25,16 @@ export interface Shell {
   exec(cmd: string, args: string[]): Promise<never>;
 }
 
+export type UpdateEvent = { type: "step"; label: string } | { type: "log"; line: string };
+
+export interface UpdaterPort {
+  update(installRoot: string, onEvent?: (event: UpdateEvent) => void): Promise<void>;
+}
+
+export interface LifecyclePort {
+  requestExit(code: number): void;
+}
+
 export interface Logger {
   info(msg: string, data?: unknown): void;
   warn(msg: string, data?: unknown): void;

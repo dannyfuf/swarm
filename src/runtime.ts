@@ -11,8 +11,8 @@ import { createStateStore } from "./adapters/state.ts";
 import { createTmux } from "./adapters/tmux.ts";
 import { createController } from "./app/controller.ts";
 import { createStore } from "./app/store.ts";
-import { swarmHome } from "./core/paths.ts";
-import type { Clock, Logger } from "./core/ports.ts";
+import { installRoot as resolveInstallRoot, swarmHome } from "./core/paths.ts";
+import type { Clock, LifecyclePort, Logger } from "./core/ports.ts";
 import { noStartupTiming, type StartupTiming } from "./core/startup.ts";
 import type { Config } from "./core/types.ts";
 import { createContextService } from "./services/contexts.ts";
@@ -20,6 +20,7 @@ import { createPrService } from "./services/prs.ts";
 import { createRepoService } from "./services/repos.ts";
 import { createSessionService } from "./services/sessions.ts";
 import { createStatusService } from "./services/status.ts";
+import { createUpdater } from "./services/updater.ts";
 import { createWorktreeService } from "./services/worktrees.ts";
 
 export interface Runtime {
@@ -36,8 +37,10 @@ export interface Runtime {
 export async function createRuntime(
   env: NodeJS.ProcessEnv,
   startup: StartupTiming = noStartupTiming,
+  lifecycle: LifecyclePort = { requestExit() {} },
 ): Promise<Runtime> {
   const home = swarmHome(env);
+  const installRoot = resolveInstallRoot(env, import.meta.url);
   const logsDir = join(home, "logs");
   const githubCacheDir = join(home, "cache", "github");
   const logger = createLogger(join(logsDir, "swarm.log"), "main");
@@ -127,6 +130,7 @@ export async function createRuntime(
     config,
     logger,
   });
+  const updater = createUpdater({ shell, files, logger });
   const store = createStore({ config: configValue });
   const controller = createController({
     store,
@@ -143,6 +147,9 @@ export async function createRuntime(
     process: processPort,
     clock,
     logger,
+    updater,
+    lifecycle,
+    installRoot,
     startup,
   });
 

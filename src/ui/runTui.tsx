@@ -18,7 +18,7 @@ export type RunTuiDeps =
   | LoadedTuiDeps
   | {
       startup?: StartupTiming;
-      load: () => Promise<LoadedTuiDeps>;
+      load: (requestExit: (code: number) => void) => Promise<LoadedTuiDeps>;
     };
 
 interface FirstFrameSource {
@@ -77,7 +77,7 @@ export function afterFirstFrame(
  * Paint a lightweight startup frame before loading the full application module.
  * Controller initialization and the full UI import begin only after that frame.
  */
-export async function runTui(deps: RunTuiDeps): Promise<UiExit> {
+export async function runTui(deps: RunTuiDeps): Promise<number> {
   const startup = deps.startup ?? noStartupTiming;
   const load = "load" in deps ? deps.load : async () => deps;
   const renderer = await startup.measure("ui.rendererCreate", () =>
@@ -86,9 +86,9 @@ export async function runTui(deps: RunTuiDeps): Promise<UiExit> {
   const startupView = createStartupView(renderer);
   let root: ReturnType<typeof import("@opentui/react")["createRoot"]> | undefined;
 
-  return new Promise<UiExit>((resolve, reject) => {
+  return new Promise<number>((resolve, reject) => {
     let settled = false;
-    const finish = (result: { exit: UiExit } | { error: unknown }) => {
+    const finish = (result: { code: number } | { error: unknown }) => {
       if (settled) return;
       settled = true;
       setTimeout(() => {
@@ -107,14 +107,14 @@ export async function runTui(deps: RunTuiDeps): Promise<UiExit> {
 
         if ("error" in result) reject(result.error);
         else if (cleanupError !== undefined) reject(cleanupError);
-        else resolve(result.exit);
+        else resolve(result.code);
       }, 0);
     };
     const onUnhandledRejection = (error: unknown): void => finish({ error });
 
     process.once("unhandledRejection", onUnhandledRejection);
     afterFirstFrame(renderer, startup, () => {
-      const loaded = load().then((appDeps) => {
+      const loaded = load((code) => finish({ code })).then((appDeps) => {
         startInitialization(appDeps.store, appDeps.initialize ?? (async () => undefined));
         return appDeps;
       });
@@ -134,7 +134,7 @@ export async function runTui(deps: RunTuiDeps): Promise<UiExit> {
               controller: appDeps.controller,
               config: appDeps.config,
               home: appDeps.home,
-              onExit: (exit: UiExit) => finish({ exit }),
+              onExit: (_exit: UiExit) => finish({ code: 0 }),
             }),
           );
         })

@@ -54,6 +54,9 @@ swarm doctor                           Check runtime dependencies
 swarm --version                        Print the installed version
 ```
 
+`swarm --version` includes the package version and the Git commit baked into the build, such as
+`swarm 0.1.0+f1ad163`.
+
 ## Configuration
 
 Configuration lives at `$SWARM_HOME/config.json` (default `~/.swarm/config.json`). Missing
@@ -99,6 +102,12 @@ remaining windows is killed. Set `sleep.enabled` to `false` to keep every window
 
 Opening worktree B normally sleeps the previous swarm worktree A after switching. In the TUI,
 capital `O` opens B without sleeping A.
+
+## Updating
+
+Press `U` on either the worktree or pull-request screen to update swarm in place. The updater
+requires the install checkout to be on a clean `main` branch, fast-forwards it from
+`origin/main`, installs dependencies, rebuilds swarm, and restarts the TUI on the new build.
 
 ## Troubleshooting
 

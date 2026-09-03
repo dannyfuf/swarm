@@ -346,6 +346,9 @@ export function createFakeController(
       store.dispatch({ type: "setScreen", screen: "prs", scope: { kind: "all" }, cursor: 0 });
     },
     async refreshPrs() {},
+    async update() {
+      await runOperation("Updating swarm", "swarm:update");
+    },
     async openSelectedPr() {
       const pr = selectedPr(store.getState());
       if (!pr) throw new SwarmError("not-found", "No pull request is selected");

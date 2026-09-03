@@ -5,10 +5,12 @@ import type {
   Clipboard,
   Clock,
   ConfigPort,
+  LifecyclePort,
   Logger,
   ProcessPort,
   StatePort,
   TmuxPort,
+  UpdaterPort,
 } from "../core/ports.ts";
 import { prLocalBranch, validateBranch } from "../core/prs.ts";
 import type {
@@ -47,6 +49,9 @@ export interface ControllerDeps {
   process: ProcessPort;
   clock: Clock;
   logger: Logger;
+  updater: UpdaterPort;
+  lifecycle: LifecyclePort;
+  installRoot: string;
   startup?: StartupTiming;
 }
 
@@ -251,12 +256,17 @@ export function createController(deps: ControllerDeps): Controller {
     targetId?: string;
     success: string;
     execute: (onEvent: OnEvent) => Promise<unknown>;
-  }): Promise<void> => {
+    refreshAfter?: boolean;
+    persistError?: boolean;
+    silentIfBusy?: boolean;
+    clearError?: boolean;
+  }): Promise<boolean> => {
     if (options.targetId && inFlightTargets.has(options.targetId)) {
-      toast("info", `${options.label} is already in progress`);
-      return;
+      if (!options.silentIfBusy) toast("info", `${options.label} is already in progress`);
+      return false;
     }
     if (options.targetId) inFlightTargets.add(options.targetId);
+    if (options.clearError) dispatch({ type: "setError", error: undefined });
     const startedAt = deps.clock.now().getTime();
     const id = nextId("op");
     const operation: Operation = {
@@ -299,19 +309,22 @@ export function createController(deps: ControllerDeps): Controller {
       if (eventError !== undefined) throw eventError;
       succeeded = true;
     } catch (error) {
-      reportError(error);
+      const reported = reportError(error);
+      if (options.persistError) dispatch({ type: "setError", error: reported.message });
     } finally {
       flushLog();
       dispatch({ type: "opEnd", id });
       if (options.targetId) inFlightTargets.delete(options.targetId);
     }
 
-    if (!succeeded || disposed) return;
+    if (!succeeded || disposed) return false;
     try {
-      await refresh();
+      if (options.refreshAfter !== false) await refresh();
       toast("success", options.success);
+      return true;
     } catch (error) {
       reportError(error);
+      return false;
     }
   };
 
@@ -321,7 +334,7 @@ export function createController(deps: ControllerDeps): Controller {
     return worktree;
   };
 
-  const closeAndRun = (operation: () => Promise<void>): void => {
+  const closeAndRun = (operation: () => Promise<unknown>): void => {
     dispatch({ type: "closeDialog" });
     void operation();
   };
@@ -689,6 +702,20 @@ export function createController(deps: ControllerDeps): Controller {
 
     async refreshPrs({ force }) {
       await loadPrTabs(["mine", "review"], force);
+    },
+
+    async update() {
+      const succeeded = await runOperation({
+        label: "Updating swarm",
+        targetId: "swarm:update",
+        success: "Swarm updated; restarting…",
+        refreshAfter: false,
+        persistError: true,
+        silentIfBusy: true,
+        clearError: true,
+        execute: (onEvent) => deps.updater.update(deps.installRoot, onEvent),
+      });
+      if (succeeded) deps.lifecycle.requestExit(75);
     },
 
     async openSelectedPr({ keepPrevious }) {

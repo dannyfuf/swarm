@@ -796,7 +796,7 @@ export function fitHints(
 }
 
 /** Least to most essential; `Enter`, `Esc` and `?` are never dropped. */
-const PR_HINT_DROP_ORDER = ["O", "b", "y", "/", "r", "Tab"] as const;
+const PR_HINT_DROP_ORDER = ["O", "b", "y", "/", "r", "U", "Tab"] as const;
 
 function footerContent(state: AppState, layout: ScreenLayout, context: ScreenContext): Line {
   const width = layout.width - 2;
