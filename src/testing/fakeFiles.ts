@@ -36,6 +36,15 @@ export function createFakeFiles(initial: FakeFilesInitial = {}): FakeFiles {
   const calls: FakeFilesCall[] = [];
   const removed: string[] = [];
 
+  const removePrefix = (path: string): void => {
+    const absolute = resolve(path);
+    removed.push(absolute);
+    for (const candidate of [...paths]) if (isWithin(candidate, absolute)) paths.delete(candidate);
+    for (const candidate of [...texts.keys()]) {
+      if (isWithin(candidate, absolute)) texts.delete(candidate);
+    }
+  };
+
   const movePrefix = (src: string, dest: string): void => {
     for (const path of [...paths]) {
       if (!isWithin(path, src)) continue;
@@ -78,15 +87,13 @@ export function createFakeFiles(initial: FakeFilesInitial = {}): FakeFiles {
       calls.push({ method: "move", args: [src, dest] });
       movePrefix(resolve(src), resolve(dest));
     },
+    async removeTree(path) {
+      calls.push({ method: "removeTree", args: [path] });
+      removePrefix(path);
+    },
     async removeDetached(path) {
       calls.push({ method: "removeDetached", args: [path] });
-      const absolute = resolve(path);
-      removed.push(absolute);
-      for (const candidate of [...paths])
-        if (isWithin(candidate, absolute)) paths.delete(candidate);
-      for (const candidate of [...texts.keys()]) {
-        if (isWithin(candidate, absolute)) texts.delete(candidate);
-      }
+      removePrefix(path);
     },
     async readText(path) {
       calls.push({ method: "readText", args: [path] });
@@ -109,7 +116,7 @@ export function createFakeFiles(initial: FakeFilesInitial = {}): FakeFiles {
         if (!child.includes(sep) && texts.has(candidate)) continue;
         directories.add(child.split(sep)[0] ?? child);
       }
-      return [...directories].sort();
+      return [...directories].filter((name) => !name.startsWith(".hot")).sort();
     },
   };
 }

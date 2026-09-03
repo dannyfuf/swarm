@@ -52,6 +52,7 @@ function fakeWorktreeService(): WorktreeService & { touches: string[] } {
     async remoteBranches() {
       return [];
     },
+    async prepareHotCopy() {},
     async create() {
       return target;
     },

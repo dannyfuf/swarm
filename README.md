@@ -5,6 +5,10 @@ inside one tmux popup, keeps base clones pristine, and gives each working copy i
 session. Sleeping a session closes idle windows while preserving agents, servers, and editors
 with unsaved work.
 
+For each repository, swarm keeps one prepared copy under the worktree root. Creating a worktree
+normally consumes it with a fast rename and rebuilds the next copy in the background, while a
+missing prepared copy falls back to the normal base-clone copy.
+
 ## Requirements
 
 - Node.js 26.4 or newer (`.nvmrc` pins 26.8.1)

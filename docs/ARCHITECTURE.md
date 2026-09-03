@@ -33,6 +33,8 @@ change a contract without recording it in `INTEGRATION NOTES`.
   state.json                   registry (State schema); atomic writes (tmp + rename)
   repos/<owner>/<name>/        pristine base clones           (config.reposDir)
   worktrees/<owner>/<name>/<slug>/   worktree copies           (config.worktreesDir)
+  worktrees/<owner>/<name>/.hot/     prepared next copy (single-slot pool)
+  worktrees/<owner>/<name>/.hot.staging/  incomplete pool rebuild, never consumed
   trash/<epochms>-<slug>/      deleted worktrees/repos land here by rename, rm -rf runs detached
   cache/github/<owner>.json    cached `gh repo list` results with fetchedAt
   logs/swarm.log               append-only log (adapters + operations)
@@ -174,6 +176,7 @@ Pure helpers (`src/core/paths.ts`):
 - `sessionName(repoName, slug)` → `${repoName}/${slug}` with `.` and `:` replaced by `-` (tmux forbids them)
 - `repoId(owner, name)`, `worktreeId(repoId, slug)`, `parseWorktreeId(id)`
 - `repoPath(config, owner, name)`, `worktreePath(config, owner, name, slug)`
+- `hotCopyPath(worktreesDir, repoId)`, `hotCopyStagingPath(worktreesDir, repoId)`
 
 ## 5. Ports (`src/core/ports.ts`)
 
@@ -205,10 +208,11 @@ export interface FilesPort {
   ensureDir(p: string): Promise<void>;
   cloneTree(src: string, dest: string): Promise<void>;   // darwin: cp -Rc ; linux: cp -R --reflink=auto ; fallback cp -R
   move(src: string, dest: string): Promise<void>;        // rename
+  removeTree(p: string): Promise<void>;                  // guarded, blocking rm for staging cleanup
   removeDetached(p: string): Promise<void>;              // spawnDetached rm -rf
   readText(p: string): Promise<string | null>;
   writeTextAtomic(p: string, text: string): Promise<void>;
-  listDirs(p: string): Promise<string[]>;
+  listDirs(p: string): Promise<string[]>;                // sorted directories, excluding .hot* pool entries
 }
 export interface TmuxPane { id: string; pid: number; currentCommand: string; currentPath: string }
 export interface TmuxWindow { session: string; index: number; name: string; active: boolean; panes: TmuxPane[] }
@@ -276,8 +280,10 @@ export interface RepoService {
 export interface WorktreeService {
   list(repoId?: RepoId): Promise<Worktree[]>;
   remoteBranches(repoId: RepoId): Promise<string[]>;
+  prepareHotCopy(repoId: RepoId, onEvent?: OnEvent): Promise<void>;
   create(input: { repoId: RepoId; branch: string; baseRef?: string }, onEvent?: OnEvent): Promise<Worktree>;
-    // steps: fetch base → resetToRemote(default) → cloneTree → (origin/branch exists ? checkoutTracking : checkoutNewBranch from baseRef ?? origin/default) → hooks.postCreate → persist
+    // fast: move .hot → refresh destination → checkout branch → hooks.postCreate → persist
+    // fallback: fetch base → resetToRemote(default) → cloneTree → checkout branch → hooks.postCreate → persist
   delete(worktreeId: WorktreeId, onEvent?: OnEvent): Promise<void>;           // killSession → move to trash → removeDetached → persist
   touch(worktreeId: WorktreeId): Promise<void>;                                // lastOpenedAt = now
 }
@@ -305,6 +311,22 @@ default branch, then atomically renames the complete clone into its final path a
 job to a `Repo`. A dead child without a valid clone is marked failed and only its own staging
 directory is removed. `github.cloneProtocol` selects
 `remote.sshUrl` or `https://github.com/<owner>/<name>.git`; the selected URL is persisted.
+
+### Hot-copy pool
+
+Each registered repository has a naive, single-slot pool at
+`worktreesDir/<owner>/<repo>/.hot`. Creation consumes the slot with an atomic rename into the
+requested destination, refreshes that independent clone to the latest resolved default branch,
+then performs the normal branch checkout, hooks, and persistence workflow. If no prepared copy
+exists, creation falls back to refreshing and copying the pristine base clone exactly as before.
+
+Pool rebuilds refresh the base clone outside the long-lived state mutation lock, copy it into
+`.hot.staging`, and publish it as `.hot` only after the copy completes. Concurrent rebuilds for
+one repo share an in-memory promise. The controller schedules rebuilds after every creation
+attempt, after clone reconciliation promotes a new repo, and after initial state hydration;
+rebuild failures remain visible background-operation errors and do not block later fallback
+creation. Reserved `.hot*` directory names are excluded from worktree directory listings and are
+removed with their repository.
 
 All service state changes go through `src/services/stateMutation.ts`. It delegates to the
 state adapter's transactional `mutate` extension when available; that adapter holds an
@@ -453,6 +475,10 @@ cursor row, green for attached, yellow for running agents, red only for danger d
 
 ## 10. Integration notes
 
+- 2026-09-03: worktree creation gained a per-repository single-slot hot-copy pool. Complete
+  copies are staged under `.hot.staging`, atomically published as `.hot`, consumed by rename,
+  refreshed in their destination, and rebuilt by controller-managed background operations.
+  Missing or failed pools retain the original base-refresh and copy fallback.
 - 2026-09-02: PR cache reads and network refreshes are now separate `GithubPort` operations.
   `PrService` emits validated cached slices before refresh, retains them with a short error on
   refresh failure, and owns one four-call limiter plus repo/tab generations and abort signals
