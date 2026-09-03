@@ -134,6 +134,11 @@ describe("tmux adapter", () => {
     await tmux.listWindows("repo/feature");
     assert.equal(await tmux.hasSession("repo/feature"), true);
     await tmux.newSession({ name: "repo/feature", cwd: "/work tree", windowName: "nvim" });
+    await tmux.newSession({
+      name: "devbox/repo/feature",
+      windowName: "ssh",
+      command: "ssh -t -- devbox swarm open 'owner/repo#feature'",
+    });
     assert.equal(
       await tmux.newWindow({ session: "repo/feature", name: "cc", cwd: "/work tree" }),
       4,
@@ -159,6 +164,18 @@ describe("tmux adapter", () => {
         ["tmux", ["list-panes", "-t", "=repo/feature", "-s", "-F", PANE_FORMAT]],
         ["tmux", ["has-session", "-t", "=repo/feature"]],
         ["tmux", ["new-session", "-d", "-s", "repo/feature", "-n", "nvim", "-c", "/work tree"]],
+        [
+          "tmux",
+          [
+            "new-session",
+            "-d",
+            "-s",
+            "devbox/repo/feature",
+            "-n",
+            "ssh",
+            "ssh -t -- devbox swarm open 'owner/repo#feature'",
+          ],
+        ],
         [
           "tmux",
           [

@@ -5,23 +5,26 @@ import {
   handleProtocolCommand,
   humanProtocolResponse,
   isProtocolCommand,
+  PROTOCOL_VERSION,
   type ProtocolCommand,
   protocolErrorEnvelope,
 } from "./cli/protocol.ts";
 import { SwarmError } from "./core/errors.ts";
-import { isWorktreeSlug } from "./core/paths.ts";
-import type { Shell, ShellResult } from "./core/ports.ts";
+import { isWorktreeSlug, proxySessionName } from "./core/paths.ts";
+import type { RemoteHostPort, Shell, ShellResult } from "./core/ports.ts";
 import { validateBranch } from "./core/prs.ts";
 import type { UnmountReport } from "./core/services.ts";
 import { createStartupProfiler } from "./core/startup.ts";
 import {
   agentCommand,
+  type Config,
   type RepoHooks,
   RepoHooksSchema,
   RepoId,
   type State,
   type Worktree,
   WorktreeId,
+  worktreeHost,
 } from "./core/types.ts";
 import { VERSION } from "./core/version.ts";
 import type { Runtime } from "./runtime.ts";
@@ -49,7 +52,7 @@ export type CliCommand =
   | { kind: "help" }
   | ProtocolCommand;
 
-interface DoctorCheck {
+export interface DoctorCheck {
   name: string;
   ok: boolean;
   detail: string;
@@ -242,9 +245,13 @@ function errorLogData(error: unknown): unknown {
   };
 }
 
-function findWorktree(state: State, target: string): Worktree {
+export function findWorktree(state: State, target: string): Worktree {
   const worktree = state.worktrees.find(
-    (candidate) => candidate.id === target || candidate.session === target,
+    (candidate) =>
+      candidate.id === target ||
+      candidate.session === target ||
+      (worktreeHost(candidate) !== "local" &&
+        proxySessionName(worktreeHost(candidate), candidate.session) === target),
   );
   if (!worktree) throw new SwarmError("not-found", `Worktree not found: ${target}`);
   return worktree;
@@ -270,12 +277,17 @@ async function safeRun(shell: Shell, cmd: string, args: string[]): Promise<Shell
   }
 }
 
-async function doctorChecks(): Promise<DoctorCheck[]> {
-  const [{ createShell }, { createNullLogger }] = await Promise.all([
-    import("./adapters/shell.ts"),
-    import("./adapters/logger.ts"),
-  ]);
-  const shell = createShell(createNullLogger());
+export async function doctorChecks(
+  options: { shell?: Shell; config?: Config; remoteHost?: RemoteHostPort } = {},
+): Promise<DoctorCheck[]> {
+  let shell = options.shell;
+  if (!shell) {
+    const [{ createShell }, { createNullLogger }] = await Promise.all([
+      import("./adapters/shell.ts"),
+      import("./adapters/logger.ts"),
+    ]);
+    shell = createShell(createNullLogger());
+  }
   const [tmux, git, gh, cloneCopy] = await Promise.all([
     safeRun(shell, "tmux", ["-V"]),
     safeRun(shell, "git", ["--version"]),
@@ -289,7 +301,7 @@ async function doctorChecks(): Promise<DoctorCheck[]> {
       ? !/(?:illegal|invalid|unknown) option[^\n]*c/iu.test(cpOutput)
       : cloneCopy.code === 0 && cpOutput.includes("--reflink");
 
-  return [
+  const checks: DoctorCheck[] = [
     {
       name: "node >= 26.4",
       ok: versionAtLeast(process.versions.node, 26, 4),
@@ -324,6 +336,61 @@ async function doctorChecks(): Promise<DoctorCheck[]> {
           : "Install GNU coreutils with `cp --reflink=auto` support.",
     },
   ];
+
+  for (const [hostId, entry] of Object.entries(options.config?.hosts ?? {})) {
+    const ssh = await safeRun(shell, "ssh", [
+      "-o",
+      "BatchMode=yes",
+      "-o",
+      "ConnectTimeout=5",
+      "--",
+      entry.ssh,
+      "true",
+    ]);
+    checks.push({
+      name: `host ${hostId}: ssh`,
+      ok: ssh.code === 0,
+      detail: ssh.code === 0 ? "reachable" : ssh.stderr.trim() || ssh.stdout.trim() || "failed",
+      hint: "load your SSH key or fix the alias",
+    });
+
+    let swarmResult: ShellResult;
+    try {
+      swarmResult = options.remoteHost
+        ? await options.remoteHost.run({ id: hostId, ...entry }, ["list", "--json"], {
+            timeoutMs: 5000,
+          })
+        : { code: 1, stdout: "", stderr: "remote transport unavailable" };
+    } catch (error) {
+      swarmResult = { code: 1, stdout: "", stderr: errorMessage(error) };
+    }
+    let swarmOk = false;
+    let swarmDetail = swarmResult.stderr.trim() || swarmResult.stdout.trim() || "failed";
+    if (swarmResult.code === 0) {
+      try {
+        const envelope = JSON.parse(swarmResult.stdout) as {
+          protocol?: unknown;
+          version?: unknown;
+        };
+        const protocolOk = envelope.protocol === PROTOCOL_VERSION;
+        swarmOk = protocolOk && typeof envelope.version === "string";
+        swarmDetail = `${typeof envelope.version === "string" ? envelope.version : "unknown version"}; protocol ${String(envelope.protocol ?? "missing")}`;
+        if (!protocolOk) {
+          swarmDetail += ` (expected ${PROTOCOL_VERSION})`;
+        }
+      } catch {
+        swarmDetail = "invalid JSON response";
+      }
+    }
+    checks.push({
+      name: `host ${hostId}: swarm`,
+      ok: swarmOk,
+      detail: swarmDetail,
+      hint: `install swarm on the host and make sure ${entry.swarmCommand} resolves in a non-interactive shell`,
+    });
+  }
+
+  return checks;
 }
 
 function printDoctor(checks: DoctorCheck[]): void {
@@ -347,7 +414,9 @@ async function runRuntimeCommand(runtime: Runtime, command: CliCommand): Promise
     if (!session) throw new SwarmError("not-found", "No current swarm session");
     const worktree = findWorktree(await runtime.state.load(), session);
     const report = await runtime.sessions.unmount(worktree);
-    process.stdout.write(`${formatUnmountReport(report)}\n`);
+    process.stdout.write(
+      `${command.json ? JSON.stringify({ protocol: PROTOCOL_VERSION, ...report }) : formatUnmountReport(report)}\n`,
+    );
     return;
   }
 }
@@ -422,7 +491,14 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
       return 0;
     }
     if (command.kind === "doctor") {
-      const checks = await doctorChecks();
+      const { createRuntime } = await import("./runtime.ts");
+      const createdRuntime = await createRuntime(process.env, startupProfiler);
+      runtime = createdRuntime;
+      const checks = await doctorChecks({
+        shell: createdRuntime.shell,
+        config: createdRuntime.configValue,
+        remoteHost: createdRuntime.remoteHost,
+      });
       printDoctor(checks);
       return checks.every(({ ok }) => ok) ? 0 : 1;
     }

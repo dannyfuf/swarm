@@ -5,6 +5,7 @@ import { describe, test } from "node:test";
 import { SwarmError } from "../core/errors.ts";
 import { hotCopyPath, hotCopyPidPath, hotCopyStagingPath } from "../core/paths.ts";
 import type { TmuxSession } from "../core/ports.ts";
+import type { RemoteHostService } from "../core/services.ts";
 import { defaultConfig } from "../core/types.ts";
 import { createFakeFiles } from "../testing/fakeFiles.ts";
 import { createFakeGit } from "../testing/fakeGit.ts";
@@ -2608,5 +2609,53 @@ describe("createWorktreeService", () => {
     assert.ok(tmux.calls.some((call) => call.method === "killSession"));
     assert.deepEqual(state.state.worktrees, []);
     assert.deepEqual(files.removed, ["/home/test/.swarm/trash/1772668800000-main"]);
+  });
+
+  test("routes remote deletion before removing its proxy and mirror", async () => {
+    const source = worktrees[0];
+    assert.ok(source);
+    const target = { ...source, host: "devbox", path: "/srv/worktrees/payroll/main" };
+    const state = createMemoryState(makeState({ worktrees: [target] }));
+    const tmux = createFakeTmux({
+      sessions: [
+        {
+          name: "devbox/payroll/main",
+          attached: false,
+          windows: 1,
+          createdAt: 0,
+          lastActivityAt: 0,
+        },
+      ],
+    });
+    const calls: string[] = [];
+    let failure: SwarmError | undefined;
+    const remoteHosts = {
+      async delete(hostId: string, worktreeId: string) {
+        calls.push(`${hostId}:${worktreeId}`);
+        if (failure) throw failure;
+      },
+    } as unknown as RemoteHostService;
+    const service = createWorktreeService({
+      state,
+      config: createMemoryConfig(),
+      git: createFakeGit(),
+      files: createFakeFiles(),
+      tmux,
+      shell: createFakeShell(),
+      clock: createFixedClock(),
+      logger: createNullLogger(),
+      remoteHosts,
+    });
+
+    failure = new SwarmError("remote", "devbox unreachable: offline");
+    await assert.rejects(service.delete(target.id), failure);
+    assert.deepEqual(state.state.worktrees, [target]);
+    assert.equal(tmux.sessions.has("devbox/payroll/main"), true);
+
+    failure = undefined;
+    await service.delete(target.id);
+    assert.deepEqual(calls, [`devbox:${target.id}`, `devbox:${target.id}`]);
+    assert.deepEqual(state.state.worktrees, []);
+    assert.equal(tmux.sessions.has("devbox/payroll/main"), false);
   });
 });

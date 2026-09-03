@@ -7,6 +7,7 @@ import {
   installRoot,
   isWorktreeSlug,
   parseWorktreeId,
+  proxySessionName,
   repoId,
   repoPath,
   sessionName,
@@ -48,6 +49,7 @@ describe("path helpers", () => {
 
   test("creates tmux-safe session names, including dotted repos", () => {
     assert.equal(sessionName("foo.js", "feat.thing:one"), "foo-js/feat-thing-one");
+    assert.equal(proxySessionName("devbox", "foo.js/feat:one"), "devbox/foo-js/feat-one");
   });
 
   test("creates and parses identifiers", () => {

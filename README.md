@@ -134,7 +134,8 @@ agent while still using that agent's entry from `agentCommands`.
 `hosts` maps lowercase host ids to SSH destinations and optional remote commands, for example
 `"devbox": { "ssh": "user@devbox", "swarmCommand": "swarm" }`. The id `local` is reserved;
 `defaultHost` must be `local` or one of the configured ids. A persisted worktree may carry a
-`host` field; when it is absent the worktree is local. Remote transport is introduced in phase 2.
+`host` field; when it is absent the worktree is local. Remote commands use non-interactive SSH,
+while opening a remote worktree creates a one-window local tmux proxy session.
 
 Each repo record has `hooks.prepare` and `hooks.postCreate` string arrays. Prepare hooks run in a
 staging prepared copy before it is published (and in fallback copies after clone). A refresh that

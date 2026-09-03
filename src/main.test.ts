@@ -3,14 +3,19 @@ import { describe, test } from "node:test";
 import { SwarmError } from "./core/errors.ts";
 import { defaultConfig } from "./core/types.ts";
 import {
+  doctorChecks,
   exitTuiProcess,
+  findWorktree,
   formatUnmountReport,
   main,
   parseArgv,
   resolveAgentName,
   runAgentCommand,
 } from "./main.ts";
+import { createFakeRemoteHost } from "./testing/fakeRemoteHost.ts";
+import { createFakeShell } from "./testing/fakeShell.ts";
 import { createFakeTmux } from "./testing/fakeTmux.ts";
+import { makeState, worktrees } from "./testing/fixtures.ts";
 
 describe("CLI parsing", () => {
   test("defaults to the TUI and recognizes simple commands", () => {
@@ -140,6 +145,15 @@ describe("CLI parsing", () => {
     });
   });
 
+  test("resolves remote worktrees by id and proxy session name", () => {
+    const source = worktrees[0];
+    assert.ok(source);
+    const remote = { ...source, host: "devbox" };
+    const state = makeState({ worktrees: [remote] });
+    assert.deepEqual(findWorktree(state, remote.id), remote);
+    assert.deepEqual(findWorktree(state, "devbox/payroll/main"), remote);
+  });
+
   test("flushes stdout and stderr before explicitly exiting the TUI process", async () => {
     const events: string[] = [];
 
@@ -187,4 +201,68 @@ test("agent popup starts the requested agent with its configured command", async
   assert.deepEqual(attached, [
     { session: "swarm-agent-opencode", env: { TMUX: "/tmp/tmux/default,123,0" } },
   ]);
+});
+
+test("doctor checks configured host SSH and remote swarm protocol", async () => {
+  const shell = createFakeShell([
+    {
+      match: (cmd) => cmd === "tmux",
+      result: { stdout: "tmux 3.5\n" },
+    },
+    { match: (cmd) => cmd === "git", result: { stdout: "git version 2.50\n" } },
+    { match: (cmd) => cmd === "gh", result: {} },
+    { match: (cmd) => cmd === "cp", result: { stdout: "--reflink\n" } },
+    { match: (cmd) => cmd === "ssh", result: {} },
+  ]);
+  const remoteHost = createFakeRemoteHost();
+  remoteHost.script("devbox", "list", {
+    code: 0,
+    stdout: JSON.stringify({ protocol: 1, version: "swarm 0.1.0+remote" }),
+    stderr: "",
+  });
+  const config = defaultConfig("/home/test/.swarm");
+  config.hosts = { devbox: { ssh: "user@devbox", swarmCommand: "/opt/swarm" } };
+
+  const checks = await doctorChecks({ shell, config, remoteHost });
+
+  assert.deepEqual(shell.calls.find(({ cmd }) => cmd === "ssh")?.args, [
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    "ConnectTimeout=5",
+    "--",
+    "user@devbox",
+    "true",
+  ]);
+  assert.deepEqual(remoteHost.calls[0], {
+    hostId: "devbox",
+    args: ["list", "--json"],
+    timeoutMs: 5000,
+  });
+  assert.deepEqual(
+    checks.slice(-2).map(({ name, ok, detail, hint }) => ({ name, ok, detail, hint })),
+    [
+      {
+        name: "host devbox: ssh",
+        ok: true,
+        detail: "reachable",
+        hint: "load your SSH key or fix the alias",
+      },
+      {
+        name: "host devbox: swarm",
+        ok: true,
+        detail: "swarm 0.1.0+remote; protocol 1",
+        hint: "install swarm on the host and make sure /opt/swarm resolves in a non-interactive shell",
+      },
+    ],
+  );
+
+  remoteHost.script("devbox", "list", {
+    code: 0,
+    stdout: JSON.stringify({ protocol: 9, version: "swarm future" }),
+    stderr: "",
+  });
+  const mismatch = await doctorChecks({ shell, config, remoteHost });
+  assert.equal(mismatch.at(-1)?.ok, false);
+  assert.match(mismatch.at(-1)?.detail ?? "", /protocol 9 \(expected 1\)/);
 });

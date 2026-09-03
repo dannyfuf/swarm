@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import type { TmuxPane, TmuxSession, TmuxWindow } from "../core/ports.ts";
-import type { WorktreeService } from "../core/services.ts";
+import type { RemoteHostService, WorktreeService } from "../core/services.ts";
 import type { Config, Worktree } from "../core/types.ts";
 import { createFakeProcess } from "../testing/fakeProcess.ts";
 import { createFakeTmux, type FakeTmux } from "../testing/fakeTmux.ts";
@@ -78,6 +78,7 @@ function serviceOptions(
     state?: ReturnType<typeof makeState>;
     worktreeService?: ReturnType<typeof fakeWorktreeService>;
     sleep?: (ms: number) => Promise<void>;
+    remoteHosts?: RemoteHostService;
   } = {},
 ) {
   const process = options.process ?? createFakeProcess();
@@ -93,10 +94,53 @@ function serviceOptions(
       clock: createFixedClock(),
       logger,
       sleep: options.sleep,
+      remoteHosts: options.remoteHosts,
     }),
     process,
     worktreeService,
     logger,
+  };
+}
+
+function fakeRemoteHostService(): RemoteHostService & {
+  calls: Array<{ method: string; hostId: string; target: string }>;
+} {
+  const calls: Array<{ method: string; hostId: string; target: string }> = [];
+  return {
+    calls,
+    async list() {
+      return { protocol: 1, version: "swarm test", repos: [], worktrees: [] };
+    },
+    async create() {
+      return target;
+    },
+    async delete() {},
+    async kill(hostId, worktreeId) {
+      calls.push({ method: "kill", hostId, target: worktreeId });
+    },
+    async sleep(hostId, sessionName) {
+      calls.push({ method: "sleep", hostId, target: sessionName });
+      return {
+        kept: [{ window: "cc", reason: "claude" }],
+        closed: ["nvim"],
+        sessionKilled: false,
+      };
+    },
+    async status() {
+      return [];
+    },
+    async sync() {
+      return [];
+    },
+    async syncAll() {
+      return [];
+    },
+    async remoteSnapshot() {
+      return new Map();
+    },
+    lastError() {
+      return undefined;
+    },
   };
 }
 
@@ -515,5 +559,75 @@ describe("SessionService.unmount", () => {
     await service.unmount(target);
 
     assert.equal(logger.entries.filter(({ level }) => level === "warn").length, 1);
+  });
+});
+
+describe("SessionService remote routing", () => {
+  const remote: Worktree = {
+    ...target,
+    host: "devbox",
+    path: "/srv/swarm/worktrees/bukhr/payroll/main",
+  };
+
+  test("mount creates one command-backed ssh proxy window and open reuses it", async () => {
+    const tmux = createFakeTmux();
+    const remoteHosts = fakeRemoteHostService();
+    const cfg = configured({
+      hosts: { devbox: { ssh: "user@devbox", swarmCommand: "/opt/swarm" } },
+    });
+    const { service, worktreeService } = serviceOptions(tmux, {
+      config: cfg,
+      remoteHosts,
+    });
+
+    await service.mount(remote);
+    await service.open(remote);
+
+    assert.deepEqual(
+      tmux.calls.filter(({ method }) => method === "newSession"),
+      [
+        {
+          method: "newSession",
+          args: [
+            {
+              name: "devbox/payroll/main",
+              windowName: "ssh",
+              command: "ssh -t -- user@devbox /opt/swarm open 'bukhr/payroll#main'",
+            },
+          ],
+        },
+      ],
+    );
+    assert.deepEqual(tmux.switched, ["devbox/payroll/main"]);
+    assert.deepEqual(worktreeService.touches, [remote.id]);
+    assert.equal(tmux.sentKeys.length, 0);
+  });
+
+  test("sleep delegates without touching the proxy, and kill delegates then removes it", async () => {
+    const tmux = createFakeTmux({
+      sessions: [session("devbox/payroll/main", false, 1)],
+    });
+    const remoteHosts = fakeRemoteHostService();
+    const { service } = serviceOptions(tmux, {
+      config: configured({
+        hosts: { devbox: { ssh: "devbox", swarmCommand: "swarm" } },
+      }),
+      remoteHosts,
+    });
+
+    assert.deepEqual(await service.unmount(remote), {
+      kept: [{ window: "cc", reason: "claude" }],
+      closed: ["nvim"],
+      sessionKilled: false,
+    });
+    assert.equal(tmux.sessions.has("devbox/payroll/main"), true);
+
+    await service.kill(remote);
+
+    assert.deepEqual(remoteHosts.calls, [
+      { method: "sleep", hostId: "devbox", target: "payroll/main" },
+      { method: "kill", hostId: "devbox", target: remote.id },
+    ]);
+    assert.equal(tmux.sessions.has("devbox/payroll/main"), false);
   });
 });

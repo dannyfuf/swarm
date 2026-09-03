@@ -212,7 +212,8 @@ export const HostSchema = z.object({
   ssh: z.string().min(1),
   swarmCommand: z.string().min(1).default("swarm"),
 });
-export type Host = z.infer<typeof HostSchema>;
+export type HostConfigEntry = z.infer<typeof HostSchema>;
+export type Host = HostConfigEntry;
 
 export const ConfigSchema = z
   .object({

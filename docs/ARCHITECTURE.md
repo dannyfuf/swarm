@@ -75,9 +75,12 @@ src/core/                 contracts and pure helpers; no I/O
   app.ts                  AppState, Action, Store, Keymap contracts (section 7)
   fuzzy.ts                pure fuzzy matching shared by services and UI
   paths.ts                pure helpers: swarmHome(), installRoot(), slugify(), sessionName(), repoId(), worktreeId()
+  remote.ts               POSIX argument quoting and interactive SSH proxy command helper
   errors.ts               SwarmError with `code` union
 src/adapters/             one file per port, shell-based; each has *.test.ts using FakeShell
+  remoteHost.ts           BatchMode SSH transport + POSIX quoting and interactive proxy command
 src/services/             one file per service interface; tests use fakes from src/testing
+  remoteHosts.ts          versioned JSON client, mirror reconciliation, and remote status fallback
   agentPopup.ts           agent-name re-exports, resolved-command argv, tmux attach argv/socket parsing, and env stripping
 src/app/                  store.ts (createStore), keymap.ts, controller.ts (wires services→store)
 src/ui/                   OpenTUI React components; depends only on src/core
@@ -210,7 +213,7 @@ export interface RemoteRepo { owner: string; name: string; fullName: string; des
 ```
 
 Errors (`src/core/errors.ts`): `class SwarmError extends Error { code: ErrorCode; cause?: unknown }`,
-`ErrorCode = "not-found" | "conflict" | "git" | "tmux" | "fs" | "github" | "validation" | "cancelled" | "unsupported"`.
+`ErrorCode = "not-found" | "conflict" | "git" | "tmux" | "fs" | "github" | "remote" | "validation" | "cancelled" | "unsupported"`.
 
 Pure helpers (`src/core/paths.ts`):
 - `swarmHome(env)` → `env.SWARM_HOME ?? join(env.HOME, ".swarm")`
@@ -271,7 +274,7 @@ export interface TmuxPort {
   listSessions(): Promise<TmuxSession[]>;
   listWindows(session?: string): Promise<TmuxWindow[]>;   // one `list-panes -a` call, grouped; session filter optional
   hasSession(name: string): Promise<boolean>;
-  newSession(opts: { name: string; cwd: string; windowName: string }): Promise<void>;   // detached, shell only
+  newSession(opts: { name: string; windowName: string; cwd?: string; command?: string }): Promise<void>; // command is used by SSH proxies
   newWindow(opts: { session: string; name: string; cwd: string }): Promise<number>;     // returns index; shell only
   sendKeys(target: string, keys: string[], opts?: { enter?: boolean }): Promise<void>;
   swapWindows(session: string, a: number, b: number): Promise<void>;
@@ -298,6 +301,9 @@ export interface StatePort  { load(): Promise<State>;  save(state: State): Promi
 export interface ConfigPort { load(): Promise<Config>; save(config: Config): Promise<void> }
 export interface Clock { now(): Date; setInterval(callback: () => void, intervalMs: number): unknown; clearInterval(handle: unknown): void }
 export interface Clipboard { copy(text: string): Promise<void> }   // pbcopy / xclip / wl-copy
+export interface RemoteHostPort {
+  run(host: HostConfigEntry & {id: HostId}, args: string[], opts?: {timeoutMs?: number}): Promise<ShellResult>;
+}
 ```
 
 ## 6. Services (`src/core/services.ts`)
@@ -355,7 +361,18 @@ export interface SessionService {
 }
 export interface UnmountReport { kept: Array<{ window: string; reason: string }>; closed: string[]; sessionKilled: boolean }
 export interface StatusService {
-  snapshot(worktrees: Worktree[]): Promise<Map<WorktreeId, WorktreeStatus>>;  // 1 tmux call + 1 ps + ≤1 lsof
+  snapshot(worktrees: Worktree[]): Promise<Map<WorktreeId, WorktreeStatus>>;  // local only: 1 tmux call + 1 ps + ≤1 lsof
+}
+export interface RemoteHostService {
+  list(hostId: HostId): Promise<{protocol: number; version: string; repos: Repo[]; worktrees: Worktree[]}>;
+  create(hostId: HostId, input: {repo: Repo; slug: string; branch: string; baseRef: string}): Promise<Worktree>;
+  delete(hostId: HostId, worktreeId: WorktreeId): Promise<void>;
+  kill(hostId: HostId, worktreeId: WorktreeId): Promise<void>;
+  sleep(hostId: HostId, session: string): Promise<UnmountReport>;
+  status(hostId: HostId): Promise<WorktreeStatus[]>;
+  sync(hostId: HostId): Promise<Worktree[]>;
+  syncAll(): Promise<Array<{hostId: HostId; error?: SwarmError}>>;
+  remoteSnapshot(hostId: HostId): Promise<Map<WorktreeId, WorktreeStatus>>;
 }
 export interface FuzzyMatch<T> { item: T; score: number; positions: number[] }
 export type FuzzyFilter = <T>(query: string, items: T[], key: (t: T) => string) => FuzzyMatch<T>[];
@@ -492,6 +509,25 @@ Default keep-alive rules: `{id:"claude", label:"claude", kind:"process", pattern
 `{id:"opencode", pattern:"(^|/)opencode( |$)"}`, `{id:"codex", pattern:"(^|/)codex( |$)"}`,
 `{id:"servers", label:"server", kind:"listening-port"}`.
 
+### Remote hosts and status split
+
+`RemoteHostPort` is the only SSH boundary. Its adapter invokes non-interactive commands with
+`BatchMode=yes`, a five-second connect timeout, and control sockets under
+`$SWARM_HOME/cache/ssh`; remote argv elements are POSIX-single-quoted into one SSH command.
+`RemoteHostService` validates every JSON protocol envelope, translates transport/protocol/remote
+errors, and atomically replaces one host's mirrors through `stateMutation.ts`.
+
+Remote sessions are local tmux proxies named `<host>/<remote session>`. Their single `ssh` window
+starts with the interactive SSH command as the `tmux new-session` command, so no configured local
+windows or `send-keys` agent command is applied. Sleep delegates remotely and preserves the proxy;
+kill and delete remove it after the remote operation succeeds.
+
+`StatusService.snapshot` observes only local worktrees and never performs network I/O.
+`RemoteHostService.remoteSnapshot` separately calls `status --json`, filters results to that host's
+mirrors, and returns `unknown` statuses when the host fails. The controller polls those lanes per
+host at `ui.remoteStatusRefreshMs`, merges them with local status, and stores one deduplicated last
+error per host for the TUI.
+
 ## 7. App layer (`src/core/app.ts`) — UI contract
 
 ```ts
@@ -509,6 +545,7 @@ export interface Operation { id: string; label: string; step: string; log: strin
 export interface AppState {
   contexts: Context[]; repos: Repo[]; clones: CloneJob[]; worktrees: Worktree[];
   statuses: Record<WorktreeId, WorktreeStatus>;
+  remoteErrors: Partial<Record<HostId, string>>;
   activeContextId?: ContextId;
   pane: Pane; mode: Mode;
   repoCursor: number;             // 0 = "All" pseudo row; n > 0 selects visibleRepos[n - 1]
@@ -528,6 +565,7 @@ export interface Store {
 export type Action =                                    // pure reducer in src/app/store.ts
   | { type: "hydrate"; state: Partial<AppState> }
   | { type: "statuses"; statuses: Record<WorktreeId, WorktreeStatus> }
+  | { type: "remoteError"; hostId: HostId; error?: string }
   | { type: "move"; pane?: Pane; delta: number } | { type: "moveTo"; pane?: Pane; index: number }
   | { type: "focus"; pane: Pane } | { type: "setMode"; mode: Mode }
   | { type: "setFilter"; filter: string } | { type: "setContext"; contextId: ContextId }
@@ -548,7 +586,7 @@ export interface Controller {                           // src/app/controller.ts
   setContext(id: ContextId): Promise<void>;              // persist active context, then update the store
   openSelected(opts?: { sleepPrevious?: boolean }): Promise<void>;   // on success → resolves; UI exits process
   sleepSelected(): Promise<void>; killSelected(): Promise<void>;
-  createWorktree(input: { repoId: RepoId; branch: string; baseRef?: string }): Promise<void>;
+  createWorktree(input: { repoId: RepoId; branch: string; baseRef?: string; host?: HostId }): Promise<void>;
   remoteBranches(repoId: RepoId): Promise<string[]>;
   refreshPreparedCopy(repoId: RepoId): void;              // fire-and-forget dialog pre-fetch
   deleteSelected(): Promise<void>;                      // opens confirm dialog with impact summary
@@ -631,6 +669,13 @@ reopening the same repository cannot accept an older completion.
 
 ## 10. Integration notes
 
+- 2026-09-03: Remote-host phase 2 adds the multiplexed SSH port/adapter, validated protocol client,
+  atomic per-host mirror sync, command-backed tmux proxy sessions, host-aware worktree/session
+  routing, split local/remote status polling, background controller sync, remote creation progress,
+  host doctor checks, and `host:path` clipboard values. `AppState.remoteErrors` carries the latest
+  per-host failure and `Controller.createWorktree` accepts optional `host`. Successful JSON sleep
+  output now includes `protocol`, and sleep intentionally keeps the proxy alive while kill/delete
+  remove it.
 - 2026-09-03: Remote-host phase 1 adds optional worktree placement (`host`, absent = `local`),
   validated host configuration, the unreachable `unknown` session state, and protocol version 1
   JSON handlers for list/create/delete/kill/status. `src/core/protocol.ts` exports

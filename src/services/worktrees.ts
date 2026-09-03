@@ -7,6 +7,7 @@ import {
   hotCopyStagingPath,
   isWorktreeSlug,
   worktreeId as makeWorktreeId,
+  proxySessionName,
   sessionName,
   slugify,
   worktreePath,
@@ -23,8 +24,15 @@ import type {
   TmuxPort,
 } from "../core/ports.ts";
 import { validateBranch } from "../core/prs.ts";
-import type { OnEvent, WorktreeService } from "../core/services.ts";
-import type { Config, Repo, RepoId, State, Worktree } from "../core/types.ts";
+import type { OnEvent, RemoteHostService, WorktreeService } from "../core/services.ts";
+import {
+  type Config,
+  type Repo,
+  type RepoId,
+  type State,
+  type Worktree,
+  worktreeHost,
+} from "../core/types.ts";
 import { mutateState } from "./stateMutation.ts";
 
 export interface WorktreeServiceDependencies {
@@ -38,6 +46,7 @@ export interface WorktreeServiceDependencies {
   clock: Clock;
   logger: Logger;
   home?: string;
+  remoteHosts?: RemoteHostService;
 }
 
 function toSwarmError(error: unknown, code: "fs" | "git" | "tmux", message: string): SwarmError {
@@ -101,6 +110,7 @@ export function createWorktreeService({
   clock,
   logger,
   home,
+  remoteHosts,
 }: WorktreeServiceDependencies): WorktreeService {
   const processPort = process ?? {
     async isAlive() {
@@ -1632,6 +1642,37 @@ export function createWorktreeService({
     },
 
     async delete(worktreeId, onEvent) {
+      const registered = (await loadState()).worktrees.find(
+        (candidate) => candidate.id === worktreeId,
+      );
+      if (registered && worktreeHost(registered) !== "local") {
+        const hostId = worktreeHost(registered);
+        if (!remoteHosts) {
+          throw new SwarmError("unsupported", `Remote host service is unavailable: ${hostId}`);
+        }
+        try {
+          await remoteHosts.delete(hostId, registered.id);
+          const proxy = proxySessionName(hostId, registered.session);
+          if (await tmux.hasSession(proxy)) await tmux.killSession(proxy);
+          await mutateState(state, (next) => {
+            next.worktrees = next.worktrees.filter(
+              (candidate) => !(candidate.id === worktreeId && candidate.host === hostId),
+            );
+          });
+          onEvent?.({ type: "done" });
+          return;
+        } catch (error) {
+          const failure =
+            error instanceof SwarmError
+              ? error
+              : new SwarmError("remote", `Failed to delete remote worktree: ${worktreeId}`, {
+                  cause: error,
+                });
+          onEvent?.({ type: "error", error: failure });
+          throw failure;
+        }
+      }
+
       let moved: { source: string; trash: string } | undefined;
       try {
         const trashPath = await mutateState(state, async (next) => {

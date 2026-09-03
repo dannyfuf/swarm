@@ -162,4 +162,22 @@ describe("StatusService.snapshot", () => {
     assert.equal(status?.session, "detached");
     assert.deepEqual(status?.running, ["claude"]);
   });
+
+  test("snapshots only local worktrees", async () => {
+    const local = worktrees[0];
+    const remoteSource = worktrees[1];
+    assert.ok(local);
+    assert.ok(remoteSource);
+    const remote = { ...remoteSource, host: "devbox" };
+    const service = createStatusService({
+      tmux: createFakeTmux(),
+      process: createFakeProcess(),
+      config: createMemoryConfig(config),
+      logger: createNullLogger(),
+    });
+
+    const statuses = await service.snapshot([local, remote]);
+
+    assert.deepEqual([...statuses.keys()], [local.id]);
+  });
 });

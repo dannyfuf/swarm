@@ -165,8 +165,17 @@ export function createTmux(
       throw new SwarmError("tmux", failureMessage(args, result), { cause: result });
     },
 
-    async newSession({ name, cwd, windowName }) {
-      await run(["new-session", "-d", "-s", name, "-n", windowName, "-c", cwd]);
+    async newSession({ name, cwd, windowName, command }) {
+      await run([
+        "new-session",
+        "-d",
+        "-s",
+        name,
+        "-n",
+        windowName,
+        ...(cwd ? ["-c", cwd] : []),
+        ...(command ? [command] : []),
+      ]);
     },
 
     async newWindow({ session, name, cwd }) {

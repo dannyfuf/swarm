@@ -32,7 +32,7 @@ Non-goals:
   (with the remote `path` and `session`) so the list renders offline. The remote state is
   authoritative. A sync replaces every local record for that host with the remote list.
 - **Proxy session**: opening a remote worktree creates a local tmux session named
-  `<host>/<remote session>` whose only window runs `ssh -t <target> -- <swarm> open <id>`.
+  `<host>/<remote session>` whose only window runs `ssh -t -- <target> <swarm> open '<id>'`.
   The TUI then `switch-client`s to it exactly like a local session. When SSH exits the proxy
   session disappears; the next open recreates it.
 
@@ -86,7 +86,7 @@ swarm kill <owner/name#slug> --json
   -> { protocol: 1, ok: true }
 
 swarm sleep [session] --json
-  -> existing sleep report
+  -> { protocol: 1, kept: { window: string, reason: string }[], closed: string[], sessionKilled: boolean }
 
 swarm status --json
   -> { protocol: 1, statuses: WorktreeStatus[] }
@@ -115,10 +115,12 @@ commands. The dev-box may override them in its own state later.
   state until the CLI returns. Base refs come from the local clone of the repo.
 - **Open**: create or reuse the proxy session, then switch to it. `swarm open <id>` from the CLI
   follows the same path.
-- **Sleep / kill / delete**: delegate to the host, then kill the local proxy session. Delete also
-  removes the mirror record and re-syncs.
+- **Sleep / kill / delete**: delegate to the host. Kill and delete then kill the local proxy
+  session; sleep deliberately leaves the SSH pane alive. Delete also removes the mirror record and
+  re-syncs.
 - **Copy path**: `y` copies `<host>:<remote path>` for remote worktrees.
-- **Doctor**: for each host, checks `ssh -o BatchMode=yes <target> true`, then
+- **Doctor**: for each host, checks
+  `ssh -o BatchMode=yes -o ConnectTimeout=5 -- <target> true`, then
   `<swarmCommand> list --json`, and reports the remote version and protocol.
 
 ## Nested tmux

@@ -3,6 +3,7 @@ import type {
   CloneJob,
   Context,
   ContextId,
+  HostId,
   PrRepoSlice,
   PrTab,
   PullRequest,
@@ -99,6 +100,27 @@ export interface UnmountReport {
   kept: Array<{ window: string; reason: string }>;
   closed: string[];
   sessionKilled: boolean;
+}
+
+export interface RemoteHostService {
+  list(hostId: HostId): Promise<{
+    protocol: number;
+    version: string;
+    repos: Repo[];
+    worktrees: Worktree[];
+  }>;
+  create(
+    hostId: HostId,
+    input: { repo: Repo; slug: string; branch: string; baseRef: string },
+  ): Promise<Worktree>;
+  delete(hostId: HostId, worktreeId: WorktreeId): Promise<void>;
+  kill(hostId: HostId, worktreeId: WorktreeId): Promise<void>;
+  sleep(hostId: HostId, session: string): Promise<UnmountReport>;
+  status(hostId: HostId): Promise<WorktreeStatus[]>;
+  sync(hostId: HostId): Promise<Worktree[]>;
+  syncAll(): Promise<Array<{ hostId: HostId; error?: SwarmError }>>;
+  remoteSnapshot(hostId: HostId): Promise<Map<WorktreeId, WorktreeStatus>>;
+  lastError(hostId: HostId): SwarmError | undefined;
 }
 
 export interface StatusService {

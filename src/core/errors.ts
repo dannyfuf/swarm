@@ -5,6 +5,7 @@ export type ErrorCode =
   | "tmux"
   | "fs"
   | "github"
+  | "remote"
   | "validation"
   | "cancelled"
   | "unsupported";

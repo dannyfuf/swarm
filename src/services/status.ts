@@ -7,7 +7,7 @@ import type {
   TmuxWindow,
 } from "../core/ports.ts";
 import type { StatusService } from "../core/services.ts";
-import type { Worktree, WorktreeStatus } from "../core/types.ts";
+import { type Worktree, type WorktreeStatus, worktreeHost } from "../core/types.ts";
 import { matchKeepAlive } from "./sessions.ts";
 
 export interface StatusServiceDependencies {
@@ -39,6 +39,7 @@ export function createStatusService({
 
   return {
     async snapshot(worktrees) {
+      const localWorktrees = worktrees.filter((worktree) => worktreeHost(worktree) === "local");
       const [configResult, sessionsResult, windowsResult, processResult] = await Promise.allSettled(
         [config.load(), tmux.listSessions(), tmux.listWindows(), process.snapshot()],
       );
@@ -52,7 +53,7 @@ export function createStatusService({
       const windows = windowsResult.status === "fulfilled" ? windowsResult.value : [];
       const processSnapshot = processResult.status === "fulfilled" ? processResult.value : [];
       const rules = configResult.status === "fulfilled" ? configResult.value.sleep.keepAlive : [];
-      const worktreeSessions = new Set(worktrees.map(({ session }) => session));
+      const worktreeSessions = new Set(localWorktrees.map(({ session }) => session));
       const swarmWindows = windows.filter(({ session }) => worktreeSessions.has(session));
       const trees = new Map<TmuxWindow, ProcInfo[]>();
 
@@ -81,7 +82,7 @@ export function createStatusService({
       const sessionsByName = new Map(sessions.map((session) => [session.name, session]));
       const result = new Map<Worktree["id"], WorktreeStatus>();
 
-      for (const worktree of worktrees) {
+      for (const worktree of localWorktrees) {
         const tmuxSession = sessionsByName.get(worktree.session);
         const sessionWindows = swarmWindows
           .filter(({ session }) => session === worktree.session)

@@ -9,6 +9,7 @@ function initialState(initial: Partial<AppState> = {}): AppState {
     clones: [],
     worktrees: [],
     statuses: {},
+    remoteErrors: {},
     screen: "main",
     prTab: "mine",
     prCursor: 0,
@@ -56,6 +57,12 @@ export function reduce(state: AppState, action: Action): AppState {
       return clampCursors({ ...state, ...action.state });
     case "statuses":
       return { ...state, statuses: action.statuses };
+    case "remoteError": {
+      const remoteErrors = { ...state.remoteErrors };
+      if (action.error === undefined) delete remoteErrors[action.hostId];
+      else remoteErrors[action.hostId] = action.error;
+      return { ...state, remoteErrors };
+    }
     case "move": {
       if (state.screen === "prs") {
         const next = clamp(
