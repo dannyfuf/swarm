@@ -35,6 +35,10 @@ export function SettingsDialog({ store, controller }: { store: Store; controller
   });
   const [cursor, setCursor] = useState(0);
   const config = controller.getConfig();
+  const hosts = Object.entries(config.hosts)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([id, host]) => `${id} (ssh ${host.ssh})`)
+    .join(", ");
   const inner = useDialogInnerWidth(78);
   const rowCount = 3 + policy.keepAlive.length;
   const clamped = Math.min(cursor, rowCount - 1);
@@ -196,6 +200,18 @@ export function SettingsDialog({ store, controller }: { store: Store; controller
       <Spacer />
       <SectionLabel text="  WINDOWS" />
       <LinesView lines={[fitLine(windowRow, inner)]} />
+      <LinesView
+        lines={[
+          fitLine(
+            [
+              cell("       ", {}),
+              cell("hosts: ", { fg: theme.ghost }),
+              cell(hosts || "none", { fg: theme.text }),
+            ],
+            inner,
+          ),
+        ]}
+      />
       <LinesView
         lines={[
           [

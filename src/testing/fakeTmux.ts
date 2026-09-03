@@ -85,7 +85,16 @@ export function createFakeTmux(options: FakeTmuxOptions = {}): FakeTmux {
           index: 0,
           name: opts.windowName,
           active: true,
-          panes: [],
+          panes: opts.command
+            ? [
+                {
+                  id: "%0",
+                  pid: 1,
+                  currentCommand: opts.command.split(/\s/u, 1)[0] ?? "",
+                  currentPath: opts.cwd ?? "",
+                },
+              ]
+            : [],
         },
       ]);
     },
@@ -137,6 +146,12 @@ export function createFakeTmux(options: FakeTmuxOptions = {}): FakeTmux {
       if (!sessions.has(name)) {
         throw new SwarmError("tmux", `Session does not exist: ${name}`);
       }
+      sessions.delete(name);
+      windows.delete(name);
+      if (activeSession === name) activeSession = null;
+    },
+    async killSessionIfPresent(name) {
+      calls.push({ method: "killSessionIfPresent", args: [name] });
       sessions.delete(name);
       windows.delete(name);
       if (activeSession === name) activeSession = null;

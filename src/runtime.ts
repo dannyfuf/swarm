@@ -6,6 +6,7 @@ import { createGit } from "./adapters/git.ts";
 import { createGithub } from "./adapters/github.ts";
 import { createLogger } from "./adapters/logger.ts";
 import { createProcess } from "./adapters/process.ts";
+import { createRemoteHost } from "./adapters/remoteHost.ts";
 import { createShell } from "./adapters/shell.ts";
 import { createStateStore } from "./adapters/state.ts";
 import { createTmux } from "./adapters/tmux.ts";
@@ -17,6 +18,7 @@ import { noStartupTiming, type StartupTiming } from "./core/startup.ts";
 import type { Config } from "./core/types.ts";
 import { createContextService } from "./services/contexts.ts";
 import { createPrService } from "./services/prs.ts";
+import { createRemoteHostService } from "./services/remoteHosts.ts";
 import { createRepoService } from "./services/repos.ts";
 import { createSessionService } from "./services/sessions.ts";
 import { createStatusService } from "./services/status.ts";
@@ -29,7 +31,14 @@ export interface Runtime {
   logger: Logger;
   state: ReturnType<typeof createStateStore>;
   tmux: ReturnType<typeof createTmux>;
+  shell: ReturnType<typeof createShell>;
+  remoteHost: ReturnType<typeof createRemoteHost>;
+  remoteHosts: ReturnType<typeof createRemoteHostService>;
+  contexts: ReturnType<typeof createContextService>;
+  repos: ReturnType<typeof createRepoService>;
+  worktrees: ReturnType<typeof createWorktreeService>;
   sessions: ReturnType<typeof createSessionService>;
+  status: ReturnType<typeof createStatusService>;
   controller: ReturnType<typeof createController>;
   store: ReturnType<typeof createStore>;
 }
@@ -90,6 +99,13 @@ export async function createRuntime(
     clock,
   });
   const clipboard = createClipboard(shell, process.platform);
+  const remoteHost = createRemoteHost(shell, home);
+  const remoteHosts = createRemoteHostService({
+    transport: remoteHost,
+    config,
+    state,
+    logger,
+  });
   const worktrees = createWorktreeService({
     state,
     config,
@@ -101,6 +117,7 @@ export async function createRuntime(
     clock,
     logger,
     home,
+    remoteHosts,
   });
   const repos = createRepoService({
     state,
@@ -124,6 +141,7 @@ export async function createRuntime(
     worktrees,
     clock,
     logger,
+    remoteHosts,
   });
   const status = createStatusService({
     tmux,
@@ -141,6 +159,7 @@ export async function createRuntime(
     worktrees,
     sessions,
     status,
+    remoteHosts,
     config,
     state,
     tmux,
@@ -155,5 +174,21 @@ export async function createRuntime(
     enableHotRefreshTimer: true,
   });
 
-  return { home, configValue, logger, state, tmux, sessions, controller, store };
+  return {
+    home,
+    configValue,
+    logger,
+    state,
+    tmux,
+    shell,
+    remoteHost,
+    remoteHosts,
+    contexts,
+    repos,
+    worktrees,
+    sessions,
+    status,
+    controller,
+    store,
+  };
 }

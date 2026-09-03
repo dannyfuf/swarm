@@ -24,6 +24,7 @@ export type FakeController = Controller & {
   readonly yankedPrUrls: string[];
   readonly browsedPrUrls: string[];
   readonly preparedCopyRefreshes: string[];
+  readonly createdWorktreeInputs: Array<Parameters<Controller["createWorktree"]>[0]>;
 };
 
 function wait(milliseconds: number): Promise<void> {
@@ -43,6 +44,7 @@ export function createFakeController(
   const yankedPrUrls: string[] = [];
   const browsedPrUrls: string[] = [];
   const preparedCopyRefreshes: string[] = [];
+  const createdWorktreeInputs: Array<Parameters<Controller["createWorktree"]>[0]> = [];
   let disposed = false;
   let operationSequence = 0;
 
@@ -93,6 +95,7 @@ export function createFakeController(
     yankedPrUrls,
     browsedPrUrls,
     preparedCopyRefreshes,
+    createdWorktreeInputs,
     get disposed() {
       return disposed;
     },
@@ -158,6 +161,7 @@ export function createFakeController(
       store.dispatch({ type: "statuses", statuses });
     },
     async createWorktree(input) {
+      createdWorktreeInputs.push({ ...input });
       const repo = store.getState().repos.find((item) => item.id === input.repoId);
       if (!repo) throw new SwarmError("not-found", `Repo not found: ${input.repoId}`);
       const slug = slugify(input.branch);
@@ -178,6 +182,7 @@ export function createFakeController(
             baseRef: input.baseRef ?? `origin/${repo.defaultBranch}`,
             path: `${config.worktreesDir}/${repo.owner}/${repo.name}/${slug}`,
             session: `${repo.name.replace(/[.:]/g, "-")}/${slug.replace(/[.:]/g, "-")}`,
+            host: input.host,
             createdAt,
           },
         ],

@@ -60,7 +60,14 @@ TPM plugins.
 swarm                                  Open the TUI
 swarm open owner/repo#slug             Mount and open a worktree by id
 swarm open repo/slug                   Mount and open a worktree by tmux session
-swarm sleep [session]                  Apply the sleep policy and print a JSON report
+swarm list --json                      Print registered repos and worktrees
+swarm create owner/repo slug --branch name --base ref [--url url]
+             [--default-branch name] [--hooks json] --json
+                                       Clone if needed, then create and publish a worktree
+swarm delete owner/repo#slug --json    Kill its session and delete the worktree
+swarm kill owner/repo#slug --json      Kill its session if present
+swarm status --json                    Print status for every worktree
+swarm sleep [session] [--json]         Apply the sleep policy and print a JSON report
 swarm agent [claude|opencode]          Create or reopen a persistent agent tmux session
 swarm doctor                           Check runtime dependencies
 swarm --version                        Print the installed version
@@ -79,6 +86,8 @@ fields are merged with these defaults:
   "version": 1,
   "reposDir": "~/.swarm/repos",
   "worktreesDir": "~/.swarm/worktrees",
+  "hosts": {},
+  "defaultHost": "local",
   "hotPoolSize": 1,
   "hotFreshnessMs": 60000,
   "hotRefreshIntervalMs": 300000,
@@ -103,7 +112,7 @@ fields are merged with these defaults:
     "graceMs": 2000
   },
   "github": { "cacheTtlSeconds": 3600, "cloneProtocol": "ssh" },
-  "ui": { "statusRefreshMs": 2000 }
+  "ui": { "statusRefreshMs": 2000, "remoteStatusRefreshMs": 10000 }
 }
 ```
 
@@ -121,6 +130,14 @@ window whose process tree owns a listening TCP port. `github.cloneProtocol` acce
 (the default) or `"https"` and controls the URL used and stored when cloning GitHub repos.
 Running `swarm agent` without a name uses the configured agent; an explicit name selects the other
 agent while still using that agent's entry from `agentCommands`.
+
+`hosts` maps lowercase host ids to SSH destinations and optional remote commands, for example
+`"devbox": { "ssh": "user@devbox", "swarmCommand": "swarm" }`. The id `local` is reserved;
+`defaultHost` must be `local` or one of the configured ids. A persisted worktree may carry a
+`host` field; when it is absent the worktree is local. Remote commands use non-interactive SSH,
+while opening a remote worktree creates a one-window local tmux proxy session.
+In the create dialog, `Tab` focuses the host picker and `←`/`→` cycles it; remote rows show an
+`@host` badge.
 
 Each repo record has `hooks.prepare` and `hooks.postCreate` string arrays. Prepare hooks run in a
 staging prepared copy before it is published (and in fallback copies after clone). A refresh that

@@ -165,8 +165,17 @@ export function createTmux(
       throw new SwarmError("tmux", failureMessage(args, result), { cause: result });
     },
 
-    async newSession({ name, cwd, windowName }) {
-      await run(["new-session", "-d", "-s", name, "-n", windowName, "-c", cwd]);
+    async newSession({ name, cwd, windowName, command }) {
+      await run([
+        "new-session",
+        "-d",
+        "-s",
+        name,
+        "-n",
+        windowName,
+        ...(cwd ? ["-c", cwd] : []),
+        ...(command ? [command] : []),
+      ]);
     },
 
     async newWindow({ session, name, cwd }) {
@@ -213,6 +222,16 @@ export function createTmux(
 
     async killSession(name) {
       await run(["kill-session", "-t", exactTarget(name)]);
+    },
+
+    async killSessionIfPresent(name) {
+      const args = ["kill-session", "-t", exactTarget(name)];
+      const result = await invoke(args);
+      if (result.code === 0) return;
+      const detail = `${result.stderr}\n${result.stdout}`;
+      if (/(?:can't find session|session not found)/iu.test(detail)) return;
+      log.error("tmux command failed", { args, code: result.code, stderr: result.stderr });
+      throw new SwarmError("tmux", failureMessage(args, result), { cause: result });
     },
 
     async switchClient(session) {

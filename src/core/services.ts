@@ -3,6 +3,7 @@ import type {
   CloneJob,
   Context,
   ContextId,
+  HostId,
   PrRepoSlice,
   PrTab,
   PullRequest,
@@ -38,7 +39,12 @@ export interface RepoService {
     query: string,
     opts?: { refresh?: boolean; signal?: AbortSignal },
   ): Promise<RemoteRepo[]>;
-  clone(remote: RemoteRepo, contextId: ContextId, onEvent?: OnEvent): Promise<CloneJob>;
+  clone(
+    remote: RemoteRepo,
+    contextId: ContextId,
+    onEvent?: OnEvent,
+    opts?: { url?: string },
+  ): Promise<CloneJob>;
   reconcileClones(): Promise<CloneJob[]>;
   assign(repoId: RepoId, contextId: ContextId): Promise<Repo>;
   delete(repoId: RepoId, onEvent?: OnEvent): Promise<void>;
@@ -60,6 +66,7 @@ export interface WorktreeService {
     input: {
       repoId: RepoId;
       branch: string;
+      slug?: string;
       baseRef?: string;
       source?: { kind: "pull"; number: number };
     },
@@ -93,6 +100,27 @@ export interface UnmountReport {
   kept: Array<{ window: string; reason: string }>;
   closed: string[];
   sessionKilled: boolean;
+}
+
+export interface RemoteHostService {
+  list(hostId: HostId): Promise<{
+    protocol: number;
+    version: string;
+    repos: Repo[];
+    worktrees: Worktree[];
+  }>;
+  create(
+    hostId: HostId,
+    input: { repo: Repo; slug: string; branch: string; baseRef: string },
+  ): Promise<Worktree>;
+  delete(hostId: HostId, worktreeId: WorktreeId): Promise<void>;
+  kill(hostId: HostId, worktreeId: WorktreeId): Promise<void>;
+  sleep(hostId: HostId, session: string): Promise<UnmountReport>;
+  status(hostId: HostId): Promise<WorktreeStatus[]>;
+  sync(hostId: HostId): Promise<Worktree[]>;
+  syncAll(): Promise<Array<{ hostId: HostId; error?: SwarmError }>>;
+  remoteSnapshot(hostId: HostId): Promise<Map<WorktreeId, WorktreeStatus>>;
+  lastError(hostId: HostId): SwarmError | undefined;
 }
 
 export interface StatusService {

@@ -5,7 +5,7 @@ import { testRender } from "@opentui/react/test-utils";
 import { act } from "react";
 import { createStore } from "../app/store.ts";
 import type { Store, UiExit } from "../core/app.ts";
-import type { PullRequest } from "../core/types.ts";
+import type { Config, PullRequest } from "../core/types.ts";
 import { createFakeController, type FakeController } from "../testing/fakeController.ts";
 import { config as fixtureConfig, makeAppState, pullRequest } from "../testing/fixtures.ts";
 import { App } from "./App.tsx";
@@ -19,9 +19,9 @@ interface Harness {
   stop: () => void;
 }
 
-async function mount(width = 110, height = 32): Promise<Harness> {
+async function mount(width = 110, height = 32, config: Config = fixtureConfig): Promise<Harness> {
   const store = createStore(makeAppState());
-  const controller = createFakeController(store, { operationDelayMs: 0 });
+  const controller = createFakeController(store, { operationDelayMs: 0, config });
   await controller.init();
   store.dispatch({
     type: "statuses",
@@ -39,7 +39,7 @@ async function mount(width = 110, height = 32): Promise<Harness> {
     <App
       store={store}
       controller={controller}
-      config={fixtureConfig}
+      config={config}
       home="/home/test"
       onExit={(exit) => exits.push(exit)}
     />,
@@ -53,6 +53,14 @@ async function mount(width = 110, height = 32): Promise<Harness> {
     exits,
     frame: () => setup.captureCharFrame(),
     stop: () => setup.renderer.destroy(),
+  };
+}
+
+function configWithHost(defaultHost: "local" | "devbox" = "local"): Config {
+  return {
+    ...structuredClone(fixtureConfig),
+    hosts: { devbox: { ssh: "devbox", swarmCommand: "swarm" } },
+    defaultHost,
   };
 }
 
@@ -197,9 +205,21 @@ test("settings shows the read-only clone protocol beside the config file note", 
     harness.setup.mockInput.pressKey(",");
     await harness.setup.flush();
     const frame = harness.frame();
+    assert.ok(frame.includes("hosts: none"));
     assert.ok(frame.includes("clone protocol ssh"));
     assert.ok(frame.includes("edit in"));
     assert.ok(frame.includes("~/.swarm/config.json"));
+  } finally {
+    harness.stop();
+  }
+});
+
+test("settings shows configured hosts read-only", async () => {
+  const harness = await mount(110, 32, configWithHost());
+  try {
+    harness.setup.mockInput.pressKey(",");
+    await harness.setup.flush();
+    assert.ok(harness.frame().includes("hosts: devbox (ssh devbox)"));
   } finally {
     harness.stop();
   }
@@ -363,6 +383,60 @@ test("n opens immediately, starts pre-fetch, and updates the branch picker", asy
     }
     assert.ok(harness.frame().includes("origin/newly-fetched"));
     assert.ok(!harness.frame().includes("fetching…"));
+  } finally {
+    harness.stop();
+  }
+});
+
+test("create-worktree only shows the host field when hosts are configured", async () => {
+  const local = await mount();
+  try {
+    local.setup.mockInput.pressKey("n");
+    await local.setup.flush();
+    assert.ok(!local.frame().includes("Host:"));
+  } finally {
+    local.stop();
+  }
+
+  const remote = await mount(110, 32, configWithHost("devbox"));
+  try {
+    remote.setup.mockInput.pressKey("n");
+    await remote.setup.flush();
+    assert.ok(remote.frame().includes("Host: < devbox >"));
+  } finally {
+    remote.stop();
+  }
+});
+
+test("create-worktree cycles hosts with arrows and submits the selected host", async () => {
+  const harness = await mount(110, 32, configWithHost());
+  try {
+    const press = async (input: () => void): Promise<void> => {
+      act(input);
+      await harness.setup.flush();
+    };
+    await press(() => harness.setup.mockInput.pressKey("n"));
+    assert.ok(harness.frame().includes("Host: < local >"));
+
+    await harness.setup.mockInput.typeText("feat/remote-dialog");
+    await harness.setup.flush();
+    await press(() => harness.setup.mockInput.pressTab());
+    await press(() => harness.setup.mockInput.pressArrow("right"));
+    assert.ok(harness.frame().includes("Host: < devbox >"), harness.frame());
+    await press(() => harness.setup.mockInput.pressArrow("right"));
+    assert.ok(harness.frame().includes("Host: < local >"));
+    await press(() => harness.setup.mockInput.pressArrow("left"));
+    assert.ok(harness.frame().includes("Host: < devbox >"));
+
+    await press(() => harness.setup.mockInput.pressEnter());
+    assert.deepEqual(harness.controller.createdWorktreeInputs, [
+      {
+        repoId: "bukhr/platform",
+        branch: "feat/remote-dialog",
+        baseRef: "origin/main",
+        host: "devbox",
+      },
+    ]);
   } finally {
     harness.stop();
   }

@@ -1,6 +1,6 @@
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { Config, RepoId, WorktreeId } from "./types.ts";
+import type { Config, HostId, RepoId, WorktreeId } from "./types.ts";
 
 export function swarmHome(env: { SWARM_HOME?: string; HOME?: string }): string {
   return env.SWARM_HOME ?? join(env.HOME ?? "", ".swarm");
@@ -19,8 +19,22 @@ export function slugify(branch: string): string {
     .replace(/^-+|-+$/g, "");
 }
 
+export function isWorktreeSlug(slug: string): boolean {
+  return (
+    slug.length > 0 &&
+    slug !== "." &&
+    slug !== ".." &&
+    slugify(slug) === slug &&
+    /^[a-z0-9]/u.test(slug)
+  );
+}
+
 export function sessionName(repoName: string, slug: string): string {
   return `${repoName.replace(/[.:]/g, "-")}/${slug.replace(/[.:]/g, "-")}`;
+}
+
+export function proxySessionName(hostId: HostId, remoteSession: string): string {
+  return sessionName(hostId, remoteSession);
 }
 
 export function repoId(owner: string, name: string): RepoId {

@@ -22,8 +22,22 @@ import type { AppState, Operation } from "../core/app.ts";
 import { fuzzyFilter } from "../core/fuzzy.ts";
 import { slugify, worktreeId } from "../core/paths.ts";
 import { prLocalBranch, prState, prStateLabel } from "../core/prs.ts";
-import type { PrState, PrTab, PullRequest, SessionState, Worktree } from "../core/types.ts";
-import { aggregateSession, relativeTime, runningLabel, stateGlyph, tildePath } from "./format.ts";
+import {
+  type PrState,
+  type PrTab,
+  type PullRequest,
+  type SessionState,
+  type Worktree,
+  worktreeHost,
+} from "../core/types.ts";
+import {
+  aggregateSession,
+  relativeTime,
+  runningLabel,
+  sessionLabel,
+  stateGlyph,
+  tildePath,
+} from "./format.ts";
 import {
   type Cell,
   cell,
@@ -237,13 +251,15 @@ function contextTabs(state: AppState): Line {
 function sessionSummary(state: AppState): Line {
   let attached = 0;
   let detached = 0;
+  let unknown = 0;
   for (const worktree of state.worktrees) {
     const session = state.statuses[worktree.id]?.session;
     if (session === "attached") attached += 1;
     else if (session === "detached") detached += 1;
+    else if (session === "unknown") unknown += 1;
   }
   const line: Line = [];
-  if (attached === 0 && detached === 0) {
+  if (attached === 0 && detached === 0 && unknown === 0) {
     line.push(cell("no live sessions", { fg: theme.dim }));
   } else {
     if (attached > 0) {
@@ -254,6 +270,10 @@ function sessionSummary(state: AppState): Line {
     if (detached > 0) {
       line.push(cell(`${glyphs.detached} `, { fg: theme.yellow }));
       line.push(cell(`${detached} sleeping`, { fg: theme.muted }));
+    }
+    if (unknown > 0) {
+      if (attached > 0 || detached > 0) line.push(cell(` ${glyphs.sep} `, { fg: theme.dim }));
+      line.push(cell(`? ${unknown} offline`, { fg: theme.dim }));
     }
   }
 
@@ -492,8 +512,16 @@ function worktreeRow(
     fg: selected ? theme.cursorFg : theme.text,
     bold: selected,
   };
-  const branchText = truncate(`${prefix}${worktree.branch}`, columns.branch);
-  const written = branchText.length;
+  const hostId = worktreeHost(worktree);
+  const remote = hostId !== "local";
+  const fullHostBadge = `@${hostId}`;
+  const hostBadge = remote
+    ? truncate(fullHostBadge, Math.max(1, Math.min(fullHostBadge.length, columns.branch - 2)))
+    : "";
+  const badgeGap = hostBadge === "" ? 0 : 1;
+  const branchWidth = Math.max(1, columns.branch - hostBadge.length - badgeGap);
+  const branchText = truncate(`${prefix}${worktree.branch}`, branchWidth);
+  const written = branchText.length + badgeGap + hostBadge.length;
   if (prefix !== "" && branchText.startsWith(prefix)) {
     line.push(cell(prefix, { fg: selected ? theme.muted : theme.dim }));
     line.push(
@@ -504,6 +532,10 @@ function worktreeRow(
     );
   } else {
     line.push(...highlight(branchText, positions, branchStyle, { fg: theme.yellow, bold: true }));
+  }
+  if (hostBadge !== "") {
+    line.push(cell(" ", {}));
+    line.push(cell(hostBadge, { fg: selected ? theme.accent : theme.muted, bold: selected }));
   }
   line.push(cell(repeat(" ", Math.max(0, columns.branch - written)), {}));
 
@@ -639,9 +671,10 @@ function detailLines(state: AppState, layout: ScreenLayout, context: ScreenConte
 
   if (state.pane === "repos" && repo) {
     const repoWorktrees = state.worktrees.filter((item) => item.repoId === repo.id);
-    const live = repoWorktrees.filter(
-      (item) => sessionOf(state, item) !== undefined && sessionOf(state, item) !== "none",
-    );
+    const live = repoWorktrees.filter((item) => {
+      const session = sessionOf(state, item);
+      return session === "attached" || session === "detached";
+    });
     lines.push([
       cell(" ", {}),
       cell(repo.name, { fg: theme.strong, bold: true }),
@@ -709,9 +742,14 @@ function detailLines(state: AppState, layout: ScreenLayout, context: ScreenConte
 
   const status = state.statuses[worktree.id];
   const repoOfWorktree = state.repos.find((item) => item.id === worktree.repoId);
+  const hostId = worktreeHost(worktree);
+  const remote = hostId !== "local";
   const branchLine: Line = [
     cell(" ", {}),
     cell(worktree.branch, { fg: theme.strong, bold: true }),
+    ...(remote
+      ? [cell(` ${glyphs.sep} host: `, { fg: theme.dim }), cell(hostId, { fg: theme.muted })]
+      : []),
     cell(` ${glyphs.sep} `, { fg: theme.dim }),
     cell(repoOfWorktree?.id ?? worktree.repoId, { fg: theme.muted }),
     cell(` ${glyphs.sep} base `, { fg: theme.dim }),
@@ -724,15 +762,30 @@ function detailLines(state: AppState, layout: ScreenLayout, context: ScreenConte
     branchLine.push(cell(prStateLabel(prState(linkedPr)), { fg: prStateStyle(prState(linkedPr)) }));
   }
   lines.push(branchLine);
-  lines.push([
-    cell(" ", {}),
-    cell(truncateStart(tildePath(worktree.path, context.home), width - 2), { fg: theme.dim }),
-  ]);
+  if (remote) {
+    lines.push([
+      cell(" ", {}),
+      cell(`${hostId}:`, { fg: theme.muted }),
+      cell(truncateStart(worktree.path, width - hostId.length - 3), { fg: theme.dim }),
+    ]);
+  } else {
+    lines.push([
+      cell(" ", {}),
+      cell(truncateStart(tildePath(worktree.path, context.home), width - 2), { fg: theme.dim }),
+    ]);
+  }
 
   const windowLine: Line = [cell(" windows  ", { fg: theme.dim })];
   if (!status || status.windows.length === 0) {
     windowLine.push(
-      cell(status?.session === "none" || !status ? "no session" : "none", { fg: theme.ghost }),
+      cell(
+        status?.session === "unknown"
+          ? "offline"
+          : status?.session === "none" || !status
+            ? "no session"
+            : "none",
+        { fg: theme.ghost },
+      ),
     );
   } else {
     status.windows.forEach((window, index) => {
@@ -743,7 +796,12 @@ function detailLines(state: AppState, layout: ScreenLayout, context: ScreenConte
       }
     });
   }
-  lines.push(windowLine);
+  const remoteError = remote ? state.remoteErrors[hostId] : undefined;
+  lines.push(
+    remoteError
+      ? [cell(" ", {}), cell(truncate(`offline: ${remoteError}`, width - 2), { fg: theme.dim })]
+      : windowLine,
+  );
 
   lines.push([
     cell(" ", {}),
@@ -1243,7 +1301,9 @@ function prDetailLines(state: AppState, layout: ScreenLayout, context: ScreenCon
       }),
     );
     worktreeLine.push(cell(` ${glyphs.sep} session `, { fg: theme.dim }));
-    worktreeLine.push(cell(state.statuses[worktree.id]?.session ?? "none", { fg: theme.muted }));
+    worktreeLine.push(
+      cell(sessionLabel(state.statuses[worktree.id]?.session), { fg: theme.muted }),
+    );
   } else {
     const slug = slugify(prLocalBranch(pr));
     const destination = `${state.config.worktreesDir}/${pr.repoId}/${slug}`;

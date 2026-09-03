@@ -1,4 +1,5 @@
 import { type ErrorCode, SwarmError } from "../core/errors.ts";
+import { proxySessionName } from "../core/paths.ts";
 import type {
   Clock,
   ConfigPort,
@@ -9,8 +10,14 @@ import type {
   TmuxPort,
   TmuxWindow,
 } from "../core/ports.ts";
-import type { SessionService, UnmountReport, WorktreeService } from "../core/services.ts";
-import { type KeepAliveRule, resolveWindows, type Worktree } from "../core/types.ts";
+import { sshInteractiveCommand } from "../core/remote.ts";
+import type {
+  RemoteHostService,
+  SessionService,
+  UnmountReport,
+  WorktreeService,
+} from "../core/services.ts";
+import { type KeepAliveRule, resolveWindows, type Worktree, worktreeHost } from "../core/types.ts";
 
 export interface SessionServiceDependencies {
   tmux: TmuxPort;
@@ -21,6 +28,7 @@ export interface SessionServiceDependencies {
   clock: Clock;
   logger: Logger;
   sleep?: (ms: number) => Promise<void>;
+  remoteHosts?: RemoteHostService;
 }
 
 const defaultSleep = async (ms: number): Promise<void> => {
@@ -142,11 +150,63 @@ export function createSessionService({
   clock,
   logger,
   sleep = defaultSleep,
+  remoteHosts,
 }: SessionServiceDependencies): SessionService {
   // Clock is part of the stable service dependency contract; touch owns the timestamp update.
   void clock;
 
+  const requireRemoteHosts = (hostId: string): RemoteHostService => {
+    if (!remoteHosts) {
+      throw new SwarmError("unsupported", `Remote host service is unavailable: ${hostId}`);
+    }
+    return remoteHosts;
+  };
+
+  const mountedSessionName = (worktree: Worktree): string => {
+    const hostId = worktreeHost(worktree);
+    return hostId === "local" ? worktree.session : proxySessionName(hostId, worktree.session);
+  };
+
+  const mountRemote = async (worktree: Worktree, hostId: string): Promise<void> => {
+    const cfg = await attempt(() => config.load(), "fs", "Failed to load session config");
+    const host = cfg.hosts[hostId];
+    if (!host) throw new SwarmError("not-found", `Remote host not found: ${hostId}`);
+    const proxy = proxySessionName(hostId, worktree.session);
+    const exists = await attempt(
+      () => tmux.hasSession(proxy),
+      "tmux",
+      `Failed to inspect tmux session ${proxy}`,
+    );
+    if (exists) {
+      const windows = await attempt(
+        () => tmux.listWindows(proxy),
+        "tmux",
+        `Failed to inspect tmux proxy session ${proxy}`,
+      );
+      const panes = windows.flatMap((window) => window.panes);
+      if (panes.length === 1 && panes[0]?.currentCommand === "ssh") return;
+      await attempt(
+        () => tmux.killSessionIfPresent(proxy),
+        "tmux",
+        `Failed to replace tmux proxy session ${proxy}`,
+      );
+    }
+    await attempt(
+      () =>
+        tmux.newSession({
+          name: proxy,
+          windowName: "ssh",
+          command: sshInteractiveCommand({ id: hostId, ...host }, worktree.id),
+        }),
+      "tmux",
+      `Failed to create tmux session ${proxy}`,
+    );
+  };
+
   const mount = async (worktree: Worktree): Promise<void> => {
+    const hostId = worktreeHost(worktree);
+    if (hostId !== "local") return mountRemote(worktree, hostId);
+
     const cfg = await attempt(() => config.load(), "fs", "Failed to load session config");
     const windowSpecs = resolveWindows(cfg);
     const firstSpec = windowSpecs[0];
@@ -251,6 +311,11 @@ export function createSessionService({
   };
 
   const unmount = async (worktree: Worktree): Promise<UnmountReport> => {
+    const hostId = worktreeHost(worktree);
+    if (hostId !== "local") {
+      return requireRemoteHosts(hostId).sleep(hostId, worktree.session);
+    }
+
     const exists = await attempt(
       () => tmux.hasSession(worktree.session),
       "tmux",
@@ -381,20 +446,23 @@ export function createSessionService({
       `Failed to update last-opened time for ${worktree.id}`,
     );
 
+    const targetSession = mountedSessionName(worktree);
     try {
       if (tmux.insideTmux()) {
-        await tmux.switchClient(worktree.session);
+        await tmux.switchClient(targetSession);
       } else {
-        await tmux.attach(worktree.session);
+        await tmux.attach(targetSession);
       }
     } catch (error) {
-      throw serviceError(error, "tmux", `Failed to open tmux session ${worktree.session}`);
+      throw serviceError(error, "tmux", `Failed to open tmux session ${targetSession}`);
     }
 
-    if ((options.sleepPrevious ?? true) && previous && previous !== worktree.session) {
+    if ((options.sleepPrevious ?? true) && previous && previous !== targetSession) {
       try {
         const currentState = await state.load();
-        const previousWorktree = currentState.worktrees.find(({ session }) => session === previous);
+        const previousWorktree = currentState.worktrees.find(
+          (candidate) => mountedSessionName(candidate) === previous,
+        );
         if (previousWorktree) await unmount(previousWorktree);
       } catch (error) {
         logger.warn("Failed to sleep previous worktree session", {
@@ -406,6 +474,18 @@ export function createSessionService({
   };
 
   const kill = async (worktree: Worktree): Promise<void> => {
+    const hostId = worktreeHost(worktree);
+    if (hostId !== "local") {
+      await requireRemoteHosts(hostId).kill(hostId, worktree.id);
+      const proxy = proxySessionName(hostId, worktree.session);
+      await attempt(
+        () => tmux.killSessionIfPresent(proxy),
+        "tmux",
+        `Failed to kill tmux session ${proxy}`,
+      );
+      return;
+    }
+
     const exists = await attempt(
       () => tmux.hasSession(worktree.session),
       "tmux",

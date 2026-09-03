@@ -54,6 +54,9 @@ describe("config adapter", () => {
     assert.equal(config.github.prTtlSeconds, 90);
     assert.equal(config.github.cloneProtocol, "ssh");
     assert.equal(config.ui.statusRefreshMs, 5000);
+    assert.equal(config.ui.remoteStatusRefreshMs, 10000);
+    assert.deepEqual(config.hosts, {});
+    assert.equal(config.defaultHost, "local");
   });
 
   test("fills defaults around a partial agent command map", async () => {

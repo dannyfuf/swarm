@@ -134,6 +134,11 @@ describe("tmux adapter", () => {
     await tmux.listWindows("repo/feature");
     assert.equal(await tmux.hasSession("repo/feature"), true);
     await tmux.newSession({ name: "repo/feature", cwd: "/work tree", windowName: "nvim" });
+    await tmux.newSession({
+      name: "devbox/repo/feature",
+      windowName: "ssh",
+      command: "ssh -t -- devbox swarm open 'owner/repo#feature'",
+    });
     assert.equal(
       await tmux.newWindow({ session: "repo/feature", name: "cc", cwd: "/work tree" }),
       4,
@@ -143,6 +148,7 @@ describe("tmux adapter", () => {
     await tmux.selectWindow("repo/feature", 1);
     await tmux.killWindow("repo/feature", 4);
     await tmux.killSession("repo/feature");
+    await tmux.killSessionIfPresent("repo/feature");
     await tmux.switchClient("repo/feature");
     await tmux.displayMessage("hello there");
     await assert.rejects(tmux.attach("repo/feature"), (error: unknown) => {
@@ -159,6 +165,18 @@ describe("tmux adapter", () => {
         ["tmux", ["list-panes", "-t", "=repo/feature", "-s", "-F", PANE_FORMAT]],
         ["tmux", ["has-session", "-t", "=repo/feature"]],
         ["tmux", ["new-session", "-d", "-s", "repo/feature", "-n", "nvim", "-c", "/work tree"]],
+        [
+          "tmux",
+          [
+            "new-session",
+            "-d",
+            "-s",
+            "devbox/repo/feature",
+            "-n",
+            "ssh",
+            "ssh -t -- devbox swarm open 'owner/repo#feature'",
+          ],
+        ],
         [
           "tmux",
           [
@@ -180,6 +198,7 @@ describe("tmux adapter", () => {
         ["tmux", ["select-window", "-t", "=repo/feature:1"]],
         ["tmux", ["kill-window", "-t", "=repo/feature:4"]],
         ["tmux", ["kill-session", "-t", "=repo/feature"]],
+        ["tmux", ["kill-session", "-t", "=repo/feature"]],
         ["tmux", ["switch-client", "-t", "=repo/feature"]],
         ["tmux", ["display-message", "hello there"]],
         ["tmux", ["attach-session", "-t", "=repo/feature"]],
@@ -193,12 +212,17 @@ describe("tmux adapter", () => {
         match: (_cmd, args) => args[0] === "has-session",
         result: { code: 1, stderr: "can't find session" },
       },
+      {
+        match: (_cmd, args) => args[0] === "kill-session",
+        result: { code: 1, stderr: "session not found" },
+      },
     ]);
     const tmux = createTmux(shell, createNullLogger(), {});
     assert.equal(tmux.insideTmux(), false);
     assert.equal(await tmux.currentSession(), null);
     assert.equal(await tmux.hasSession("missing/name"), false);
-    assert.equal(shell.calls.length, 1);
+    await assert.doesNotReject(tmux.killSessionIfPresent("missing/name"));
+    assert.equal(shell.calls.length, 2);
   });
 
   test("wraps tmux failures with stderr and the tmux error code", async () => {

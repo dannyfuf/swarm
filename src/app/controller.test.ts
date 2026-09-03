@@ -7,6 +7,7 @@ import type {
   ContextService,
   OnEvent,
   PrService,
+  RemoteHostService,
   RepoService,
   SessionService,
   StatusService,
@@ -120,9 +121,70 @@ function statusFor(worktree: Worktree, session: WorktreeStatus["session"] = "det
   } satisfies WorktreeStatus;
 }
 
+function fakeRemoteHosts(overrides: Partial<RemoteHostService> = {}): RemoteHostService & {
+  calls: {
+    creates: Array<Parameters<RemoteHostService["create"]>>;
+    syncs: string[];
+    syncAll: number;
+    snapshots: string[];
+  };
+} {
+  const calls = {
+    creates: [] as Array<Parameters<RemoteHostService["create"]>>,
+    syncs: [] as string[],
+    syncAll: 0,
+    snapshots: [] as string[],
+  };
+  return {
+    calls,
+    async list() {
+      return { protocol: 1, version: "swarm test", repos: [], worktrees: [] };
+    },
+    async create(...args) {
+      calls.creates.push(args);
+      if (overrides.create) return overrides.create(...args);
+      const fallback = worktrees[0];
+      assert.ok(fallback);
+      return { ...fallback, host: args[0] };
+    },
+    async delete(hostId, worktreeId) {
+      return overrides.delete?.(hostId, worktreeId);
+    },
+    async kill(hostId, worktreeId) {
+      return overrides.kill?.(hostId, worktreeId);
+    },
+    async sleep(hostId, session) {
+      if (overrides.sleep) return overrides.sleep(hostId, session);
+      return { kept: [], closed: [], sessionKilled: true };
+    },
+    async status(hostId) {
+      return (await overrides.status?.(hostId)) ?? [];
+    },
+    async sync(hostId) {
+      calls.syncs.push(hostId);
+      return (await overrides.sync?.(hostId)) ?? [];
+    },
+    async syncAll() {
+      calls.syncAll += 1;
+      return (await overrides.syncAll?.()) ?? [];
+    },
+    async remoteSnapshot(hostId) {
+      calls.snapshots.push(hostId);
+      return (await overrides.remoteSnapshot?.(hostId)) ?? new Map();
+    },
+    lastError(hostId) {
+      return overrides.lastError?.(hostId);
+    },
+  };
+}
+
 function createHarness(
   initial: State = makeState(),
-  options: { config?: Config; enableHotRefreshTimer?: boolean } = {},
+  options: {
+    config?: Config;
+    enableHotRefreshTimer?: boolean;
+    remoteHosts?: RemoteHostService;
+  } = {},
 ): Harness {
   let persisted = structuredClone(initial);
   const testConfig = structuredClone(options.config ?? config);
@@ -359,6 +421,7 @@ function createHarness(
     async selectWindow() {},
     async killWindow() {},
     async killSession() {},
+    async killSessionIfPresent() {},
     async switchClient() {},
     async attach(): Promise<never> {
       throw new SwarmError("unsupported", "Not used by controller tests");
@@ -395,6 +458,7 @@ function createHarness(
     worktrees: worktreeService,
     sessions: sessionService,
     status: statusService,
+    remoteHosts: options.remoteHosts,
     config: configPort,
     state,
     tmux,
@@ -489,6 +553,135 @@ describe("createController", () => {
     harness.controller.dispose();
     assert.equal(harness.calls.clearedIntervals.length, 1);
     assert.equal(harness.calls.worktreeDisposals, 1);
+  });
+
+  test("startup remote sync runs after hydration without blocking init", async () => {
+    const pending = deferred<Array<{ hostId: string; error?: SwarmError }>>();
+    const remoteHosts = fakeRemoteHosts({ syncAll: () => pending.promise });
+    const remoteConfig = {
+      ...config,
+      hosts: { devbox: { ssh: "devbox", swarmCommand: "swarm" } },
+    };
+    const harness = createHarness(makeState(), { config: remoteConfig, remoteHosts });
+
+    await harness.controller.init();
+
+    assert.equal(harness.store.getState().loading, false);
+    assert.equal(remoteHosts.calls.syncAll, 1);
+    assert.deepEqual(harness.calls.intervals, [
+      config.ui.statusRefreshMs,
+      config.ui.remoteStatusRefreshMs,
+    ]);
+    pending.resolve([{ hostId: "devbox" }]);
+    await flush();
+    harness.controller.dispose();
+  });
+
+  test("clamps the remote status timer to the local minimum refresh interval", async () => {
+    const remoteHosts = fakeRemoteHosts();
+    const harness = createHarness(makeState(), {
+      config: {
+        ...config,
+        hosts: { devbox: { ssh: "devbox", swarmCommand: "swarm" } },
+        ui: { ...config.ui, remoteStatusRefreshMs: 1 },
+      },
+      remoteHosts,
+    });
+
+    await harness.controller.init();
+
+    assert.deepEqual(harness.calls.intervals, [config.ui.statusRefreshMs, 500]);
+    harness.controller.dispose();
+  });
+
+  test("remote status timer merges host status and records changed errors once", async () => {
+    const local = worktrees[0];
+    const second = worktrees[1];
+    assert.ok(local);
+    assert.ok(second);
+    const mirror = { ...local, host: "devbox" };
+    let session: WorktreeStatus["session"] = "attached";
+    let lastError: SwarmError | undefined;
+    const remoteHosts = fakeRemoteHosts({
+      async remoteSnapshot() {
+        return new Map([[mirror.id, statusFor(mirror, session)]]);
+      },
+      lastError() {
+        return lastError;
+      },
+    });
+    const harness = createHarness(makeState({ worktrees: [second, mirror] }), {
+      config: {
+        ...config,
+        hosts: { devbox: { ssh: "devbox", swarmCommand: "swarm" } },
+      },
+      remoteHosts,
+    });
+    await harness.controller.init();
+    await flush();
+    assert.equal(harness.store.getState().statuses[mirror.id]?.session, "attached");
+
+    session = "unknown";
+    lastError = new SwarmError("remote", "devbox unreachable: offline");
+    harness.clock.advance(config.ui.remoteStatusRefreshMs);
+    await flush();
+    harness.clock.advance(config.ui.remoteStatusRefreshMs);
+    await flush();
+
+    assert.equal(harness.store.getState().statuses[mirror.id]?.session, "unknown");
+    assert.equal(harness.store.getState().remoteErrors.devbox, "devbox unreachable: offline");
+    assert.equal(
+      harness.logger.entries.filter(({ message }) => message === "devbox unreachable: offline")
+        .length,
+      1,
+    );
+    harness.controller.dispose();
+  });
+
+  test("remote create uses host placement, syncs, refreshes status, and exposes progress", async () => {
+    const remoteHosts = fakeRemoteHosts();
+    const harness = createHarness(makeState(), {
+      config: {
+        ...config,
+        hosts: { devbox: { ssh: "devbox", swarmCommand: "swarm" } },
+        defaultHost: "devbox",
+      },
+      remoteHosts,
+    });
+
+    await harness.controller.createWorktree({
+      repoId: "bukhr/payroll",
+      branch: "feat/remote",
+    });
+
+    assert.deepEqual(remoteHosts.calls.creates[0], [
+      "devbox",
+      {
+        repo: repos[0],
+        slug: "feat-remote",
+        branch: "feat/remote",
+        baseRef: "origin/main",
+      },
+    ]);
+    assert.deepEqual(remoteHosts.calls.syncs, ["devbox"]);
+    assert.equal(remoteHosts.calls.syncAll, 1);
+    assert.deepEqual(remoteHosts.calls.snapshots, ["devbox"]);
+    assert.ok(
+      harness.store.actions.some(
+        (action) => action.type === "opStep" && action.step === "creating on devbox…",
+      ),
+    );
+  });
+
+  test("yankPath prefixes remote paths with the host id", async () => {
+    const source = worktrees[0];
+    assert.ok(source);
+    const remote = { ...source, host: "devbox", path: "/srv/worktrees/payroll/main" };
+    const harness = createHarness(makeState({ worktrees: [remote] }));
+
+    await harness.controller.yankPath();
+
+    assert.deepEqual(harness.calls.clipboardCopies, ["devbox:/srv/worktrees/payroll/main"]);
   });
 
   test("starts repo warm-ups after hydration with at most two repos active", async () => {
@@ -672,6 +865,7 @@ describe("createController", () => {
         generation: 1,
         branches: ["origin/main"],
         fetching: true,
+        host: "local",
       },
     });
 
@@ -700,6 +894,7 @@ describe("createController", () => {
         generation: 2,
         branches: ["origin/reopened"],
         fetching: true,
+        host: "local",
       },
     });
     secondRefresh.resolve();
@@ -722,6 +917,7 @@ describe("createController", () => {
         generation: 1,
         branches: ["origin/main"],
         fetching: true,
+        host: "local",
       },
     });
     let refreshSignal: AbortSignal | undefined;

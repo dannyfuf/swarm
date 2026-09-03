@@ -17,13 +17,23 @@ import type {
   ContextService,
   OnEvent,
   PrService,
+  RemoteHostService,
   RepoService,
   SessionService,
   StatusService,
   WorktreeService,
 } from "../core/services.ts";
 import { noStartupTiming, type StartupTiming } from "../core/startup.ts";
-import type { PrTab, Repo, State, Worktree, WorktreeId, WorktreeStatus } from "../core/types.ts";
+import {
+  type HostId,
+  type PrTab,
+  type Repo,
+  type State,
+  type Worktree,
+  type WorktreeId,
+  type WorktreeStatus,
+  worktreeHost,
+} from "../core/types.ts";
 import {
   prsInScope,
   prWorktree,
@@ -42,6 +52,7 @@ export interface ControllerDeps {
   worktrees: WorktreeService;
   sessions: SessionService;
   status: StatusService;
+  remoteHosts?: RemoteHostService;
   config: ConfigPort;
   state: StatePort;
   tmux: TmuxPort;
@@ -91,6 +102,8 @@ export function createController(deps: ControllerDeps): Controller {
   let statusInterval: unknown;
   let cloneInterval: unknown;
   let hotRefreshInterval: unknown;
+  const remoteStatusIntervals = new Map<HostId, unknown>();
+  const remoteSnapshotsInFlight = new Map<HostId, Promise<void>>();
   let snapshotInFlight: Promise<void> | undefined;
   let cloneReconcileInFlight: Promise<State> | undefined;
   let clonePollInFlight: Promise<void> | undefined;
@@ -126,6 +139,31 @@ export function createController(deps: ControllerDeps): Controller {
     return swarmError;
   };
 
+  const replaceStatuses = (
+    targets: Worktree[],
+    statuses: Map<WorktreeId, WorktreeStatus>,
+  ): void => {
+    const state = deps.store.getState();
+    const targetIds = new Set(targets.map((worktree) => worktree.id));
+    const currentIds = new Set(state.worktrees.map((worktree) => worktree.id));
+    const retained = Object.fromEntries(
+      Object.entries(state.statuses).filter(
+        ([worktreeId]) => currentIds.has(worktreeId) && !targetIds.has(worktreeId),
+      ),
+    ) as Record<WorktreeId, WorktreeStatus>;
+    dispatch({ type: "statuses", statuses: { ...retained, ...statusRecord(statuses) } });
+  };
+
+  const setRemoteError = (hostId: HostId, error?: SwarmError): void => {
+    const previous = deps.store.getState().remoteErrors[hostId];
+    const next = error?.message;
+    if (previous === next) return;
+    dispatch({ type: "remoteError", hostId, error: next });
+    if (error) {
+      deps.logger.error(error.message, { hostId, code: error.code, cause: error.cause });
+    }
+  };
+
   const snapshot = async (worktrees: Worktree[], skipIfBusy: boolean): Promise<void> => {
     if (disposed) return;
     if (snapshotInFlight) {
@@ -134,10 +172,11 @@ export function createController(deps: ControllerDeps): Controller {
       if (disposed) return;
     }
 
+    const localWorktrees = worktrees.filter((worktree) => worktreeHost(worktree) === "local");
     const task = startup
-      .measure("background.statusSnapshot", () => deps.status.snapshot(worktrees))
+      .measure("background.statusSnapshot", () => deps.status.snapshot(localWorktrees))
       .then((statuses) => {
-        dispatch({ type: "statuses", statuses: statusRecord(statuses) });
+        replaceStatuses(localWorktrees, statuses);
       })
       .catch((error: unknown) => {
         if (!disposed) reportError(error);
@@ -145,6 +184,63 @@ export function createController(deps: ControllerDeps): Controller {
     snapshotInFlight = task;
     await task;
     if (snapshotInFlight === task) snapshotInFlight = undefined;
+  };
+
+  const refreshRemoteStatus = (hostId: HostId, skipIfBusy: boolean): Promise<void> => {
+    const existing = remoteSnapshotsInFlight.get(hostId);
+    if (existing) return skipIfBusy ? Promise.resolve() : existing;
+    const remoteHosts = deps.remoteHosts;
+    if (disposed || !remoteHosts) return Promise.resolve();
+
+    const task = startup
+      .measure(`background.remoteStatus.${hostId}`, () => remoteHosts.remoteSnapshot(hostId))
+      .then((statuses) => {
+        const mirrors = deps.store
+          .getState()
+          .worktrees.filter((worktree) => worktree.host === hostId);
+        replaceStatuses(mirrors, statuses);
+        setRemoteError(hostId, remoteHosts.lastError(hostId));
+      })
+      .catch((error: unknown) => {
+        setRemoteError(hostId, asSwarmError(error));
+      });
+    remoteSnapshotsInFlight.set(hostId, task);
+    void task.finally(() => {
+      if (remoteSnapshotsInFlight.get(hostId) === task) remoteSnapshotsInFlight.delete(hostId);
+    });
+    return task;
+  };
+
+  const applySyncResults = (results: Array<{ hostId: HostId; error?: SwarmError }>): void => {
+    for (const result of results) {
+      if (result.error) setRemoteError(result.hostId, result.error);
+    }
+  };
+
+  const syncRemoteHosts = async (): Promise<State> => {
+    if (deps.remoteHosts) applySyncResults(await deps.remoteHosts.syncAll());
+    return deps.state.load();
+  };
+
+  const stopRemoteStatusTimers = (): void => {
+    for (const handle of remoteStatusIntervals.values()) deps.clock.clearInterval(handle);
+    remoteStatusIntervals.clear();
+  };
+
+  const syncRemoteStatusTimers = (): void => {
+    stopRemoteStatusTimers();
+    if (!deps.remoteHosts) return;
+    for (const hostId of Object.keys(currentConfig.hosts)) {
+      remoteStatusIntervals.set(
+        hostId,
+        deps.clock.setInterval(
+          () => {
+            void refreshRemoteStatus(hostId, true);
+          },
+          Math.max(minimumRefreshMs, currentConfig.ui.remoteStatusRefreshMs),
+        ),
+      );
+    }
   };
 
   const hasActiveClone = (): boolean =>
@@ -219,11 +315,15 @@ export function createController(deps: ControllerDeps): Controller {
 
   const refresh = async (): Promise<void> => {
     if (disposed) return;
-    const persisted = await reconcileCloneState();
+    await reconcileCloneState();
+    const persisted = await syncRemoteHosts();
     if (disposed) return;
     dispatch({ type: "hydrate", state: stateFields(persisted) });
     syncClonePolling();
-    await snapshot(persisted.worktrees, false);
+    await Promise.all([
+      snapshot(persisted.worktrees, false),
+      ...Object.keys(currentConfig.hosts).map((hostId) => refreshRemoteStatus(hostId, false)),
+    ]);
   };
 
   const activeContextRepoIds = (): Array<ReturnType<typeof visibleRepos>[number]["id"]> =>
@@ -479,6 +579,7 @@ export function createController(deps: ControllerDeps): Controller {
       }
       stopClonePolling();
       stopHotRefreshTimer();
+      stopRemoteStatusTimers();
 
       try {
         const currentSession = startup
@@ -517,6 +618,18 @@ export function createController(deps: ControllerDeps): Controller {
             if (!disposed) reportError(error);
           });
         void snapshot(persisted.worktrees, true);
+        void startup
+          .measure("controller.remoteSync", syncRemoteHosts)
+          .then(async (synced) => {
+            if (disposed) return;
+            dispatch({ type: "hydrate", state: stateFields(synced) });
+            await Promise.all(
+              Object.keys(currentConfig.hosts).map((hostId) => refreshRemoteStatus(hostId, false)),
+            );
+          })
+          .catch((error: unknown) => {
+            if (!disposed) reportError(error);
+          });
         statusInterval = deps.clock.setInterval(
           () => {
             if (deps.store.getState().operations.length > 0) return;
@@ -524,6 +637,7 @@ export function createController(deps: ControllerDeps): Controller {
           },
           Math.max(minimumRefreshMs, currentConfig.ui.statusRefreshMs),
         );
+        syncRemoteStatusTimers();
         syncHotRefreshTimer();
         void loadPrTabs(["mine", "review"], false, activeContextRepoIds());
       } catch (error) {
@@ -564,7 +678,8 @@ export function createController(deps: ControllerDeps): Controller {
       const worktree = requireWorktree();
       if (!worktree) return;
       try {
-        if (!(await deps.tmux.hasSession(worktree.session))) {
+        const hostId = worktreeHost(worktree);
+        if (hostId === "local" && !(await deps.tmux.hasSession(worktree.session))) {
           toast("info", `${worktree.branch} is already asleep`);
           return;
         }
@@ -574,7 +689,8 @@ export function createController(deps: ControllerDeps): Controller {
           "success",
           `Slept ${worktree.branch}: kept ${report.kept.length}, closed ${report.closed.length}${sessionSummary}`,
         );
-        await snapshot(deps.store.getState().worktrees, false);
+        if (hostId === "local") await snapshot(deps.store.getState().worktrees, false);
+        else await refreshRemoteStatus(hostId, false);
       } catch (error) {
         reportError(error);
       }
@@ -596,7 +712,9 @@ export function createController(deps: ControllerDeps): Controller {
               try {
                 await deps.sessions.kill(worktree);
                 toast("success", `Killed ${worktree.session}`);
-                await snapshot(deps.store.getState().worktrees, false);
+                const hostId = worktreeHost(worktree);
+                if (hostId === "local") await snapshot(deps.store.getState().worktrees, false);
+                else await refreshRemoteStatus(hostId, false);
               } catch (error) {
                 reportError(error);
               }
@@ -608,6 +726,44 @@ export function createController(deps: ControllerDeps): Controller {
 
     async createWorktree(input) {
       const targetId = worktreeId(input.repoId, slugify(input.branch));
+      const hostId = input.host ?? currentConfig.defaultHost;
+      if (hostId !== "local") {
+        const remoteHosts = deps.remoteHosts;
+        const repo = deps.store.getState().repos.find((candidate) => candidate.id === input.repoId);
+        if (!remoteHosts || !repo) {
+          reportError(
+            new SwarmError(
+              "not-found",
+              !repo
+                ? `Repository not found: ${input.repoId}`
+                : `Remote host service is unavailable`,
+            ),
+          );
+          return;
+        }
+        await runOperation({
+          label: "Creating worktree",
+          targetId,
+          success: `Worktree ${input.branch} ready on ${hostId}`,
+          refreshAfterSuccess: false,
+          execute: async (onEvent) => {
+            onEvent({ type: "step", label: `creating on ${hostId}…` });
+            await remoteHosts.create(hostId, {
+              repo,
+              slug: slugify(input.branch),
+              branch: input.branch,
+              baseRef: input.baseRef ?? `origin/${repo.defaultBranch}`,
+            });
+            await remoteHosts.sync(hostId);
+            applySyncResults(await remoteHosts.syncAll());
+            const persisted = await deps.state.load();
+            dispatch({ type: "hydrate", state: stateFields(persisted) });
+            await refreshRemoteStatus(hostId, false);
+          },
+        });
+        return;
+      }
+
       let created: Worktree | undefined;
       let replenishing = false;
       const succeeded = await runOperation({
@@ -685,7 +841,7 @@ export function createController(deps: ControllerDeps): Controller {
             title: "Delete worktree?",
             body: [
               `Path: ${worktree.path}`,
-              `Session: ${status?.session ?? "none"}`,
+              `Session: ${status?.session === "unknown" ? "offline" : (status?.session ?? "none")}`,
               `Running agents: ${status?.running.join(", ") || "none"}`,
             ],
             danger: true,
@@ -712,8 +868,10 @@ export function createController(deps: ControllerDeps): Controller {
       }
       const repoWorktrees = state.worktrees.filter((worktree) => worktree.repoId === repo.id);
       const sessions = repoWorktrees
-        .filter((worktree) => state.statuses[worktree.id]?.session !== "none")
-        .filter((worktree) => state.statuses[worktree.id] !== undefined)
+        .filter((worktree) => {
+          const session = state.statuses[worktree.id]?.session;
+          return session === "attached" || session === "detached";
+        })
         .map((worktree) => worktree.session);
       dispatch({
         type: "openDialog",
@@ -803,11 +961,10 @@ export function createController(deps: ControllerDeps): Controller {
         state.repos.filter((repo) => repo.contextId === id).map((repo) => repo.id),
       );
       const contextWorktrees = state.worktrees.filter((worktree) => repoIds.has(worktree.repoId));
-      const sessionCount = contextWorktrees.filter(
-        (worktree) =>
-          state.statuses[worktree.id]?.session !== undefined &&
-          state.statuses[worktree.id]?.session !== "none",
-      ).length;
+      const sessionCount = contextWorktrees.filter((worktree) => {
+        const session = state.statuses[worktree.id]?.session;
+        return session === "attached" || session === "detached";
+      }).length;
       dispatch({
         type: "openDialog",
         dialog: {
@@ -841,6 +998,7 @@ export function createController(deps: ControllerDeps): Controller {
         await deps.config.save(next);
         currentConfig = next;
         syncHotRefreshTimer();
+        syncRemoteStatusTimers();
         dispatch({ type: "setConfig", config: next });
         dispatch({ type: "closeDialog" });
         toast("success", "Settings saved");
@@ -857,8 +1015,10 @@ export function createController(deps: ControllerDeps): Controller {
       const worktree = requireWorktree();
       if (!worktree) return;
       try {
-        await deps.clipboard.copy(worktree.path);
-        toast("success", `Copied ${worktree.path}`);
+        const hostId = worktreeHost(worktree);
+        const path = hostId === "local" ? worktree.path : `${hostId}:${worktree.path}`;
+        await deps.clipboard.copy(path);
+        toast("success", `Copied ${path}`);
       } catch (error) {
         reportError(error);
       }
@@ -1028,6 +1188,7 @@ export function createController(deps: ControllerDeps): Controller {
       }
       stopClonePolling();
       stopHotRefreshTimer();
+      stopRemoteStatusTimers();
     },
   };
 

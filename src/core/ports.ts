@@ -1,4 +1,12 @@
-import type { Config, PrTab, PullRequest, RemoteRepo, State } from "./types.ts";
+import type {
+  Config,
+  HostConfigEntry,
+  HostId,
+  PrTab,
+  PullRequest,
+  RemoteRepo,
+  State,
+} from "./types.ts";
 
 export interface ShellResult {
   code: number;
@@ -28,6 +36,14 @@ export interface Shell {
     opts?: { cwd?: string; logPath?: string },
   ): Promise<number>;
   exec(cmd: string, args: string[]): Promise<never>;
+}
+
+export interface RemoteHostPort {
+  run(
+    host: HostConfigEntry & { id: HostId },
+    args: string[],
+    opts?: { timeoutMs?: number },
+  ): Promise<ShellResult>;
 }
 
 export type UpdateEvent = { type: "step"; label: string } | { type: "log"; line: string };
@@ -117,13 +133,19 @@ export interface TmuxPort {
   listSessions(): Promise<TmuxSession[]>;
   listWindows(session?: string): Promise<TmuxWindow[]>;
   hasSession(name: string): Promise<boolean>;
-  newSession(opts: { name: string; cwd: string; windowName: string }): Promise<void>;
+  newSession(opts: {
+    name: string;
+    windowName: string;
+    cwd?: string;
+    command?: string;
+  }): Promise<void>;
   newWindow(opts: { session: string; name: string; cwd: string }): Promise<number>;
   sendKeys(target: string, keys: string[], opts?: { enter?: boolean }): Promise<void>;
   swapWindows(session: string, a: number, b: number): Promise<void>;
   selectWindow(session: string, index: number): Promise<void>;
   killWindow(session: string, index: number): Promise<void>;
   killSession(name: string): Promise<void>;
+  killSessionIfPresent(name: string): Promise<void>;
   switchClient(session: string): Promise<void>;
   attach(session: string): Promise<never>;
   displayMessage(msg: string): Promise<void>;

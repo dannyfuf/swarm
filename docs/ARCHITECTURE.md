@@ -14,12 +14,14 @@ change a contract without recording it in `INTEGRATION NOTES`.
   *pristine*: nobody works in it. It is only fetched and reset to the remote.
 - **Worktree**: a copy-on-write copy of the base (`worktreesDir/<owner>/<name>/<slug>`)
   with its own branch, and exactly one tmux session named `<name>/<slug>`.
-  Not a `git worktree`: a full independent copy (APFS `cp -c` clonefile / reflink).
+  Its plain id is globally unique across hosts. Not a `git worktree`: a full independent copy
+  (APFS `cp -c` clonefile / reflink).
 - **Prepared-copy pool**: zero or more pristine-base copies with repo `prepare` hooks already run.
   Creation claims the lowest slot by rename and immediately replenishes it from the base clone.
 - **Mount** a worktree = ensure its tmux session exists with the configured windows, resolving
   `{agent}` to the selected coding agent's configured start command (default: `nvim`,
   `cc` → `claude`, `lg` → `lazygit`), and switch the client to it.
+  Remote proxy reuse additionally requires a single pane whose current command is `ssh`.
 - **Unmount / sleep** a worktree = apply the sleep policy to its session: keep windows whose
   process tree matches a keep-alive rule (default: `claude`, `opencode`, `codex`, and any
   process listening on a TCP port); gracefully close the rest (nvim gets `:qa`; if it refuses
@@ -66,7 +68,8 @@ PATH binary needs a version-probe process.
 ```
 bin/swarm                 launcher (runs dist or src, restarts in place when the TUI returns 75)
 tmux/tmux.conf            full tmux config (theme, persistence) with swarm and persistent agent popup bindings
-src/main.ts               CLI entry: `swarm` (TUI), `swarm open <repo>/<slug>`, `swarm sleep <session>`, `swarm agent [claude|opencode]`, `swarm doctor`
+src/main.ts               thin CLI entry: TUI/open/sleep/agent/doctor plus JSON list/create/delete/kill/status protocol commands
+src/cli/protocol.ts       host-agnostic protocol handlers shared by local CLI execution and remote transport
 src/core/                 contracts and pure helpers; no I/O
   types.ts                domain zod schemas + inferred types, agent names, window resolution (section 4)
   ports.ts                infrastructure port interfaces (section 5)
@@ -74,9 +77,12 @@ src/core/                 contracts and pure helpers; no I/O
   app.ts                  AppState, Action, Store, Keymap contracts (section 7)
   fuzzy.ts                pure fuzzy matching shared by services and UI
   paths.ts                pure helpers: swarmHome(), installRoot(), slugify(), sessionName(), repoId(), worktreeId()
+  remote.ts               POSIX argument quoting and interactive SSH proxy command helper
   errors.ts               SwarmError with `code` union
 src/adapters/             one file per port, shell-based; each has *.test.ts using FakeShell
+  remoteHost.ts           BatchMode SSH transport + POSIX quoting; 30s short-command timeout
 src/services/             one file per service interface; tests use fakes from src/testing
+  remoteHosts.ts          versioned JSON client, mirror reconciliation, and remote status fallback
   agentPopup.ts           agent-name re-exports, resolved-command argv, tmux attach argv/socket parsing, and env stripping
 src/app/                  store.ts (createStore), keymap.ts, controller.ts (wires services→store)
 src/ui/                   OpenTUI React components; depends only on src/core
@@ -102,6 +108,7 @@ leaving the agent and scrollback alive; reopening the same binding reattaches to
 export const ContextId = z.string().regex(/^[a-z0-9][a-z0-9-]*$/);
 export const RepoId = z.string().regex(/^[^/\s]+\/[^/\s]+$/);        // "owner/name"
 export const WorktreeId = z.string().regex(/^[^/\s]+\/[^/\s]+#[^\s#]+$/); // "owner/name#slug"
+export const HostId = z.string().regex(/^[a-z0-9-]+$/);               // "local" is reserved
 
 export const ContextSchema = z.object({
   id: ContextId,                 // slug of name
@@ -139,6 +146,7 @@ export const WorktreeSchema = z.object({
   baseRef: z.string(),           // e.g. "origin/main"
   path: z.string(),              // absolute
   session: z.string(),           // tmux session name = sessionName(repo.name, slug)
+  host: z.string().optional(),   // placement; absent means local
   createdAt: z.string().datetime(),
   lastOpenedAt: z.string().datetime().optional(),
 });
@@ -167,6 +175,8 @@ export const SleepPolicySchema = z.object({
 export const ConfigSchema = z.object({
   version: z.literal(1),
   reposDir: z.string(), worktreesDir: z.string(),       // absolute; defaults under SWARM_HOME
+  hosts: z.record(HostId, z.object({ ssh: z.string(), swarmCommand: z.string().default("swarm") })).default({}),
+  defaultHost: z.string().default("local"),             // refined to local or a configured host
   hotPoolSize: z.number().int().nonnegative().default(1),
   hotFreshnessMs: z.number().int().nonnegative().default(60000),
   hotRefreshIntervalMs: z.number().int().nonnegative().default(300000),
@@ -181,7 +191,10 @@ export const ConfigSchema = z.object({
     cacheTtlSeconds: z.number().int().default(3600),
     cloneProtocol: z.enum(["ssh", "https"]).default("ssh"),
   }).default({ cacheTtlSeconds: 3600, cloneProtocol: "ssh" }),
-  ui: z.object({ statusRefreshMs: z.number().int().default(2000) }).default({ statusRefreshMs: 2000 }),
+  ui: z.object({
+    statusRefreshMs: z.number().int().default(2000),
+    remoteStatusRefreshMs: z.number().int().positive().default(10000),
+  }).default({ statusRefreshMs: 2000, remoteStatusRefreshMs: 10000 }),
 });
 export function defaultConfig(home: string): Config;   // fills all defaults
 export function defaultState(): State;
@@ -191,7 +204,7 @@ export function resolveWindowCommand(spec: WindowSpec, config: Pick<Config, "age
 export function resolveWindows(config: Pick<Config, "agent" | "agentCommands" | "windows">): WindowSpec[];
 
 // Runtime (computed, never persisted)
-export type SessionState = "none" | "detached" | "attached";
+export type SessionState = "none" | "detached" | "attached" | "unknown";
 export interface WorktreeStatus {
   worktreeId: WorktreeId;
   session: SessionState;
@@ -202,7 +215,7 @@ export interface RemoteRepo { owner: string; name: string; fullName: string; des
 ```
 
 Errors (`src/core/errors.ts`): `class SwarmError extends Error { code: ErrorCode; cause?: unknown }`,
-`ErrorCode = "not-found" | "conflict" | "git" | "tmux" | "fs" | "github" | "validation" | "cancelled" | "unsupported"`.
+`ErrorCode = "not-found" | "conflict" | "git" | "tmux" | "fs" | "github" | "remote" | "validation" | "cancelled" | "unsupported"`.
 
 Pure helpers (`src/core/paths.ts`):
 - `swarmHome(env)` → `env.SWARM_HOME ?? join(env.HOME, ".swarm")`
@@ -263,7 +276,7 @@ export interface TmuxPort {
   listSessions(): Promise<TmuxSession[]>;
   listWindows(session?: string): Promise<TmuxWindow[]>;   // one `list-panes -a` call, grouped; session filter optional
   hasSession(name: string): Promise<boolean>;
-  newSession(opts: { name: string; cwd: string; windowName: string }): Promise<void>;   // detached, shell only
+  newSession(opts: { name: string; windowName: string; cwd?: string; command?: string }): Promise<void>; // command is used by SSH proxies
   newWindow(opts: { session: string; name: string; cwd: string }): Promise<number>;     // returns index; shell only
   sendKeys(target: string, keys: string[], opts?: { enter?: boolean }): Promise<void>;
   swapWindows(session: string, a: number, b: number): Promise<void>;
@@ -290,6 +303,9 @@ export interface StatePort  { load(): Promise<State>;  save(state: State): Promi
 export interface ConfigPort { load(): Promise<Config>; save(config: Config): Promise<void> }
 export interface Clock { now(): Date; setInterval(callback: () => void, intervalMs: number): unknown; clearInterval(handle: unknown): void }
 export interface Clipboard { copy(text: string): Promise<void> }   // pbcopy / xclip / wl-copy
+export interface RemoteHostPort {
+  run(host: HostConfigEntry & {id: HostId}, args: string[], opts?: {timeoutMs?: number}): Promise<ShellResult>;
+}
 ```
 
 ## 6. Services (`src/core/services.ts`)
@@ -314,7 +330,7 @@ export interface ContextService {
 export interface RepoService {
   list(contextId?: ContextId): Promise<Repo[]>;
   searchRemote(contextId: ContextId, query: string, opts?: { refresh?: boolean; signal?: AbortSignal }): Promise<RemoteRepo[]>; // fuzzy over cached owners lists, excludes already-cloned
-  clone(remote: RemoteRepo, contextId: ContextId, onEvent?: OnEvent): Promise<CloneJob>; // persists, then launches detached using github.cloneProtocol
+  clone(remote: RemoteRepo, contextId: ContextId, onEvent?: OnEvent, opts?: {url?: string}): Promise<CloneJob>; // persists, then launches detached using github.cloneProtocol unless URL is explicitly overridden
   reconcileClones(): Promise<CloneJob[]>; // running pid stays pending; completed .git is promoted; missing .git becomes failed
   assign(repoId: RepoId, contextId: ContextId): Promise<Repo>;
   delete(repoId: RepoId, onEvent?: OnEvent): Promise<void>;                    // kills sessions, trashes worktrees + base
@@ -327,7 +343,7 @@ export interface WorktreeService {
   prepareHotCopy(repoId: RepoId, onEvent?: OnEvent, opts?: { signal?: AbortSignal }): Promise<void>;
   refreshPreparedCopy(repoId: RepoId, opts?: { signal?: AbortSignal; skipIfFresh?: boolean }): Promise<void>;
   awaitPendingRefresh(repoId: RepoId): Promise<void>;
-  create(input: { repoId: RepoId; branch: string; baseRef?: string; source?: { kind: "pull"; number: number } }, onEvent?: OnEvent): Promise<Worktree>;
+  create(input: { repoId: RepoId; branch: string; slug?: string; baseRef?: string; source?: { kind: "pull"; number: number } }, onEvent?: OnEvent): Promise<Worktree>;
     // fast: rename lowest slot → private attempt → refresh/checkout/hooks → publish+persist
     // fallback: cloneTree(base, private attempt) → refresh/checkout/hooks → publish+persist
   runPostCreateHooks(worktreeId: WorktreeId, onEvent?: OnEvent): Promise<void>;
@@ -347,7 +363,18 @@ export interface SessionService {
 }
 export interface UnmountReport { kept: Array<{ window: string; reason: string }>; closed: string[]; sessionKilled: boolean }
 export interface StatusService {
-  snapshot(worktrees: Worktree[]): Promise<Map<WorktreeId, WorktreeStatus>>;  // 1 tmux call + 1 ps + ≤1 lsof
+  snapshot(worktrees: Worktree[]): Promise<Map<WorktreeId, WorktreeStatus>>;  // local only: 1 tmux call + 1 ps + ≤1 lsof
+}
+export interface RemoteHostService {
+  list(hostId: HostId): Promise<{protocol: number; version: string; repos: Repo[]; worktrees: Worktree[]}>;
+  create(hostId: HostId, input: {repo: Repo; slug: string; branch: string; baseRef: string}): Promise<Worktree>;
+  delete(hostId: HostId, worktreeId: WorktreeId): Promise<void>;
+  kill(hostId: HostId, worktreeId: WorktreeId): Promise<void>;
+  sleep(hostId: HostId, session: string): Promise<UnmountReport>;
+  status(hostId: HostId): Promise<WorktreeStatus[]>;
+  sync(hostId: HostId): Promise<Worktree[]>;
+  syncAll(): Promise<Array<{hostId: HostId; error?: SwarmError}>>;
+  remoteSnapshot(hostId: HostId): Promise<Map<WorktreeId, WorktreeStatus>>;
 }
 export interface FuzzyMatch<T> { item: T; score: number; positions: number[] }
 export type FuzzyFilter = <T>(query: string, items: T[], key: (t: T) => string) => FuzzyMatch<T>[];
@@ -484,6 +511,25 @@ Default keep-alive rules: `{id:"claude", label:"claude", kind:"process", pattern
 `{id:"opencode", pattern:"(^|/)opencode( |$)"}`, `{id:"codex", pattern:"(^|/)codex( |$)"}`,
 `{id:"servers", label:"server", kind:"listening-port"}`.
 
+### Remote hosts and status split
+
+`RemoteHostPort` is the only SSH boundary. Its adapter invokes non-interactive commands with
+`BatchMode=yes`, a five-second connect timeout, and control sockets under
+`$SWARM_HOME/cache/ssh`; remote argv elements are POSIX-single-quoted into one SSH command.
+`RemoteHostService` validates every JSON protocol envelope, translates transport/protocol/remote
+errors, and atomically replaces one host's mirrors through `stateMutation.ts`.
+
+Remote sessions are local tmux proxies named `<host>/<remote session>`. Their single `ssh` window
+starts with the interactive SSH command as the `tmux new-session` command, so no configured local
+windows or `send-keys` agent command is applied. Sleep delegates remotely and preserves the proxy;
+kill and delete remove it after the remote operation succeeds.
+
+`StatusService.snapshot` observes only local worktrees and never performs network I/O.
+`RemoteHostService.remoteSnapshot` separately calls `status --json`, filters results to that host's
+mirrors, and returns `unknown` statuses when the host fails. The controller polls those lanes per
+host at `ui.remoteStatusRefreshMs`, merges them with local status, and stores one deduplicated last
+error per host for the TUI.
+
 ## 7. App layer (`src/core/app.ts`) — UI contract
 
 ```ts
@@ -491,7 +537,7 @@ export type Pane = "repos" | "worktrees";
 export type Mode = "normal" | "filter" | "dialog";
 export type DialogKind =
   | { kind: "confirm"; title: string; body: string[]; danger?: boolean; confirmLabel?: string; onConfirm: () => void }
-  | { kind: "create-worktree"; repoId: RepoId; generation: number; branches: string[]; fetching: boolean }
+  | { kind: "create-worktree"; repoId: RepoId; generation: number; branches: string[]; fetching: boolean; host: HostId | "local" }
   | { kind: "clone-repo"; contextId: ContextId }
   | { kind: "context-form"; contextId?: ContextId }
   | { kind: "assign-context"; repoId: RepoId }
@@ -501,6 +547,7 @@ export interface Operation { id: string; label: string; step: string; log: strin
 export interface AppState {
   contexts: Context[]; repos: Repo[]; clones: CloneJob[]; worktrees: Worktree[];
   statuses: Record<WorktreeId, WorktreeStatus>;
+  remoteErrors: Partial<Record<HostId, string>>;
   activeContextId?: ContextId;
   pane: Pane; mode: Mode;
   repoCursor: number;             // 0 = "All" pseudo row; n > 0 selects visibleRepos[n - 1]
@@ -520,6 +567,7 @@ export interface Store {
 export type Action =                                    // pure reducer in src/app/store.ts
   | { type: "hydrate"; state: Partial<AppState> }
   | { type: "statuses"; statuses: Record<WorktreeId, WorktreeStatus> }
+  | { type: "remoteError"; hostId: HostId; error?: string }
   | { type: "move"; pane?: Pane; delta: number } | { type: "moveTo"; pane?: Pane; index: number }
   | { type: "focus"; pane: Pane } | { type: "setMode"; mode: Mode }
   | { type: "setFilter"; filter: string } | { type: "setContext"; contextId: ContextId }
@@ -540,7 +588,7 @@ export interface Controller {                           // src/app/controller.ts
   setContext(id: ContextId): Promise<void>;              // persist active context, then update the store
   openSelected(opts?: { sleepPrevious?: boolean }): Promise<void>;   // on success → resolves; UI exits process
   sleepSelected(): Promise<void>; killSelected(): Promise<void>;
-  createWorktree(input: { repoId: RepoId; branch: string; baseRef?: string }): Promise<void>;
+  createWorktree(input: { repoId: RepoId; branch: string; baseRef?: string; host?: HostId }): Promise<void>;
   remoteBranches(repoId: RepoId): Promise<string[]>;
   refreshPreparedCopy(repoId: RepoId): void;              // fire-and-forget dialog pre-fetch
   deleteSelected(): Promise<void>;                      // opens confirm dialog with impact summary
@@ -620,8 +668,26 @@ The `new` command opens the worktree dialog immediately with locally known base 
 Completion re-lists remote branches and dispatches `updateCreateWorktreeBranches`; the reducer
 applies it only if the same repo and dialog-open generation are still active, so closing and
 reopening the same repository cannot accept an older completion.
+The dialog fields are branch, optional host (only when hosts are configured), and base ref. Remote
+worktree rows append an `@host` badge, while their detail pane includes the host, `host:path`, and
+the latest one-line host error when offline.
 
 ## 10. Integration notes
+
+- 2026-09-03: Remote-host phase 2 adds the multiplexed SSH port/adapter, validated protocol client,
+  atomic per-host mirror sync, command-backed tmux proxy sessions, host-aware worktree/session
+  routing, split local/remote status polling, background controller sync, remote creation progress,
+  host doctor checks, and `host:path` clipboard values. `AppState.remoteErrors` carries the latest
+  per-host failure and `Controller.createWorktree` accepts optional `host`. Successful JSON sleep
+  output now includes `protocol`, and sleep intentionally keeps the proxy alive while kill/delete
+  remove it.
+- 2026-09-03: Remote-host phase 1 adds optional worktree placement (`host`, absent = `local`),
+  validated host configuration, the unreachable `unknown` session state, and protocol version 1
+  JSON handlers for list/create/delete/kill/status. `src/core/protocol.ts` exports
+  `PROTOCOL_VERSION`; `src/cli/protocol.ts` exports typed commands, responses, error envelopes, and
+  `handleProtocolCommand`. CLI create may supply an explicit slug and clone URL while still using
+  the existing repository reconciliation and worktree publication services. SSH transport, mirrors,
+  remote status polling, proxy sessions, and host-aware TUI actions remain phase 2 work.
 
 - 2026-09-03: Merge reconciliation keeps detached hot-copy preparation from #13 while extending it
   to the numbered pool: each worker copies to its slot staging path, runs prepare hooks, writes the

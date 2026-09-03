@@ -3,6 +3,7 @@ import type {
   Config,
   Context,
   ContextId,
+  HostId,
   PrRepoSlice,
   PrTab,
   PullRequest,
@@ -32,6 +33,7 @@ export type DialogKind =
       generation: number;
       branches: string[];
       fetching: boolean;
+      host: HostId | "local";
     }
   | { kind: "clone-repo"; contextId: ContextId }
   | { kind: "context-form"; contextId?: ContextId }
@@ -61,6 +63,7 @@ export interface AppState {
   clones: CloneJob[];
   worktrees: Worktree[];
   statuses: Record<WorktreeId, WorktreeStatus>;
+  remoteErrors: Partial<Record<HostId, string>>;
   activeContextId?: ContextId;
   screen: "main" | "prs";
   prTab: PrTab;
@@ -91,6 +94,7 @@ export interface Store {
 export type Action =
   | { type: "hydrate"; state: Partial<AppState> }
   | { type: "statuses"; statuses: Record<WorktreeId, WorktreeStatus> }
+  | { type: "remoteError"; hostId: HostId; error?: string }
   | { type: "move"; pane?: Pane; delta: number }
   | { type: "moveTo"; pane?: Pane; index: number }
   | { type: "focus"; pane: Pane }
@@ -146,7 +150,12 @@ export interface Controller {
   openSelected(opts?: { sleepPrevious?: boolean }): Promise<void>;
   sleepSelected(): Promise<void>;
   killSelected(): Promise<void>;
-  createWorktree(input: { repoId: RepoId; branch: string; baseRef?: string }): Promise<void>;
+  createWorktree(input: {
+    repoId: RepoId;
+    branch: string;
+    baseRef?: string;
+    host?: HostId;
+  }): Promise<void>;
   remoteBranches(repoId: RepoId): Promise<string[]>;
   refreshPreparedCopy(repoId: RepoId): void;
   deleteSelected(): Promise<void>;

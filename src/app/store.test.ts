@@ -183,6 +183,7 @@ describe("reduce", () => {
         generation: 2,
         branches: ["origin/main"],
         fetching: true,
+        host: "local",
       },
     });
 

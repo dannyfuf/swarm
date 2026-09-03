@@ -259,6 +259,34 @@ describe("createRepoService", () => {
     assert.equal(state.state.clones[0]?.url, httpsUrl);
   });
 
+  test("uses an explicit clone URL override for protocol callers", async () => {
+    const state = createMemoryState(
+      makeState({ contexts: [contexts[0]], repos: [], worktrees: [], activeContextId: "buk" }),
+    );
+    const git = createFakeGit();
+    const service = createRepoService({
+      state,
+      config: createMemoryConfig({
+        ...fixtureConfig,
+        github: { ...fixtureConfig.github, cloneProtocol: "https" },
+      }),
+      github: createFakeGithub(),
+      git,
+      process: createFakeProcess(),
+      files: createFakeFiles(),
+      worktreeService: createWorktreeStub(),
+      clock: createFixedClock(),
+      logger: createNullLogger(),
+    });
+    const url = "ssh://git@example.test/bukhr/benefits.git";
+
+    const cloned = await service.clone(remoteRepos[0], "buk", undefined, { url });
+
+    assert.equal(git.calls.find(({ method }) => method === "cloneDetached")?.args[0], url);
+    assert.equal(cloned.url, url);
+    assert.equal(state.state.clones[0]?.url, url);
+  });
+
   test("rejects clone conflicts and marks an exited partial clone as failed", async () => {
     const conflictFiles = createFakeFiles();
     const conflictService = createRepoService({

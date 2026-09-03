@@ -217,6 +217,7 @@ export function App({ store, controller, onExit, home = process.env.HOME ?? "" }
             generation: ++dialogGeneration.current,
             branches: knownBaseRefs(current, repo),
             fetching: true,
+            host: current.config.defaultHost,
           },
         });
         controller.refreshPreparedCopy(repo.id);

@@ -3,6 +3,7 @@ import { useMemo, useRef, useState } from "react";
 import type { Controller, DialogKind, Store } from "../../core/app.ts";
 import { fuzzyFilter } from "../../core/fuzzy.ts";
 import { slugify } from "../../core/paths.ts";
+import type { HostId } from "../../core/types.ts";
 import { LinesView } from "../components/LineView.tsx";
 import { isEnter, isEscape, isListDown, isListUp, isTab, toKeyEvent } from "../keys.ts";
 import { cell, highlight, type Line, truncate } from "../text.ts";
@@ -10,6 +11,7 @@ import { glyphs, theme } from "../theme.ts";
 import { DialogFrame, FieldLabel, SectionLabel, Spacer, TextField } from "./chrome.tsx";
 
 type CreateWorktree = Extract<DialogKind, { kind: "create-worktree" }>;
+type Field = "branch" | "host" | "base";
 
 const VISIBLE_BRANCHES = 6;
 
@@ -28,7 +30,13 @@ export function CreateWorktreeDialog({
 
   const [branch, setBranch] = useState("");
   const [baseQuery, setBaseQuery] = useState("");
-  const [field, setField] = useState<"branch" | "base">("branch");
+  const hostOptions = useMemo(
+    () => ["local", ...Object.keys(state.config.hosts).sort()] as Array<HostId | "local">,
+    [state.config.hosts],
+  );
+  const hasHosts = hostOptions.length > 1;
+  const [host, setHost] = useState<HostId | "local">(dialog.host);
+  const [field, setField] = useState<Field>("branch");
   const [cursor, setCursor] = useState(0);
   const submitted = useRef(false);
 
@@ -46,7 +54,27 @@ export function CreateWorktreeDialog({
     if (branch.trim() === "" || submitted.current) return;
     submitted.current = true;
     close();
-    void controller.createWorktree({ repoId: dialog.repoId, branch: branch.trim(), baseRef });
+    void controller.createWorktree({
+      repoId: dialog.repoId,
+      branch: branch.trim(),
+      baseRef,
+      ...(host === "local" ? {} : { host }),
+    });
+  };
+
+  const cycleField = (delta: number) => {
+    const fields: Field[] = hasHosts ? ["branch", "host", "base"] : ["branch", "base"];
+    setField((current) => {
+      const index = fields.indexOf(current);
+      return fields[(index + delta + fields.length) % fields.length] ?? "branch";
+    });
+  };
+
+  const cycleHost = (delta: number) => {
+    setHost((current) => {
+      const index = Math.max(0, hostOptions.indexOf(current));
+      return hostOptions[(index + delta + hostOptions.length) % hostOptions.length] ?? "local";
+    });
   };
 
   useKeyboard((raw) => {
@@ -58,7 +86,7 @@ export function CreateWorktreeDialog({
     }
     if (isTab(event)) {
       raw.preventDefault();
-      setField((current) => (current === "branch" ? "base" : "branch"));
+      cycleField(event.shift ? -1 : 1);
       return;
     }
     if (isEnter(event)) {
@@ -76,6 +104,11 @@ export function CreateWorktreeDialog({
       raw.preventDefault();
       setField("base");
       setCursor((value) => Math.max(0, value - 1));
+      return;
+    }
+    if (field === "host" && (event.name === "left" || event.name === "right")) {
+      raw.preventDefault();
+      cycleHost(event.name === "left" ? -1 : 1);
     }
   });
 
@@ -123,6 +156,7 @@ export function CreateWorktreeDialog({
       hints={[
         { key: glyphs.tab, label: "field" },
         { key: glyphs.enter, label: "create" },
+        ...(hasHosts ? [{ key: "←→", label: "host" }] : []),
         { key: "↑↓", label: "base ref" },
         { key: "Esc", label: "cancel" },
       ]}
@@ -136,6 +170,26 @@ export function CreateWorktreeDialog({
         onInput={setBranch}
       />
       <LinesView lines={preview} />
+      {hasHosts ? (
+        <>
+          <Spacer />
+          <LinesView
+            lines={[
+              [
+                cell(field === "host" ? ` ${glyphs.cursor} ` : "   ", {
+                  fg: field === "host" ? theme.accent : theme.dim,
+                  bold: field === "host",
+                }),
+                cell("Host: ", {
+                  fg: field === "host" ? theme.strong : theme.dim,
+                  bold: field === "host",
+                }),
+                cell(`< ${host} >`, { fg: theme.cyan, bold: field === "host" }),
+              ],
+            ]}
+          />
+        </>
+      ) : null}
       <Spacer />
       <FieldLabel text={`Base ref ${glyphs.sep} ${baseRef}`} focused={field === "base"} />
       <TextField

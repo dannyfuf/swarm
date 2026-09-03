@@ -5,7 +5,9 @@ import {
   hotCopyPidPath,
   hotCopyStagingPath,
   installRoot,
+  isWorktreeSlug,
   parseWorktreeId,
+  proxySessionName,
   repoId,
   repoPath,
   sessionName,
@@ -38,8 +40,16 @@ describe("path helpers", () => {
     assert.equal(slugify(" spaces / everywhere "), "spaces-everywhere");
   });
 
+  test("validates explicit protocol worktree slugs", () => {
+    assert.equal(isWorktreeSlug("feat-payroll_fix.2"), true);
+    assert.equal(isWorktreeSlug("../escape"), false);
+    assert.equal(isWorktreeSlug(".hot"), false);
+    assert.equal(isWorktreeSlug("Uppercase"), false);
+  });
+
   test("creates tmux-safe session names, including dotted repos", () => {
     assert.equal(sessionName("foo.js", "feat.thing:one"), "foo-js/feat-thing-one");
+    assert.equal(proxySessionName("devbox", "foo.js/feat:one"), "devbox/foo-js/feat-one");
   });
 
   test("creates and parses identifiers", () => {
