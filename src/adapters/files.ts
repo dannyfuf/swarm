@@ -18,6 +18,34 @@ function isNotFound(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
 }
 
+function cloneArgs(platform: NodeJS.Platform, src: string, dest: string): string[] {
+  return platform === "darwin"
+    ? ["-Rc", src, dest]
+    : platform === "linux"
+      ? ["-R", "--reflink=auto", src, dest]
+      : ["-R", src, dest];
+}
+
+function detachedCloneScript(platform: NodeJS.Platform): string {
+  const copy =
+    platform === "darwin" ? "cp -Rc" : platform === "linux" ? "cp -R --reflink=auto" : "cp -R";
+  return `source_path=$1
+staging_path=$2
+hot_path=$3
+pid_path=$4
+cleanup() {
+  status=$?
+  trap - EXIT HUP INT TERM
+  if [ "$status" -ne 0 ]; then rm -rf "$staging_path"; fi
+  rm -f "$pid_path"
+  exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+printf '%s\\n' "$$" > "$pid_path"
+${copy} "$source_path" "$staging_path" && mv "$staging_path" "$hot_path"`;
+}
+
 export function createFiles(
   shell: Shell,
   logger: Logger,
@@ -64,12 +92,7 @@ export function createFiles(
     },
 
     async cloneTree(src, dest): Promise<void> {
-      const args =
-        platform === "darwin"
-          ? ["-Rc", src, dest]
-          : platform === "linux"
-            ? ["-R", "--reflink=auto", src, dest]
-            : ["-R", src, dest];
+      const args = cloneArgs(platform, src, dest);
       const result = await shell
         .run("cp", args)
         .catch((error: unknown) => fail(`Could not clone ${src} to ${dest}`, error));
@@ -83,6 +106,18 @@ export function createFiles(
         await access(dest);
       } catch (error) {
         fail(`Clone destination was not created at ${dest}`, error);
+      }
+    },
+
+    async cloneTreeDetached(src, staging, dest, pidPath, logPath): Promise<number> {
+      try {
+        return await shell.spawnDetached(
+          "sh",
+          ["-c", detachedCloneScript(platform), "swarm-hot-copy", src, staging, dest, pidPath],
+          { logPath },
+        );
+      } catch (error) {
+        return fail(`Could not start detached clone ${src} to ${dest}`, error);
       }
     },
 

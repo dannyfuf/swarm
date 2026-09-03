@@ -1,12 +1,22 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, test } from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
 import { SwarmError } from "../core/errors.ts";
 import { createFakeShell } from "../testing/fakeShell.ts";
 import { createNullLogger } from "../testing/nullLogger.ts";
 import { createFiles } from "./files.ts";
+import { createShell } from "./shell.ts";
+
+async function waitUntil(predicate: () => Promise<boolean>): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (await predicate()) return;
+    await delay(10);
+  }
+  throw new Error("Timed out waiting for detached file operation");
+}
 
 describe("files adapter", () => {
   test("uses platform-specific clone argv and verifies the destination", async () => {
@@ -31,6 +41,87 @@ describe("files adapter", () => {
           [["cp", expectedArgs]],
         );
       }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("launches copy and atomic publish as one detached shell job", async () => {
+    const cases: Array<[NodeJS.Platform, string]> = [
+      ["darwin", 'cp -Rc "$source_path" "$staging_path"'],
+      ["linux", 'cp -R --reflink=auto "$source_path" "$staging_path"'],
+      ["win32", 'cp -R "$source_path" "$staging_path"'],
+    ];
+
+    for (const [platform, expectedCopy] of cases) {
+      const shell = createFakeShell();
+      const files = createFiles(shell, createNullLogger(), platform);
+      const pid = await files.cloneTreeDetached(
+        "/repo",
+        "/worktrees/owner/repo/.hot.staging",
+        "/worktrees/owner/repo/.hot",
+        "/worktrees/owner/repo/.hot.staging.pid",
+        "/logs/hot-copy-owner-repo.log",
+      );
+
+      assert.equal(pid, 4242);
+      const call = shell.detachedCalls[0];
+      assert.equal(call?.cmd, "sh");
+      assert.deepEqual(call?.args.slice(0, 2), ["-c", call.args[1]]);
+      assert.deepEqual(call?.args.slice(2), [
+        "swarm-hot-copy",
+        "/repo",
+        "/worktrees/owner/repo/.hot.staging",
+        "/worktrees/owner/repo/.hot",
+        "/worktrees/owner/repo/.hot.staging.pid",
+      ]);
+      assert.deepEqual(call?.opts, { logPath: "/logs/hot-copy-owner-repo.log" });
+      const script = call?.args[1] ?? "";
+      assert.equal(script.includes(expectedCopy), true);
+      assert.match(script, /&& mv "\$staging_path" "\$hot_path"/u);
+      assert.match(script, /if \[ "\$status" -ne 0 \]; then rm -rf "\$staging_path"; fi/u);
+      assert.match(script, /printf '%s\\n' "\$\$" > "\$pid_path"/u);
+    }
+  });
+
+  test("detached clone publishes complete output and removes staging after failure", async () => {
+    const root = await mkdtemp(join(tmpdir(), "swarm-files-detached-"));
+    try {
+      const source = join(root, "source");
+      const staging = join(root, ".hot.staging");
+      const hot = join(root, ".hot");
+      const pidPath = join(root, ".hot.staging.pid");
+      const logPath = join(root, "hot-copy.log");
+      await mkdir(source);
+      await writeFile(join(source, "complete.txt"), "complete");
+      const files = createFiles(createShell(createNullLogger()), createNullLogger());
+
+      await files.cloneTreeDetached(source, staging, hot, pidPath, logPath);
+      await waitUntil(
+        async () =>
+          (await files.exists(join(hot, "complete.txt"))) && !(await files.exists(pidPath)),
+      );
+      assert.equal(await files.exists(staging), false);
+      assert.equal(await files.exists(pidPath), false);
+      assert.equal(await readFile(join(hot, "complete.txt"), "utf8"), "complete");
+
+      const failedStaging = join(root, ".failed.staging");
+      const failedHot = join(root, ".failed");
+      const failedPid = join(root, ".failed.pid");
+      await mkdir(failedStaging);
+      await writeFile(join(failedStaging, "partial.txt"), "partial");
+      await files.cloneTreeDetached(
+        join(root, "missing-source"),
+        failedStaging,
+        failedHot,
+        failedPid,
+        logPath,
+      );
+      await waitUntil(
+        async () => !(await files.exists(failedStaging)) && !(await files.exists(failedPid)),
+      );
+      assert.equal(await files.exists(failedHot), false);
+      assert.equal(await files.exists(failedPid), false);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

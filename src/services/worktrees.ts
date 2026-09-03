@@ -2,6 +2,7 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import { SwarmError } from "../core/errors.ts";
 import {
   hotCopyPath,
+  hotCopyPidPath,
   hotCopyStagingPath,
   worktreeId as makeWorktreeId,
   sessionName,
@@ -14,6 +15,7 @@ import type {
   FilesPort,
   GitPort,
   Logger,
+  ProcessPort,
   Shell,
   StatePort,
   TmuxPort,
@@ -30,6 +32,7 @@ export interface WorktreeServiceDependencies {
   files: FilesPort;
   tmux: TmuxPort;
   shell: Shell;
+  process: ProcessPort;
   clock: Clock;
   logger: Logger;
   home?: string;
@@ -65,6 +68,14 @@ function assertWorktreePath(
   }
 }
 
+const HOT_COPY_POLL_MS = 100;
+
+function parsePid(value: string | null): number | undefined {
+  if (!value || !/^\d+\s*$/u.test(value)) return undefined;
+  const pid = Number.parseInt(value, 10);
+  return Number.isSafeInteger(pid) && pid > 0 ? pid : undefined;
+}
+
 export function createWorktreeService({
   state,
   config,
@@ -72,11 +83,34 @@ export function createWorktreeService({
   files,
   tmux,
   shell,
+  process,
   clock,
   logger,
   home,
 }: WorktreeServiceDependencies): WorktreeService {
   const preparations = new Map<RepoId, Promise<void>>();
+  const cancelPolls = new Set<() => void>();
+  let disposed = false;
+
+  const waitForPoll = async (): Promise<void> => {
+    if (disposed) return;
+    await new Promise<void>((resolveWait) => {
+      let settled = false;
+      const finish = (): void => {
+        if (settled) return;
+        settled = true;
+        cancelPolls.delete(cancel);
+        resolveWait();
+      };
+      const timer = setTimeout(finish, HOT_COPY_POLL_MS);
+      timer.unref();
+      const cancel = (): void => {
+        clearTimeout(timer);
+        finish();
+      };
+      cancelPolls.add(cancel);
+    });
+  };
 
   const loadState = async (): Promise<State> => {
     try {
@@ -200,24 +234,78 @@ export function createWorktreeService({
       if (existing) return existing;
 
       const preparation = (async (): Promise<void> => {
-        let staging: string | undefined;
         try {
           const loadedConfig = await loadConfig();
           const hot = hotCopyPath(loadedConfig.worktreesDir, repoId);
-          staging = hotCopyStagingPath(loadedConfig.worktreesDir, repoId);
+          const staging = hotCopyStagingPath(loadedConfig.worktreesDir, repoId);
+          const pidPath = hotCopyPidPath(loadedConfig.worktreesDir, repoId);
+          const logsDir = join(home ?? dirname(loadedConfig.reposDir), "logs");
+          const logPath = join(logsDir, `hot-copy-${repoId.replaceAll("/", "-")}.log`);
+
+          const cleanupStalePreparation = async (): Promise<void> => {
+            await files.removeTree(staging);
+            await files.removeTree(pidPath);
+          };
+
+          const waitForCompletion = async (pid: number, logPath: string): Promise<boolean> => {
+            while (!disposed) {
+              if (await process.isAlive(pid)) {
+                await waitForPoll();
+                continue;
+              }
+              if (await files.exists(hot)) return true;
+              await cleanupStalePreparation();
+              throw new SwarmError(
+                "fs",
+                `Prepared copy process exited before publishing: ${repoId}; see ${logPath}`,
+              );
+            }
+            return false;
+          };
 
           try {
             if (await files.exists(hot)) {
               onEvent?.({ type: "done" });
               return;
             }
-            if (await files.exists(staging)) {
+
+            const recordedPidText = await files.readText(pidPath);
+            const recordedPid = parsePid(recordedPidText);
+            let livePid: number | undefined;
+            if (recordedPid !== undefined && (await process.isAlive(recordedPid))) {
+              const snapshot = await process.snapshot();
+              if (
+                snapshot.some(
+                  (candidate) =>
+                    candidate.pid === recordedPid && candidate.command.includes(staging),
+                )
+              ) {
+                livePid = recordedPid;
+              }
+            }
+
+            if (livePid === undefined && (await files.exists(hot))) {
+              onEvent?.({ type: "done" });
+              return;
+            }
+
+            if (livePid !== undefined) {
+              onEvent?.({ type: "step", label: "Waiting for prepared copy" });
+              if (await waitForCompletion(livePid, logPath)) {
+                onEvent?.({ type: "done" });
+              }
+              return;
+            }
+
+            if ((await files.exists(staging)) || recordedPidText !== null) {
               onEvent?.({ type: "step", label: "Removing stale prepared copy" });
-              await files.removeTree(staging);
+              await cleanupStalePreparation();
             }
           } catch (error) {
             throw toSwarmError(error, "fs", `Failed to inspect prepared copy for: ${repoId}`);
           }
+
+          if (disposed) return;
 
           const current = await loadState();
           const repo = resolveRepo(current, repoId);
@@ -227,21 +315,21 @@ export function createWorktreeService({
             });
           });
 
+          if (disposed) return;
+
           onEvent?.({ type: "step", label: "Copying repository" });
+          let pid: number;
           try {
-            await files.ensureDir(dirname(hot));
-            await files.cloneTree(repo.path, staging);
+            await Promise.all([files.ensureDir(dirname(hot)), files.ensureDir(logsDir)]);
+            pid = await files.cloneTreeDetached(repo.path, staging, hot, pidPath, logPath);
           } catch (error) {
             throw toSwarmError(error, "fs", `Failed to prepare worktree copy for: ${repo.id}`);
           }
 
-          onEvent?.({ type: "step", label: "Finalizing prepared copy" });
-          try {
-            await files.move(staging, hot);
-          } catch (error) {
-            throw toSwarmError(error, "fs", `Failed to finalize prepared copy for: ${repo.id}`);
+          if (await waitForCompletion(pid, logPath)) {
+            onEvent?.({ type: "step", label: "Finalizing prepared copy" });
+            onEvent?.({ type: "done" });
           }
-          onEvent?.({ type: "done" });
         } catch (error) {
           const failure =
             error instanceof SwarmError
@@ -249,11 +337,6 @@ export function createWorktreeService({
               : new SwarmError("fs", `Failed to prepare worktree copy for: ${repoId}`, {
                   cause: error,
                 });
-          if (staging) {
-            await files.removeTree(staging).catch((cleanupError: unknown) => {
-              logger.error(`Failed to clean up prepared copy staging for: ${repoId}`, cleanupError);
-            });
-          }
           onEvent?.({ type: "error", error: failure });
           throw failure;
         }
@@ -282,6 +365,7 @@ export function createWorktreeService({
       await preflightCreate(input);
       const pendingPreparation = preparations.get(input.repoId);
       if (pendingPreparation) {
+        onEvent?.({ type: "step", label: "Waiting for prepared copy" });
         await pendingPreparation.catch((error: unknown) => {
           logger.warn(`Prepared copy failed; falling back for: ${input.repoId}`, error);
         });
@@ -416,6 +500,11 @@ export function createWorktreeService({
         onEvent?.({ type: "error", error: failure });
         throw failure;
       }
+    },
+
+    dispose() {
+      disposed = true;
+      for (const cancel of [...cancelPolls]) cancel();
     },
 
     async delete(worktreeId, onEvent) {

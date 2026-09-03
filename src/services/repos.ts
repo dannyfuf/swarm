@@ -2,7 +2,13 @@ import { randomUUID } from "node:crypto";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { SwarmError } from "../core/errors.ts";
 import { fuzzyFilter } from "../core/fuzzy.ts";
-import { hotCopyPath, hotCopyStagingPath, repoId as makeRepoId, repoPath } from "../core/paths.ts";
+import {
+  hotCopyPath,
+  hotCopyPidPath,
+  hotCopyStagingPath,
+  repoId as makeRepoId,
+  repoPath,
+} from "../core/paths.ts";
 import type {
   Clock,
   ConfigPort,
@@ -322,6 +328,7 @@ export function createRepoService({
           preparedCopyPaths = [
             hotCopyPath(loadedConfig.worktreesDir, repo.id),
             hotCopyStagingPath(loadedConfig.worktreesDir, repo.id),
+            hotCopyPidPath(loadedConfig.worktreesDir, repo.id),
           ];
 
           const progress = forwardProgress(onEvent);

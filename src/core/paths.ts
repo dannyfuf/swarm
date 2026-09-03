@@ -54,3 +54,7 @@ export function hotCopyPath(worktreesDir: string, id: RepoId): string {
 export function hotCopyStagingPath(worktreesDir: string, id: RepoId): string {
   return join(worktreesDir, id, ".hot.staging");
 }
+
+export function hotCopyPidPath(worktreesDir: string, id: RepoId): string {
+  return join(worktreesDir, id, ".hot.staging.pid");
+}

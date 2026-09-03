@@ -40,6 +40,7 @@ export interface Logger {
   warn(msg: string, data?: unknown): void;
   error(msg: string, data?: unknown): void;
   child(scope: string): Logger;
+  flush(): Promise<void>;
 }
 
 export interface GitPort {
@@ -59,6 +60,13 @@ export interface FilesPort {
   exists(p: string): Promise<boolean>;
   ensureDir(p: string): Promise<void>;
   cloneTree(src: string, dest: string): Promise<void>;
+  cloneTreeDetached(
+    src: string,
+    staging: string,
+    dest: string,
+    pidPath: string,
+    logPath: string,
+  ): Promise<number>;
   move(src: string, dest: string): Promise<void>;
   removeTree(p: string): Promise<void>;
   removeDetached(p: string): Promise<void>;

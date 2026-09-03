@@ -46,6 +46,7 @@ export interface WorktreeService {
   list(repoId?: RepoId): Promise<Worktree[]>;
   remoteBranches(repoId: RepoId): Promise<string[]>;
   prepareHotCopy(repoId: RepoId, onEvent?: OnEvent): Promise<void>;
+  dispose?(): void;
   create(
     input: {
       repoId: RepoId;

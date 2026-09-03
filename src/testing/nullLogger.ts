@@ -31,6 +31,7 @@ export function createNullLogger(entries: LogEntry[] = [], scope = ""): NullLogg
     child(childScope) {
       return createNullLogger(entries, scope ? `${scope}:${childScope}` : childScope);
     },
+    async flush() {},
   };
 }
 

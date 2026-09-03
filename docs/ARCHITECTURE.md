@@ -35,6 +35,7 @@ change a contract without recording it in `INTEGRATION NOTES`.
   worktrees/<owner>/<name>/<slug>/   worktree copies           (config.worktreesDir)
   worktrees/<owner>/<name>/.hot/     prepared next copy (single-slot pool)
   worktrees/<owner>/<name>/.hot.staging/  incomplete pool rebuild, never consumed
+  worktrees/<owner>/<name>/.hot.staging.pid  detached pool-rebuild worker pid
   trash/<epochms>-<slug>/      deleted worktrees/repos land here by rename, rm -rf runs detached
   cache/github/<owner>.json    cached `gh repo list` results with fetchedAt
   logs/swarm.log               append-only log (adapters + operations)
@@ -199,7 +200,7 @@ export interface Shell {
   spawnDetached(cmd: string, args: string[], opts?: { cwd?: string; logPath?: string }): Promise<number>; // new process group, ignored stdin, optional file-backed stdout/stderr, unref
   exec(cmd: string, args: string[]): Promise<never>;                                   // replace current process stdio (tmux attach outside tmux)
 }
-export interface Logger { info(msg: string, data?: unknown): void; warn(...): void; error(...): void; child(scope: string): Logger }
+export interface Logger { info(msg: string, data?: unknown): void; warn(...): void; error(...): void; child(scope: string): Logger; flush(): Promise<void> }
 
 export interface GitPort {
   cloneDetached(url: string, dest: string, logPath: string): Promise<number>;
@@ -216,6 +217,7 @@ export interface FilesPort {
   exists(p: string): Promise<boolean>;
   ensureDir(p: string): Promise<void>;
   cloneTree(src: string, dest: string): Promise<void>;   // darwin: cp -Rc ; linux: cp -R --reflink=auto ; fallback cp -R
+  cloneTreeDetached(src: string, staging: string, dest: string, pidPath: string, logPath: string): Promise<number>; // detached cp && atomic mv; cleans staging on failure
   move(src: string, dest: string): Promise<void>;        // rename
   removeTree(p: string): Promise<void>;                  // guarded, blocking rm for staging cleanup
   removeDetached(p: string): Promise<void>;              // spawnDetached rm -rf
@@ -290,6 +292,7 @@ export interface WorktreeService {
   list(repoId?: RepoId): Promise<Worktree[]>;
   remoteBranches(repoId: RepoId): Promise<string[]>;
   prepareHotCopy(repoId: RepoId, onEvent?: OnEvent): Promise<void>;
+  dispose?(): void; // cancels only local, unref'd completion pollers; detached workers continue
   create(input: { repoId: RepoId; branch: string; baseRef?: string }, onEvent?: OnEvent): Promise<Worktree>;
     // fast: move .hot → refresh destination → checkout branch → hooks.postCreate → persist
     // fallback: fetch base → resetToRemote(default) → cloneTree → checkout branch → hooks.postCreate → persist
@@ -329,13 +332,24 @@ requested destination, refreshes that independent clone to the latest resolved d
 then performs the normal branch checkout, hooks, and persistence workflow. If no prepared copy
 exists, creation falls back to refreshing and copying the pristine base clone exactly as before.
 
-Pool rebuilds refresh the base clone outside the long-lived state mutation lock, copy it into
-`.hot.staging`, and publish it as `.hot` only after the copy completes. Concurrent rebuilds for
-one repo share an in-memory promise. The controller schedules rebuilds after every creation
-attempt, after clone reconciliation promotes a new repo, and after initial state hydration;
-rebuild failures remain visible background-operation errors and do not block later fallback
-creation. Reserved `.hot*` directory names are excluded from worktree directory listings and are
-removed with their repository.
+Pool rebuilds refresh the base clone outside the long-lived state mutation lock, then launch one
+detached `sh` process whose platform-specific `cp` writes `.hot.staging` and whose succeeding
+`mv` atomically publishes `.hot`. The worker records its shell pid in `.hot.staging.pid`, appends
+stdout/stderr under `SWARM_HOME/logs`, removes the pid file on exit, and removes staging on any
+copy/publish failure. The service polls the detached pid and output paths with unref'd timers so
+progress remains visible while swarm is open without keeping Node alive; controller disposal
+cancels those local polls while the worker continues. On restart, a pid is treated as active only
+when it is alive and its process command targets that staging path, preventing stale cleanup from
+deleting a live copy. Dead or invalid pid metadata and its staging tree are removed before retry.
+
+Concurrent rebuilds for one repo share an in-memory promise. Worktree creation waits for a locally
+tracked preparation (including a live detached worker recovered on restart), then consumes only a
+complete `.hot`; if preparation fails or disposal releases its poll without publishing, creation
+uses the normal refreshed-base slow path and never consumes `.hot.staging`. The controller
+schedules rebuilds after every creation attempt, after clone reconciliation promotes a new repo,
+and after initial state hydration; rebuild failures remain visible background-operation errors and
+do not block later fallback creation. Reserved `.hot*` directory names are excluded from worktree
+directory listings and are removed with their repository.
 
 All service state changes go through `src/services/stateMutation.ts`. It delegates to the
 state adapter's transactional `mutate` extension when available; that adapter holds an
@@ -486,6 +500,12 @@ cursor row, green for attached, yellow for running agents, red only for danger d
 
 ## 10. Integration notes
 
+- 2026-09-03: hot-copy rebuilds now run as detached `cp && mv` workers with per-repo pid files,
+  log output, failure cleanup, restart-safe live-worker detection, and unref'd/cancellable
+  completion polling. Worktree creation waits for a tracked worker but never consumes
+  `.hot.staging`, and the TUI entrypoint flushes profiling, logging, stdout, and stderr before
+  explicitly exiting after renderer/controller teardown so unrelated in-flight handles cannot
+  hold the tmux popup open.
 - 2026-09-03: worktree creation gained a per-repository single-slot hot-copy pool. Complete
   copies are staged under `.hot.staging`, atomically published as `.hot`, consumed by rename,
   refreshed in their destination, and rebuilt by controller-managed background operations.
