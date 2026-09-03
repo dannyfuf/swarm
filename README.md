@@ -136,6 +136,8 @@ agent while still using that agent's entry from `agentCommands`.
 `defaultHost` must be `local` or one of the configured ids. A persisted worktree may carry a
 `host` field; when it is absent the worktree is local. Remote commands use non-interactive SSH,
 while opening a remote worktree creates a one-window local tmux proxy session.
+In the create dialog, `Tab` focuses the host picker and `←`/`→` cycles it; remote rows show an
+`@host` badge.
 
 Each repo record has `hooks.prepare` and `hooks.postCreate` string arrays. Prepare hooks run in a
 staging prepared copy before it is published (and in fallback copies after clone). A refresh that

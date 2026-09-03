@@ -535,7 +535,7 @@ export type Pane = "repos" | "worktrees";
 export type Mode = "normal" | "filter" | "dialog";
 export type DialogKind =
   | { kind: "confirm"; title: string; body: string[]; danger?: boolean; confirmLabel?: string; onConfirm: () => void }
-  | { kind: "create-worktree"; repoId: RepoId; generation: number; branches: string[]; fetching: boolean }
+  | { kind: "create-worktree"; repoId: RepoId; generation: number; branches: string[]; fetching: boolean; host: HostId | "local" }
   | { kind: "clone-repo"; contextId: ContextId }
   | { kind: "context-form"; contextId?: ContextId }
   | { kind: "assign-context"; repoId: RepoId }
@@ -666,6 +666,9 @@ The `new` command opens the worktree dialog immediately with locally known base 
 Completion re-lists remote branches and dispatches `updateCreateWorktreeBranches`; the reducer
 applies it only if the same repo and dialog-open generation are still active, so closing and
 reopening the same repository cannot accept an older completion.
+The dialog fields are branch, optional host (only when hosts are configured), and base ref. Remote
+worktree rows append an `@host` badge, while their detail pane includes the host, `host:path`, and
+the latest one-line host error when offline.
 
 ## 10. Integration notes
 

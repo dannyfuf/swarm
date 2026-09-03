@@ -847,6 +847,7 @@ describe("createController", () => {
         generation: 1,
         branches: ["origin/main"],
         fetching: true,
+        host: "local",
       },
     });
 
@@ -875,6 +876,7 @@ describe("createController", () => {
         generation: 2,
         branches: ["origin/reopened"],
         fetching: true,
+        host: "local",
       },
     });
     secondRefresh.resolve();
@@ -897,6 +899,7 @@ describe("createController", () => {
         generation: 1,
         branches: ["origin/main"],
         fetching: true,
+        host: "local",
       },
     });
     let refreshSignal: AbortSignal | undefined;

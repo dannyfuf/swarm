@@ -33,6 +33,7 @@ export type DialogKind =
       generation: number;
       branches: string[];
       fetching: boolean;
+      host: HostId | "local";
     }
   | { kind: "clone-repo"; contextId: ContextId }
   | { kind: "context-form"; contextId?: ContextId }

@@ -112,7 +112,8 @@ commands. The dev-box may override them in its own state later.
   `"none"` means a successful observation found no session.
 - **Create**: the create dialog gains a host field (shown only when `hosts` is non-empty).
   Remote create runs in the background like a local create and shows a "creating on <host>"
-  state until the CLI returns. Base refs come from the local clone of the repo.
+  state until the CLI returns. `Tab` focuses the picker, `←`/`→` cycles it, and remote rows carry
+  an `@host` badge. Base refs come from the local clone of the repo.
 - **Open**: create or reuse the proxy session, then switch to it. `swarm open <id>` from the CLI
   follows the same path.
 - **Sleep / kill / delete**: delegate to the host. Kill and delete then kill the local proxy

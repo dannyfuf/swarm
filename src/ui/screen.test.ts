@@ -126,6 +126,54 @@ test("worktree rows carry the state glyph, running labels and recency", () => {
   assert.ok(!row.includes("origin/main"), "base ref belongs in the detail box");
 });
 
+test("worktree rows show a host badge only for remote worktrees", () => {
+  const state = stateWith({
+    worktrees: stateWith().worktrees.map((worktree) =>
+      worktree.id === "bukhr/payroll#feat-payroll-fix" ? { ...worktree, host: "devbox" } : worktree,
+    ),
+  });
+  const lines = buildScreen(state, context()).map(lineText);
+  const remote = lines.find((line) => line.includes("feat/payroll-fix"));
+  const local = lines.find((line) => line.includes("payroll · main"));
+  assert.ok(remote?.includes("@devbox"), remote ?? "remote row missing");
+  assert.ok(local && !local.includes("@"), local ?? "local row missing");
+});
+
+test("remote details show host, prefixed path, and the host error", () => {
+  const remote = {
+    ...stateWith().worktrees[0],
+    host: "devbox",
+    path: "/srv/swarm/worktrees/bukhr/payroll/main",
+  };
+  assert.ok(remote);
+  const state = stateWith({
+    worktrees: [remote],
+    statuses: {
+      [remote.id]: { worktreeId: remote.id, session: "unknown", windows: [], running: [] },
+    },
+    remoteErrors: { devbox: "ssh connection timed out" },
+  });
+  const lines = buildScreen(state, context()).map(lineText);
+  assert.ok(lines.some((line) => line.includes("host: devbox")));
+  assert.ok(lines.some((line) => line.includes("devbox:/srv/swarm/worktrees/bukhr/payroll/main")));
+  assert.ok(lines.some((line) => line.includes("offline: ssh connection timed out")));
+});
+
+test("unknown sessions render offline in row and aggregate counts", () => {
+  const worktree = { ...stateWith().worktrees[0], host: "devbox" };
+  assert.ok(worktree);
+  const state = stateWith({
+    worktrees: [worktree],
+    statuses: {
+      [worktree.id]: { worktreeId: worktree.id, session: "unknown", windows: [], running: [] },
+    },
+  });
+  const lines = buildScreen(state, context()).map(lineText);
+  const row = lines.find((line) => line.includes("@devbox"));
+  assert.ok(row?.includes("?"), row ?? "remote row missing");
+  assert.ok(lines[1]?.includes("? 1 offline"));
+});
+
 test("the header summarises live and sleeping sessions", () => {
   const header = lineText(buildScreen(stateWith(), context())[1] ?? []);
   assert.ok(header.includes("1 Buk"));

@@ -22,7 +22,14 @@ import type { AppState, Operation } from "../core/app.ts";
 import { fuzzyFilter } from "../core/fuzzy.ts";
 import { slugify, worktreeId } from "../core/paths.ts";
 import { prLocalBranch, prState, prStateLabel } from "../core/prs.ts";
-import type { PrState, PrTab, PullRequest, SessionState, Worktree } from "../core/types.ts";
+import {
+  type PrState,
+  type PrTab,
+  type PullRequest,
+  type SessionState,
+  type Worktree,
+  worktreeHost,
+} from "../core/types.ts";
 import {
   aggregateSession,
   relativeTime,
@@ -505,8 +512,16 @@ function worktreeRow(
     fg: selected ? theme.cursorFg : theme.text,
     bold: selected,
   };
-  const branchText = truncate(`${prefix}${worktree.branch}`, columns.branch);
-  const written = branchText.length;
+  const hostId = worktreeHost(worktree);
+  const remote = hostId !== "local";
+  const fullHostBadge = `@${hostId}`;
+  const hostBadge = remote
+    ? truncate(fullHostBadge, Math.max(1, Math.min(fullHostBadge.length, columns.branch - 2)))
+    : "";
+  const badgeGap = hostBadge === "" ? 0 : 1;
+  const branchWidth = Math.max(1, columns.branch - hostBadge.length - badgeGap);
+  const branchText = truncate(`${prefix}${worktree.branch}`, branchWidth);
+  const written = branchText.length + badgeGap + hostBadge.length;
   if (prefix !== "" && branchText.startsWith(prefix)) {
     line.push(cell(prefix, { fg: selected ? theme.muted : theme.dim }));
     line.push(
@@ -517,6 +532,10 @@ function worktreeRow(
     );
   } else {
     line.push(...highlight(branchText, positions, branchStyle, { fg: theme.yellow, bold: true }));
+  }
+  if (hostBadge !== "") {
+    line.push(cell(" ", {}));
+    line.push(cell(hostBadge, { fg: selected ? theme.accent : theme.muted, bold: selected }));
   }
   line.push(cell(repeat(" ", Math.max(0, columns.branch - written)), {}));
 
@@ -723,9 +742,14 @@ function detailLines(state: AppState, layout: ScreenLayout, context: ScreenConte
 
   const status = state.statuses[worktree.id];
   const repoOfWorktree = state.repos.find((item) => item.id === worktree.repoId);
+  const hostId = worktreeHost(worktree);
+  const remote = hostId !== "local";
   const branchLine: Line = [
     cell(" ", {}),
     cell(worktree.branch, { fg: theme.strong, bold: true }),
+    ...(remote
+      ? [cell(` ${glyphs.sep} host: `, { fg: theme.dim }), cell(hostId, { fg: theme.muted })]
+      : []),
     cell(` ${glyphs.sep} `, { fg: theme.dim }),
     cell(repoOfWorktree?.id ?? worktree.repoId, { fg: theme.muted }),
     cell(` ${glyphs.sep} base `, { fg: theme.dim }),
@@ -738,10 +762,18 @@ function detailLines(state: AppState, layout: ScreenLayout, context: ScreenConte
     branchLine.push(cell(prStateLabel(prState(linkedPr)), { fg: prStateStyle(prState(linkedPr)) }));
   }
   lines.push(branchLine);
-  lines.push([
-    cell(" ", {}),
-    cell(truncateStart(tildePath(worktree.path, context.home), width - 2), { fg: theme.dim }),
-  ]);
+  if (remote) {
+    lines.push([
+      cell(" ", {}),
+      cell(`${hostId}:`, { fg: theme.muted }),
+      cell(truncateStart(worktree.path, width - hostId.length - 3), { fg: theme.dim }),
+    ]);
+  } else {
+    lines.push([
+      cell(" ", {}),
+      cell(truncateStart(tildePath(worktree.path, context.home), width - 2), { fg: theme.dim }),
+    ]);
+  }
 
   const windowLine: Line = [cell(" windows  ", { fg: theme.dim })];
   if (!status || status.windows.length === 0) {
@@ -764,7 +796,12 @@ function detailLines(state: AppState, layout: ScreenLayout, context: ScreenConte
       }
     });
   }
-  lines.push(windowLine);
+  const remoteError = remote ? state.remoteErrors[hostId] : undefined;
+  lines.push(
+    remoteError
+      ? [cell(" ", {}), cell(truncate(`offline: ${remoteError}`, width - 2), { fg: theme.dim })]
+      : windowLine,
+  );
 
   lines.push([
     cell(" ", {}),
