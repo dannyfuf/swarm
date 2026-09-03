@@ -17,6 +17,11 @@ export interface RunOptions {
 
 export interface Shell {
   run(cmd: string, args: string[], opts?: RunOptions): Promise<ShellResult>;
+  runDetachedLogged(
+    cmd: string,
+    args: string[],
+    opts: { cwd: string; logPath: string },
+  ): Promise<number>;
   spawnDetached(
     cmd: string,
     args: string[],
@@ -46,12 +51,19 @@ export interface Logger {
 export interface GitPort {
   cloneDetached(url: string, dest: string, logPath: string): Promise<number>;
   fetch(repoPath: string, opts?: { prune?: boolean; signal?: AbortSignal }): Promise<void>;
-  defaultBranch(repoPath: string, hint?: string): Promise<string>;
-  resetToRemote(repoPath: string, branch: string): Promise<void>;
+  fetchRefs(repoPath: string, remote: string, refs: string[], signal?: AbortSignal): Promise<void>;
+  defaultBranch(
+    repoPath: string,
+    hint?: string,
+    signal?: AbortSignal,
+    knownRemoteBranches?: string[],
+  ): Promise<string>;
+  resetToRemote(repoPath: string, branch: string, signal?: AbortSignal): Promise<void>;
   checkoutNewBranch(path: string, branch: string, from: string): Promise<void>;
   checkoutTracking(path: string, branch: string): Promise<void>;
   fetchPullHead(path: string, number: number, localBranch: string): Promise<void>;
-  remoteBranches(repoPath: string): Promise<string[]>;
+  remoteBranches(repoPath: string, signal?: AbortSignal): Promise<string[]>;
+  revision(path: string, ref: string, signal?: AbortSignal): Promise<string>;
   currentBranch(path: string): Promise<string>;
   isDirty(path: string, opts?: { signal?: AbortSignal }): Promise<boolean>;
 }
@@ -66,13 +78,14 @@ export interface FilesPort {
     dest: string,
     pidPath: string,
     logPath: string,
+    opts: { markerText: string; prepareCommands: string[] },
   ): Promise<number>;
   move(src: string, dest: string): Promise<void>;
   removeTree(p: string): Promise<void>;
   removeDetached(p: string): Promise<void>;
   readText(p: string): Promise<string | null>;
   writeTextAtomic(p: string, text: string): Promise<void>;
-  listDirs(p: string): Promise<string[]>;
+  listDirs(p: string, opts?: { includeReserved?: boolean }): Promise<string[]>;
 }
 
 export interface TmuxPane {

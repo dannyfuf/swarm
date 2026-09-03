@@ -9,6 +9,7 @@ import type { State } from "../core/types.ts";
 import { defaultState } from "../core/types.ts";
 import { createFakeFiles } from "../testing/fakeFiles.ts";
 import { createFakeProcess } from "../testing/fakeProcess.ts";
+import { repos } from "../testing/fixtures.ts";
 import { createNullLogger } from "../testing/nullLogger.ts";
 import { createStateStore, type StateStoreOptions } from "./state.ts";
 
@@ -66,6 +67,30 @@ describe("state adapter", () => {
     const store = createTestStore(files);
 
     assert.deepEqual((await store.load()).clones, []);
+  });
+
+  test("defaults legacy prepare hooks and rejects invalid hook commands", async () => {
+    const repo = structuredClone(repos[0]);
+    assert.ok(repo);
+    const legacyRepo = {
+      ...repo,
+      hooks: { postCreate: repo.hooks.postCreate },
+    };
+    const legacy = { ...defaultState(), repos: [legacyRepo] };
+    const files = createFakeFiles({ texts: { [statePath]: JSON.stringify(legacy) } });
+
+    const loaded = await createTestStore(files).load();
+    assert.deepEqual(loaded.repos[0]?.hooks, { prepare: [], postCreate: [] });
+
+    const invalid = {
+      ...legacy,
+      repos: [{ ...legacyRepo, hooks: { prepare: "npm ci", postCreate: [] } }],
+    };
+    const invalidFiles = createFakeFiles({ texts: { [statePath]: JSON.stringify(invalid) } });
+    await assert.rejects(
+      createTestStore(invalidFiles).load(),
+      (error: unknown) => error instanceof SwarmError && error.code === "validation",
+    );
   });
 
   test("quarantines a broken state file before throwing validation details", async () => {

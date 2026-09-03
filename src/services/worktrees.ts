@@ -1,4 +1,5 @@
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { createHash, randomUUID } from "node:crypto";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { SwarmError } from "../core/errors.ts";
 import {
   hotCopyPath,
@@ -32,7 +33,7 @@ export interface WorktreeServiceDependencies {
   files: FilesPort;
   tmux: TmuxPort;
   shell: Shell;
-  process: ProcessPort;
+  process?: Pick<ProcessPort, "isAlive" | "snapshot">;
   clock: Clock;
   logger: Logger;
   home?: string;
@@ -88,9 +89,118 @@ export function createWorktreeService({
   logger,
   home,
 }: WorktreeServiceDependencies): WorktreeService {
-  const preparations = new Map<RepoId, Promise<void>>();
+  const processPort = process ?? {
+    async isAlive() {
+      return false;
+    },
+    async snapshot() {
+      return [];
+    },
+  };
+  interface Preparation {
+    controller: AbortController;
+    promise: Promise<void>;
+  }
+
+  const preparations = new Map<RepoId, Preparation>();
+  const repoMutexes = new Map<RepoId, Promise<void>>();
+  const deletingRepos = new Set<RepoId>();
   const cancelPolls = new Set<() => void>();
   let disposed = false;
+
+  interface HotCopyMarker {
+    fetchedAt: string;
+    defaultBranch: string;
+    sha: string;
+    prepareFingerprint: string;
+  }
+
+  interface CreatingMarker {
+    id: string;
+    repoId: RepoId;
+    branch: string;
+    baseRef: string;
+    createdAt: string;
+  }
+
+  interface SharedRefresh {
+    mode: "skip" | "forced";
+    controller: AbortController;
+    interests: Set<symbol>;
+    promise: Promise<void>;
+  }
+
+  interface RefreshQueue {
+    active: SharedRefresh;
+    forced?: SharedRefresh;
+  }
+
+  const refreshes = new Map<RepoId, RefreshQueue>();
+
+  const throwIfAborted = (signal?: AbortSignal): void => {
+    if (signal?.aborted) throw new SwarmError("cancelled", "Operation cancelled");
+  };
+
+  const assertRepoActive = (repoId: RepoId): void => {
+    if (deletingRepos.has(repoId)) {
+      throw new SwarmError("conflict", `Repository is being deleted: ${repoId}`);
+    }
+  };
+
+  const withRepoMutex = async <T>(repoId: RepoId, fn: () => Promise<T>): Promise<T> => {
+    const previous = repoMutexes.get(repoId) ?? Promise.resolve();
+    let release = (): void => undefined;
+    const held = new Promise<void>((resolveHeld) => {
+      release = resolveHeld;
+    });
+    const tail = previous.catch(() => undefined).then(() => held);
+    repoMutexes.set(repoId, tail);
+    await previous.catch(() => undefined);
+    try {
+      return await fn();
+    } finally {
+      release();
+      if (repoMutexes.get(repoId) === tail) repoMutexes.delete(repoId);
+    }
+  };
+
+  const prepareFingerprint = (commands: string[]): string =>
+    createHash("sha256").update(JSON.stringify(commands)).digest("hex");
+
+  const remoteTrackingRef = (branch: string): string =>
+    `+refs/heads/${branch}:refs/remotes/origin/${branch}`;
+
+  const remoteBranchFromRef = (ref: string | undefined): string | undefined => {
+    if (!ref?.startsWith("origin/")) return undefined;
+    const branch = ref.slice("origin/".length);
+    validateBranch(branch);
+    return branch;
+  };
+
+  const isFsCode = (error: unknown, codes: string[]): boolean => {
+    let candidate: unknown = error;
+    while (typeof candidate === "object" && candidate !== null) {
+      if ("code" in candidate && codes.includes(String(candidate.code))) return true;
+      candidate = "cause" in candidate ? candidate.cause : undefined;
+    }
+    return false;
+  };
+
+  const formatDuration = (durationMs: number): string =>
+    durationMs < 1000 ? `${Math.round(durationMs)}ms` : `${(durationMs / 1000).toFixed(1)}s`;
+
+  const timed = async <T>(label: string, onEvent: OnEvent | undefined, fn: () => Promise<T>) => {
+    onEvent?.({ type: "step", label });
+    const startedAt = performance.now();
+    try {
+      return await fn();
+    } finally {
+      const durationMs = performance.now() - startedAt;
+      const line = `${label} ${formatDuration(durationMs)}`;
+      onEvent?.({ type: "log", line });
+      logger.info(line, { durationMs });
+    }
+  };
 
   const waitForPoll = async (): Promise<void> => {
     if (disposed) return;
@@ -134,7 +244,12 @@ export function createWorktreeService({
     return repo;
   };
 
-  const assertAvailable = (current: State, repo: Repo, slug: string): void => {
+  const assertCreateAvailable = (
+    current: State,
+    repo: Repo,
+    slug: string,
+    destination: string,
+  ): void => {
     const id = makeWorktreeId(repo.id, slug);
     if (current.worktrees.some((worktree) => worktree.id === id)) {
       throw new SwarmError("conflict", `Worktree already exists: ${id}`);
@@ -143,11 +258,34 @@ export function createWorktreeService({
     if (current.worktrees.some((worktree) => worktree.session === session)) {
       throw new SwarmError("conflict", `Tmux session name already exists: ${session}`);
     }
+    if (current.worktrees.some((worktree) => resolve(worktree.path) === resolve(destination))) {
+      throw new SwarmError("conflict", `Worktree path already registered: ${destination}`);
+    }
   };
 
-  const assertDestinationAvailable = async (destination: string): Promise<void> => {
+  const trashUnregisteredPath = async (path: string, worktreesDir: string): Promise<void> => {
+    const trashPath = join(
+      home ?? dirname(worktreesDir),
+      "trash",
+      `${clock.now().getTime()}-${basename(path)}-${randomUUID()}`,
+    );
+    await files.ensureDir(dirname(trashPath));
+    await files.move(path, trashPath);
+    await files.removeDetached(trashPath).catch((error: unknown) => {
+      logger.error(`Failed to remove reclaimed worktree path: ${path}`, error);
+    });
+  };
+
+  const assertDestinationAvailable = async (
+    destination: string,
+    worktreesDir: string,
+  ): Promise<void> => {
     try {
       if (await files.exists(destination)) {
+        if ((await readCreatingMarkerText(destination)) !== null) {
+          await trashUnregisteredPath(destination, worktreesDir);
+          return;
+        }
         throw new SwarmError("conflict", `Worktree path already exists: ${destination}`);
       }
     } catch (error) {
@@ -155,61 +293,905 @@ export function createWorktreeService({
     }
   };
 
-  const refreshRepository = async (
+  const resolveDefaultBranch = async (
     repo: Repo,
     repoPath: string,
+    remoteBranches: string[],
     onEvent?: OnEvent,
-    persistDefaultBranch?: (branch: string) => Promise<void> | void,
+    signal?: AbortSignal,
   ): Promise<string> => {
-    onEvent?.({ type: "step", label: "Fetching origin" });
     try {
-      await git.fetch(repoPath, { prune: true });
-    } catch (error) {
-      throw toSwarmError(error, "git", `Failed to fetch repository: ${repo.id}`);
-    }
-
-    let defaultBranch: string;
-    try {
-      defaultBranch = await git.defaultBranch(repoPath, repo.defaultBranch);
-      const remoteBranches = await git.remoteBranches(repoPath);
+      const defaultBranch = await timed("Resolving default branch", onEvent, () =>
+        git.defaultBranch(repoPath, repo.defaultBranch, signal, remoteBranches),
+      );
       if (!remoteBranches.includes(`origin/${defaultBranch}`)) {
         throw new SwarmError(
           "git",
           `Remote has no '${defaultBranch}' branch yet; push an initial commit to ${repo.id} first`,
         );
       }
+      return defaultBranch;
     } catch (error) {
       throw toSwarmError(error, "git", `Failed to resolve repository base: ${repo.id}`);
     }
+  };
+
+  const persistDefaultBranch = async (repoId: RepoId, branch: string): Promise<void> => {
+    await mutateState(state, (next) => {
+      resolveRepo(next, repoId).defaultBranch = branch;
+    });
+  };
+
+  const refreshRepository = async (
+    repo: Repo,
+    repoPath: string,
+    onEvent?: OnEvent,
+    signal?: AbortSignal,
+  ): Promise<{ defaultBranch: string; reset: boolean }> => {
+    throwIfAborted(signal);
+    try {
+      await timed("Fetching origin", onEvent, () => git.fetch(repoPath, { prune: true, signal }));
+    } catch (error) {
+      throw toSwarmError(error, "git", `Failed to fetch repository: ${repo.id}`);
+    }
+
+    let remoteBranches: string[];
+    try {
+      remoteBranches = await timed("Listing remote branches", onEvent, () =>
+        git.remoteBranches(repoPath, signal),
+      );
+    } catch (error) {
+      throw toSwarmError(error, "git", `Failed to inspect remote branches for: ${repo.id}`);
+    }
+    const defaultBranch = await resolveDefaultBranch(
+      repo,
+      repoPath,
+      remoteBranches,
+      onEvent,
+      signal,
+    );
 
     if (defaultBranch !== repo.defaultBranch) {
       try {
-        await persistDefaultBranch?.(defaultBranch);
+        await persistDefaultBranch(repo.id, defaultBranch);
         repo.defaultBranch = defaultBranch;
       } catch (error) {
         throw toSwarmError(error, "fs", `Failed to persist default branch for: ${repo.id}`);
       }
     }
 
-    onEvent?.({ type: "step", label: "Updating base" });
+    let reset = false;
     try {
-      await git.resetToRemote(repoPath, defaultBranch);
+      const [headSha, remoteSha, dirty] = await timed("Checking repository state", onEvent, () =>
+        Promise.all([
+          git.revision(repoPath, "HEAD", signal),
+          git.revision(repoPath, `origin/${defaultBranch}`, signal),
+          git.isDirty(repoPath, { signal }),
+        ]),
+      );
+      if (headSha !== remoteSha || dirty) {
+        await timed("Updating base", onEvent, () =>
+          git.resetToRemote(repoPath, defaultBranch, signal),
+        );
+        reset = true;
+      }
     } catch (error) {
       throw toSwarmError(error, "git", `Failed to update repository base: ${repo.id}`);
     }
-    return defaultBranch;
+    return { defaultBranch, reset };
   };
 
-  const preflightCreate = async (input: { repoId: RepoId; branch: string }): Promise<void> => {
-    const current = await loadState();
-    const repo = resolveRepo(current, input.repoId);
-    const slug = slugify(input.branch);
-    assertAvailable(current, repo, slug);
-    const loadedConfig = await loadConfig();
-    await assertDestinationAvailable(worktreePath(loadedConfig, repo.owner, repo.name, slug));
+  const hotMarkerPath = (repoPath: string): string => join(repoPath, ".git", "swarm-hot.json");
+  const creatingMarkerPath = (repoPath: string): string =>
+    join(repoPath, ".git", "swarm-creating.json");
+
+  const parseHotMarker = (text: string | null): HotCopyMarker | null => {
+    if (text === null) return null;
+    try {
+      const value: unknown = JSON.parse(text);
+      if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+      const marker = value as Record<string, unknown>;
+      if (
+        typeof marker.fetchedAt !== "string" ||
+        !Number.isFinite(Date.parse(marker.fetchedAt)) ||
+        typeof marker.defaultBranch !== "string" ||
+        typeof marker.sha !== "string" ||
+        typeof marker.prepareFingerprint !== "string" ||
+        !/^[0-9a-f]{64}$/iu.test(marker.prepareFingerprint) ||
+        !/^[0-9a-f]{40,64}$/iu.test(marker.sha)
+      ) {
+        return null;
+      }
+      validateBranch(marker.defaultBranch);
+      return {
+        fetchedAt: marker.fetchedAt,
+        defaultBranch: marker.defaultBranch,
+        sha: marker.sha,
+        prepareFingerprint: marker.prepareFingerprint,
+      };
+    } catch {
+      return null;
+    }
+  };
+
+  const readHotMarker = async (repoPath: string): Promise<HotCopyMarker | null> => {
+    try {
+      return parseHotMarker(await files.readText(hotMarkerPath(repoPath)));
+    } catch (error) {
+      logger.warn(`Failed to read prepared copy marker: ${repoPath}`, error);
+      return null;
+    }
+  };
+
+  const writeHotMarker = async (
+    repoPath: string,
+    defaultBranch: string,
+    fingerprint: string,
+    signal?: AbortSignal,
+  ): Promise<void> => {
+    const marker: HotCopyMarker = {
+      fetchedAt: clock.now().toISOString(),
+      defaultBranch,
+      sha: await git.revision(repoPath, `origin/${defaultBranch}`, signal),
+      prepareFingerprint: fingerprint,
+    };
+    await files.writeTextAtomic(hotMarkerPath(repoPath), `${JSON.stringify(marker, null, 2)}\n`);
+  };
+
+  const parseCreatingMarker = (text: string | null): CreatingMarker | null => {
+    if (text === null) return null;
+    try {
+      const value: unknown = JSON.parse(text);
+      if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+      const marker = value as Record<string, unknown>;
+      if (
+        typeof marker.id !== "string" ||
+        typeof marker.repoId !== "string" ||
+        typeof marker.branch !== "string" ||
+        typeof marker.baseRef !== "string" ||
+        typeof marker.createdAt !== "string" ||
+        !Number.isFinite(Date.parse(marker.createdAt))
+      ) {
+        return null;
+      }
+      validateBranch(marker.branch);
+      return {
+        id: marker.id,
+        repoId: marker.repoId,
+        branch: marker.branch,
+        baseRef: marker.baseRef,
+        createdAt: marker.createdAt,
+      };
+    } catch {
+      return null;
+    }
+  };
+
+  const readCreatingMarkerText = (repoPath: string): Promise<string | null> =>
+    files.readText(creatingMarkerPath(repoPath));
+
+  const writeCreatingMarker = (repoPath: string, marker: CreatingMarker): Promise<void> =>
+    files.writeTextAtomic(creatingMarkerPath(repoPath), `${JSON.stringify(marker, null, 2)}\n`);
+
+  const markerIsFresh = (
+    marker: HotCopyMarker | null,
+    freshnessMs: number,
+    fingerprint: string,
+  ): boolean => {
+    if (marker === null) return false;
+    if (marker.prepareFingerprint !== fingerprint) return false;
+    const age = clock.now().getTime() - Date.parse(marker.fetchedAt);
+    return age >= 0 && age < freshnessMs;
+  };
+
+  const runHooks = async (
+    kind: "prepare",
+    commands: string[],
+    cwd: string,
+    onEvent?: OnEvent,
+    opts?: { signal?: AbortSignal },
+  ): Promise<void> => {
+    for (const [index, command] of commands.entries()) {
+      throwIfAborted(opts?.signal);
+      const label = `Running ${kind} hook ${index + 1}/${commands.length}`;
+      await timed(label, onEvent, async () => {
+        onEvent?.({ type: "log", line: `$ ${command}` });
+        try {
+          const code = (
+            await shell.run("sh", ["-c", command], {
+              cwd,
+              signal: opts?.signal,
+              onStderrLine: (line) => onEvent?.({ type: "log", line }),
+            })
+          ).code;
+          if (code !== 0) {
+            const line = `Hook failed (${code}): ${command}`;
+            onEvent?.({ type: "log", line });
+            logger.warn(line, { kind, cwd });
+          }
+        } catch (error) {
+          if (opts?.signal?.aborted) throw error;
+          const line = `Hook failed: ${command}: ${errorMessage(error)}`;
+          onEvent?.({ type: "log", line });
+          logger.warn(line, error);
+        }
+      });
+    }
+  };
+
+  const runPostCreateHookSequence = async (
+    commands: string[],
+    cwd: string,
+    logPath: string,
+    onEvent?: OnEvent,
+  ): Promise<void> => {
+    if (commands.length === 0) return;
+    const recordsPath = join(cwd, ".git", `swarm-post-create-${randomUUID()}.log`);
+    const script = [
+      'records="$1"',
+      'log="$2"',
+      'total="$3"',
+      "shift 3",
+      ': > "$records" || exit 125',
+      "index=0",
+      "for command do",
+      "  index=$((index + 1))",
+      "  started=$(date +%s)",
+      '  printf "start\\t%s\\t%s\\n" "$index" "$started" >> "$records"',
+      '  printf "[post-create hook %s/%s] start: %s\\n" "$index" "$total" "$command" >> "$log"',
+      '  sh -c "$command" >> "$log" 2>&1',
+      "  code=$?",
+      "  ended=$(date +%s)",
+      "  duration=$(((ended - started) * 1000))",
+      '  printf "end\\t%s\\t%s\\t%s\\n" "$index" "$code" "$duration" >> "$records"',
+      '  printf "[post-create hook %s/%s] end: exit=%s duration=%sms\\n" "$index" "$total" "$code" "$duration" >> "$log"',
+      "done",
+      "exit 0",
+    ].join("\n");
+
+    const runnerCode = await shell.runDetachedLogged(
+      "sh",
+      [
+        "-c",
+        script,
+        "swarm-post-create",
+        recordsPath,
+        logPath,
+        String(commands.length),
+        ...commands,
+      ],
+      { cwd, logPath },
+    );
+    const records = await files.readText(recordsPath);
+    await files.removeTree(recordsPath).catch((error: unknown) => {
+      logger.warn(`Failed to remove post-create hook records: ${recordsPath}`, error);
+    });
+
+    const ends = new Map<number, { code: number; durationMs: number }>();
+    for (const line of records?.split(/\r?\n/u) ?? []) {
+      const match = /^end\t(\d+)\t(-?\d+)\t(\d+)$/u.exec(line);
+      if (!match) continue;
+      ends.set(Number(match[1]), { code: Number(match[2]), durationMs: Number(match[3]) });
+    }
+    for (const [index, command] of commands.entries()) {
+      const label = `Running post-create hook ${index + 1}/${commands.length}`;
+      onEvent?.({ type: "step", label });
+      onEvent?.({ type: "log", line: `$ ${command}` });
+      const record = ends.get(index + 1);
+      if (!record) continue;
+      const durationLine = `${label} ${formatDuration(record.durationMs)}`;
+      onEvent?.({ type: "log", line: durationLine });
+      logger.info(durationLine, { durationMs: record.durationMs });
+      if (record.code !== 0) {
+        const line = `Hook failed (${record.code}): ${command}`;
+        onEvent?.({ type: "log", line });
+        logger.warn(line, { kind: "post-create", cwd });
+      }
+    }
+    if (runnerCode !== 0) {
+      const line = `Post-create hook runner failed (${runnerCode})`;
+      onEvent?.({ type: "log", line });
+      logger.warn(line, { cwd });
+    }
+  };
+
+  const refreshForCreate = async (
+    repo: Repo,
+    repoPath: string,
+    requestedBranch: string | undefined,
+    requestedBaseRef: string | undefined,
+    freshnessMs: number,
+    onEvent?: OnEvent,
+    signal?: AbortSignal,
+  ): Promise<{
+    defaultBranch: string;
+    remoteBranches: string[];
+    marker: HotCopyMarker | null;
+    reset: boolean;
+  }> => {
+    throwIfAborted(signal);
+    const marker = await timed("Reading freshness marker", onEvent, () => readHotMarker(repoPath));
+    let remoteBranches: string[];
+    try {
+      remoteBranches = await timed("Listing remote branches", onEvent, () =>
+        git.remoteBranches(repoPath, signal),
+      );
+    } catch (error) {
+      throw toSwarmError(error, "git", `Failed to inspect remote branches for: ${repo.id}`);
+    }
+
+    const fingerprint = prepareFingerprint(repo.hooks.prepare);
+    const markerIsYoung = markerIsFresh(marker, freshnessMs, fingerprint);
+    const markerHasRemote =
+      marker !== null && markerIsYoung && remoteBranches.includes(`origin/${marker.defaultBranch}`);
+    const defaultBranch = markerHasRemote
+      ? marker.defaultBranch
+      : await timed("Resolving default branch", onEvent, () =>
+          git.defaultBranch(repoPath, repo.defaultBranch, signal, remoteBranches),
+        );
+
+    let markerMatchesRemote = false;
+    let remoteSha: string | undefined;
+    if (markerHasRemote) {
+      try {
+        remoteSha = await timed("Checking freshness marker", onEvent, () =>
+          git.revision(repoPath, `origin/${defaultBranch}`, signal),
+        );
+        markerMatchesRemote = remoteSha === marker.sha;
+      } catch (error) {
+        if (signal?.aborted) throw error;
+        logger.warn(`Prepared copy marker could not be verified: ${repo.id}`, error);
+      }
+    }
+
+    const requestedBaseBranch = remoteBranchFromRef(requestedBaseRef);
+    let requestedBranchFetchFailed = false;
+    if (requestedBranch !== undefined) {
+      const mandatoryBranches = [...new Set([defaultBranch, requestedBaseBranch])].filter(
+        (branch): branch is string => branch !== undefined,
+      );
+      const refs = [...new Set([...mandatoryBranches, requestedBranch])].map(remoteTrackingRef);
+      try {
+        await timed("Fetching origin", onEvent, () =>
+          git.fetchRefs(repoPath, "origin", refs, signal),
+        );
+      } catch (error) {
+        if (signal?.aborted) throw error;
+        requestedBranchFetchFailed = !mandatoryBranches.includes(requestedBranch);
+        logger.info(
+          requestedBranchFetchFailed
+            ? `Requested branch is not available remotely; fetching base only: ${repo.id}`
+            : `Default branch fetch failed; retrying: ${repo.id}`,
+          { branch: requestedBranch, error: errorMessage(error) },
+        );
+        try {
+          await timed("Fetching required base", onEvent, () =>
+            git.fetchRefs(repoPath, "origin", mandatoryBranches.map(remoteTrackingRef), signal),
+          );
+        } catch (fallbackError) {
+          if (requestedBaseBranch !== undefined && requestedBaseBranch !== defaultBranch) {
+            throw new SwarmError(
+              "git",
+              `Failed to fetch base ref '${requestedBaseRef}' for ${repo.id}`,
+              { cause: fallbackError },
+            );
+          }
+          throw toSwarmError(fallbackError, "git", `Failed to fetch repository: ${repo.id}`);
+        }
+      }
+      remoteSha = undefined;
+    } else if (!markerMatchesRemote) {
+      try {
+        await timed("Fetching origin", onEvent, () =>
+          git.fetchRefs(repoPath, "origin", [remoteTrackingRef(defaultBranch)], signal),
+        );
+      } catch (error) {
+        if (signal?.aborted) throw error;
+        logger.warn(`Narrow fetch failed; retrying full fetch for: ${repo.id}`, error);
+        try {
+          await timed("Fetching full origin", onEvent, () =>
+            git.fetch(repoPath, { prune: true, signal }),
+          );
+        } catch (fallbackError) {
+          throw toSwarmError(fallbackError, "git", `Failed to fetch repository: ${repo.id}`);
+        }
+      }
+      remoteSha = undefined;
+    }
+
+    if (requestedBranch !== undefined || !markerMatchesRemote) {
+      try {
+        remoteBranches = await timed("Relisting remote branches", onEvent, () =>
+          git.remoteBranches(repoPath, signal),
+        );
+      } catch (error) {
+        throw toSwarmError(error, "git", `Failed to inspect remote branches for: ${repo.id}`);
+      }
+      if (requestedBranchFetchFailed) {
+        remoteBranches = remoteBranches.filter((branch) => branch !== `origin/${requestedBranch}`);
+      }
+      if (
+        requestedBaseRef !== undefined &&
+        requestedBaseBranch !== undefined &&
+        !remoteBranches.includes(requestedBaseRef)
+      ) {
+        throw new SwarmError(
+          "git",
+          `Failed to fetch base ref '${requestedBaseRef}' for ${repo.id}`,
+        );
+      }
+    }
+
+    let headSha: string;
+    let dirty: boolean;
+    try {
+      [headSha, remoteSha, dirty] = await timed("Checking repository state", onEvent, () =>
+        Promise.all([
+          git.revision(repoPath, "HEAD", signal),
+          remoteSha === undefined
+            ? git.revision(repoPath, `origin/${defaultBranch}`, signal)
+            : Promise.resolve(remoteSha),
+          git.isDirty(repoPath, { signal }),
+        ]),
+      );
+    } catch (error) {
+      if (!remoteBranches.includes(`origin/${defaultBranch}`)) {
+        throw new SwarmError(
+          "git",
+          `Remote has no '${defaultBranch}' branch yet; push an initial commit to ${repo.id} first`,
+          { cause: error },
+        );
+      }
+      throw toSwarmError(error, "git", `Failed to inspect repository state: ${repo.id}`);
+    }
+
+    const reset = headSha !== remoteSha || dirty;
+    if (reset) {
+      try {
+        await timed("Updating base", onEvent, () =>
+          git.resetToRemote(repoPath, defaultBranch, signal),
+        );
+      } catch (error) {
+        throw toSwarmError(error, "git", `Failed to update repository base: ${repo.id}`);
+      }
+    }
+
+    return { defaultBranch, remoteBranches, marker, reset };
+  };
+
+  const preflightCreate = async (
+    input: { repoId: RepoId; branch: string },
+    onEvent?: OnEvent,
+  ): Promise<{
+    repo: Repo;
+    loadedConfig: Config;
+    slug: string;
+    id: string;
+    destination: string;
+  }> => {
+    return timed("Checking prerequisites", onEvent, async () => {
+      const [current, loadedConfig] = await Promise.all([loadState(), loadConfig()]);
+      const repo = resolveRepo(current, input.repoId);
+      const slug = slugify(input.branch);
+      const id = makeWorktreeId(repo.id, slug);
+      const destination = worktreePath(loadedConfig, repo.owner, repo.name, slug);
+      assertCreateAvailable(current, repo, slug, destination);
+      await assertDestinationAvailable(destination, loadedConfig.worktreesDir);
+      return { repo, loadedConfig, slug, id, destination };
+    });
+  };
+
+  const hotSlotEntry = (name: string): { slot: number; staging: boolean } | undefined => {
+    const match = /^\.hot(?:\.(\d+))?(\.staging)?$/u.exec(name);
+    if (!match) return undefined;
+    return { slot: match[1] === undefined ? 0 : Number(match[1]), staging: match[2] !== undefined };
+  };
+
+  const hotSlotPaths = (loadedConfig: Config, repoId: RepoId, slot: number) => {
+    const hot = hotCopyPath(loadedConfig.worktreesDir, repoId, slot);
+    const staging = hotCopyStagingPath(loadedConfig.worktreesDir, repoId, slot);
+    const pidPath = hotCopyPidPath(loadedConfig.worktreesDir, repoId, slot);
+    const logsDir = join(home ?? dirname(loadedConfig.reposDir), "logs");
+    const slotSuffix = slot === 0 ? "" : `-${slot}`;
+    const logPath = join(logsDir, `hot-copy-${repoId.replaceAll("/", "-")}${slotSuffix}.log`);
+    return { hot, staging, pidPath, logsDir, logPath };
+  };
+
+  const cleanupDetachedSlot = async (staging: string, pidPath: string): Promise<void> => {
+    await files.removeTree(staging);
+    await files.removeTree(pidPath);
+  };
+
+  const liveDetachedPid = async (
+    staging: string,
+    pidPath: string,
+    expectedPid?: number,
+  ): Promise<number | undefined> => {
+    const recordedPid = parsePid(await files.readText(pidPath));
+    const pid = recordedPid ?? expectedPid;
+    if (pid === undefined || !(await processPort.isAlive(pid))) return undefined;
+    if (expectedPid === pid) return pid;
+    const snapshot = await processPort.snapshot();
+    return snapshot.some(
+      (candidate) => candidate.pid === pid && candidate.command.includes(staging),
+    )
+      ? pid
+      : undefined;
+  };
+
+  const waitForDetachedSlot = async (
+    loadedConfig: Config,
+    repoId: RepoId,
+    slot: number,
+    opts?: { expectedPid?: number; signal?: AbortSignal; onEvent?: OnEvent },
+  ): Promise<boolean> => {
+    const { hot, staging, pidPath, logPath } = hotSlotPaths(loadedConfig, repoId, slot);
+    const pid = await liveDetachedPid(staging, pidPath, opts?.expectedPid);
+    if (pid !== undefined) {
+      opts?.onEvent?.({ type: "step", label: `Waiting for prepared copy slot ${slot}` });
+      while (await processPort.isAlive(pid)) {
+        if (disposed) return false;
+        throwIfAborted(opts?.signal);
+        await waitForPoll();
+      }
+    }
+
+    if (await files.exists(hot)) {
+      await files.removeTree(pidPath);
+      return true;
+    }
+
+    const [stagingExists, pidText] = await Promise.all([
+      files.exists(staging),
+      files.readText(pidPath),
+    ]);
+    if (stagingExists || pidText !== null) await cleanupDetachedSlot(staging, pidPath);
+    if (pid !== undefined || opts?.expectedPid !== undefined) {
+      throw new SwarmError(
+        "fs",
+        `Prepared copy process exited before publishing slot ${slot}: ${repoId}; see ${logPath}`,
+      );
+    }
+    return false;
+  };
+
+  const listHotSlotEntries = async (
+    worktreesDir: string,
+    repoId: RepoId,
+  ): Promise<Array<{ name: string; path: string; slot: number; staging: boolean }>> => {
+    const root = join(worktreesDir, repoId);
+    if (!(await files.exists(root))) return [];
+    const names = await files.listDirs(root, { includeReserved: true });
+    return names.flatMap((name) => {
+      const parsed = hotSlotEntry(name);
+      return parsed ? [{ name, path: join(root, name), ...parsed }] : [];
+    });
+  };
+
+  const cleanExcessHotSlots = async (
+    loadedConfig: Config,
+    repoId: RepoId,
+    signal?: AbortSignal,
+  ): Promise<void> => {
+    const entries = await listHotSlotEntries(loadedConfig.worktreesDir, repoId);
+    const excessSlots = [...new Set(entries.map(({ slot }) => slot))].filter(
+      (slot) => slot >= loadedConfig.hotPoolSize,
+    );
+    for (const slot of excessSlots) {
+      throwIfAborted(signal);
+      await waitForDetachedSlot(loadedConfig, repoId, slot, { signal });
+      const { hot, staging, pidPath } = hotSlotPaths(loadedConfig, repoId, slot);
+      await Promise.all([
+        files.removeTree(hot),
+        files.removeTree(staging),
+        files.removeTree(pidPath),
+      ]);
+    }
+  };
+
+  const awaitDetachedPreparations = async (
+    loadedConfig: Config,
+    repoId: RepoId,
+    opts?: { signal?: AbortSignal; onEvent?: OnEvent },
+  ): Promise<void> => {
+    const entries = await listHotSlotEntries(loadedConfig.worktreesDir, repoId);
+    const slots = new Set(entries.map(({ slot }) => slot));
+    for (let slot = 0; slot < loadedConfig.hotPoolSize; slot += 1) slots.add(slot);
+    for (const slot of [...slots].sort((left, right) => left - right)) {
+      throwIfAborted(opts?.signal);
+      await waitForDetachedSlot(loadedConfig, repoId, slot, opts);
+    }
+  };
+
+  const executeRefresh = async (
+    repoId: RepoId,
+    skipIfFresh: boolean,
+    signal: AbortSignal,
+  ): Promise<void> => {
+    assertRepoActive(repoId);
+    throwIfAborted(signal);
+    const pendingPreparation = preparations.get(repoId);
+    if (pendingPreparation) await pendingPreparation.promise;
+    assertRepoActive(repoId);
+    throwIfAborted(signal);
+
+    const [loadedConfig, current] = await Promise.all([loadConfig(), loadState()]);
+    const repo = resolveRepo(current, repoId);
+    await awaitDetachedPreparations(loadedConfig, repoId, { signal });
+    assertRepoActive(repoId);
+    throwIfAborted(signal);
+    const fingerprint = prepareFingerprint(repo.hooks.prepare);
+    const hotCopies: Array<{ path: string; slot: number }> = [];
+    try {
+      await timed("Inspecting prepared copy pool", undefined, async () => {
+        for (let slot = 0; slot < loadedConfig.hotPoolSize; slot += 1) {
+          throwIfAborted(signal);
+          const hot = hotCopyPath(loadedConfig.worktreesDir, repoId, slot);
+          if (await files.exists(hot)) hotCopies.push({ path: hot, slot });
+        }
+      });
+    } catch (error) {
+      throw toSwarmError(error, "fs", `Failed to inspect prepared copy pool for: ${repoId}`);
+    }
+
+    if (skipIfFresh && hotCopies.length > 0) {
+      const markers = await Promise.all(hotCopies.map((hot) => readHotMarker(hot.path)));
+      if (
+        markers.every((marker) => markerIsFresh(marker, loadedConfig.hotFreshnessMs, fingerprint))
+      ) {
+        return;
+      }
+    }
+
+    if (hotCopies.length === 0) {
+      await withRepoMutex(repoId, async () => {
+        throwIfAborted(signal);
+        await refreshRepository(repo, repo.path, undefined, signal);
+      });
+      return;
+    }
+
+    for (const { path: hot, slot } of hotCopies) {
+      throwIfAborted(signal);
+      await withRepoMutex(repoId, async () => {
+        throwIfAborted(signal);
+        assertRepoActive(repoId);
+        if (!(await files.exists(hot))) return;
+        const oldMarker = await readHotMarker(hot);
+        if (oldMarker !== null && oldMarker.prepareFingerprint !== fingerprint) {
+          const staging = hotCopyStagingPath(loadedConfig.worktreesDir, repoId, slot);
+          try {
+            await files.removeTree(hot);
+            await files.removeTree(staging);
+            const { defaultBranch } = await refreshRepository(repo, repo.path, undefined, signal);
+            throwIfAborted(signal);
+            await files.ensureDir(dirname(staging));
+            await files.cloneTree(repo.path, staging);
+            await runHooks("prepare", repo.hooks.prepare, staging, undefined, { signal });
+            throwIfAborted(signal);
+            await writeHotMarker(staging, defaultBranch, fingerprint, signal);
+            assertRepoActive(repoId);
+            resolveRepo(await loadState(), repoId);
+            await files.move(staging, hot);
+          } catch (error) {
+            await files.removeTree(staging).catch((cleanupError: unknown) => {
+              logger.error(`Failed to clean rebuilt prepared copy for: ${repoId}`, cleanupError);
+            });
+            throw error;
+          }
+          return;
+        }
+
+        await files.removeTree(hotMarkerPath(hot));
+        const { defaultBranch, reset } = await refreshRepository(repo, hot, undefined, signal);
+        if (reset) await runHooks("prepare", repo.hooks.prepare, hot, undefined, { signal });
+        throwIfAborted(signal);
+        try {
+          await timed("Writing freshness marker", undefined, () =>
+            writeHotMarker(hot, defaultBranch, fingerprint, signal),
+          );
+        } catch (error) {
+          throw toSwarmError(error, "fs", `Failed to update prepared copy marker: ${repoId}`);
+        }
+      });
+    }
+  };
+
+  const createSharedRefresh = (
+    repoId: RepoId,
+    mode: SharedRefresh["mode"],
+    after?: Promise<void>,
+  ): SharedRefresh => {
+    const controller = new AbortController();
+    const run = {} as SharedRefresh;
+    run.mode = mode;
+    run.controller = controller;
+    run.interests = new Set();
+    run.promise = (async () => {
+      if (after) await after.catch(() => undefined);
+      throwIfAborted(controller.signal);
+      await executeRefresh(repoId, mode === "skip", controller.signal);
+    })();
+    return run;
+  };
+
+  const subscribeRefresh = (run: SharedRefresh, signal?: AbortSignal): Promise<void> => {
+    const interest = Symbol("refresh-caller");
+    run.interests.add(interest);
+    let detached = false;
+    const detach = (): void => {
+      if (detached) return;
+      detached = true;
+      run.interests.delete(interest);
+    };
+    if (!signal) return run.promise.finally(detach);
+    if (signal.aborted) {
+      detach();
+      if (run.interests.size === 0) run.controller.abort();
+      return Promise.reject(new SwarmError("cancelled", "Operation cancelled"));
+    }
+    return new Promise<void>((resolvePromise, rejectPromise) => {
+      const abort = (): void => {
+        detach();
+        if (run.interests.size === 0) run.controller.abort();
+        rejectPromise(new SwarmError("cancelled", "Operation cancelled"));
+      };
+      signal.addEventListener("abort", abort, { once: true });
+      void run.promise.then(
+        () => {
+          signal.removeEventListener("abort", abort);
+          detach();
+          resolvePromise();
+        },
+        (error: unknown) => {
+          signal.removeEventListener("abort", abort);
+          detach();
+          rejectPromise(error);
+        },
+      );
+    });
+  };
+
+  const requestRefresh = (
+    repoId: RepoId,
+    opts?: { signal?: AbortSignal; skipIfFresh?: boolean },
+  ): Promise<void> => {
+    assertRepoActive(repoId);
+    const mode: SharedRefresh["mode"] = opts?.skipIfFresh ? "skip" : "forced";
+    let queue = refreshes.get(repoId);
+    let run: SharedRefresh;
+    if (!queue) {
+      run = createSharedRefresh(repoId, mode);
+      queue = { active: run };
+      refreshes.set(repoId, queue);
+    } else if (queue.active.mode === "forced" || mode === "skip") {
+      run = queue.active;
+    } else {
+      run = queue.forced ?? createSharedRefresh(repoId, "forced", queue.active.promise);
+      queue.forced = run;
+    }
+
+    const trackedQueue = queue;
+    void run.promise.then(
+      () => {
+        if (refreshes.get(repoId) !== trackedQueue) return;
+        if (trackedQueue.active === run && trackedQueue.forced) {
+          trackedQueue.active = trackedQueue.forced;
+          trackedQueue.forced = undefined;
+        } else if (trackedQueue.active === run || trackedQueue.forced === run) {
+          refreshes.delete(repoId);
+        }
+      },
+      () => {
+        if (refreshes.get(repoId) !== trackedQueue) return;
+        if (trackedQueue.active === run && trackedQueue.forced) {
+          trackedQueue.active = trackedQueue.forced;
+          trackedQueue.forced = undefined;
+        } else if (trackedQueue.active === run || trackedQueue.forced === run) {
+          refreshes.delete(repoId);
+        }
+      },
+    );
+    return subscribeRefresh(run, opts?.signal);
   };
 
   const service: WorktreeService = {
+    async reconcileCreating() {
+      const [current, loadedConfig] = await Promise.all([loadState(), loadConfig()]);
+      for (const repo of current.repos) {
+        const root = join(loadedConfig.worktreesDir, repo.id);
+        if (!(await files.exists(root))) continue;
+        for (const name of await files.listDirs(root, { includeReserved: true })) {
+          const candidatePath = join(root, name);
+          const markerText = await readCreatingMarkerText(candidatePath);
+          if (markerText === null) continue;
+
+          const alreadyRegistered = (await loadState()).worktrees.some(
+            (worktree) => resolve(worktree.path) === resolve(candidatePath),
+          );
+          if (alreadyRegistered) {
+            await files.removeTree(creatingMarkerPath(candidatePath));
+            continue;
+          }
+
+          const marker = parseCreatingMarker(markerText);
+          const expectedId = makeWorktreeId(repo.id, name);
+          let branchMatches = false;
+          if (
+            marker !== null &&
+            marker.repoId === repo.id &&
+            marker.id === expectedId &&
+            marker.baseRef.length > 0 &&
+            resolve(candidatePath) ===
+              resolve(worktreePath(loadedConfig, repo.owner, repo.name, name))
+          ) {
+            branchMatches = await git
+              .currentBranch(candidatePath)
+              .then((branch) => branch === marker.branch)
+              .catch(() => false);
+          }
+
+          if (marker !== null && branchMatches) {
+            try {
+              await mutateState(state, (next) => {
+                const registeredRepo = resolveRepo(next, repo.id);
+                if (next.worktrees.some((worktree) => worktree.id === marker.id)) return;
+                assertCreateAvailable(next, registeredRepo, name, candidatePath);
+                next.worktrees.push({
+                  id: marker.id,
+                  repoId: repo.id,
+                  slug: name,
+                  branch: marker.branch,
+                  baseRef: marker.baseRef,
+                  path: candidatePath,
+                  session: sessionName(repo.name, name),
+                  createdAt: marker.createdAt,
+                });
+              });
+              await files.removeTree(creatingMarkerPath(candidatePath));
+              continue;
+            } catch (error) {
+              logger.warn(`Failed to register interrupted worktree: ${marker.id}`, error);
+              if (!(error instanceof SwarmError) || error.code === "fs") throw error;
+            }
+          }
+
+          await trashUnregisteredPath(candidatePath, loadedConfig.worktreesDir);
+        }
+      }
+    },
+
+    async coordinateRepoDeletion(repoId, action) {
+      if (deletingRepos.has(repoId)) {
+        throw new SwarmError("conflict", `Repository is already being deleted: ${repoId}`);
+      }
+      deletingRepos.add(repoId);
+      try {
+        const preparation = preparations.get(repoId);
+        preparation?.controller.abort();
+        const refresh = refreshes.get(repoId);
+        refresh?.active.controller.abort();
+        refresh?.forced?.controller.abort();
+        await Promise.allSettled([
+          ...(preparation ? [preparation.promise] : []),
+          ...(refresh ? [refresh.active.promise] : []),
+          ...(refresh?.forced ? [refresh.forced.promise] : []),
+        ]);
+        const loadedConfig = await loadConfig();
+        await awaitDetachedPreparations(loadedConfig, repoId);
+        await withRepoMutex(repoId, async () => {
+          const entries = await listHotSlotEntries(loadedConfig.worktreesDir, repoId);
+          for (const entry of entries) {
+            await files.removeTree(entry.path);
+            await files.removeTree(hotCopyPidPath(loadedConfig.worktreesDir, repoId, entry.slot));
+          }
+          await action();
+        });
+      } finally {
+        deletingRepos.delete(repoId);
+      }
+    },
+
     async list(repoId) {
       const worktrees = (await loadState()).worktrees;
       return repoId === undefined
@@ -218,118 +1200,114 @@ export function createWorktreeService({
     },
 
     async remoteBranches(repoId) {
-      const current = await loadState();
+      const [current, loadedConfig] = await Promise.all([loadState(), loadConfig()]);
       const repo = current.repos.find((candidate) => candidate.id === repoId);
       if (!repo) throw new SwarmError("not-found", `Repository not found: ${repoId}`);
       try {
-        const branches = await git.remoteBranches(repo.path);
+        let target = repo.path;
+        for (let slot = 0; slot < loadedConfig.hotPoolSize; slot += 1) {
+          const candidate = hotCopyPath(loadedConfig.worktreesDir, repoId, slot);
+          if (await files.exists(candidate)) {
+            target = candidate;
+            break;
+          }
+        }
+        const branches = await git.remoteBranches(target);
         return branches.filter((branch) => branch !== "origin/HEAD" && branch !== "origin").sort();
       } catch (error) {
         throw toSwarmError(error, "git", `Failed to list remote branches for: ${repoId}`);
       }
     },
 
-    prepareHotCopy(repoId, onEvent) {
+    prepareHotCopy(repoId, onEvent, opts) {
+      assertRepoActive(repoId);
       const existing = preparations.get(repoId);
-      if (existing) return existing;
+      if (existing) return existing.promise;
 
-      const preparation = (async (): Promise<void> => {
+      const controller = new AbortController();
+      const signal = opts?.signal
+        ? AbortSignal.any([controller.signal, opts.signal])
+        : controller.signal;
+
+      const promise = (async (): Promise<void> => {
         try {
           const loadedConfig = await loadConfig();
-          const hot = hotCopyPath(loadedConfig.worktreesDir, repoId);
-          const staging = hotCopyStagingPath(loadedConfig.worktreesDir, repoId);
-          const pidPath = hotCopyPidPath(loadedConfig.worktreesDir, repoId);
-          const logsDir = join(home ?? dirname(loadedConfig.reposDir), "logs");
-          const logPath = join(logsDir, `hot-copy-${repoId.replaceAll("/", "-")}.log`);
+          assertRepoActive(repoId);
+          throwIfAborted(signal);
+          await awaitDetachedPreparations(loadedConfig, repoId, { signal, onEvent });
+          if (disposed) return;
 
-          const cleanupStalePreparation = async (): Promise<void> => {
-            await files.removeTree(staging);
-            await files.removeTree(pidPath);
-          };
+          let launched: { slot: number; pid: number } | undefined;
+          await withRepoMutex(repoId, async () => {
+            assertRepoActive(repoId);
+            throwIfAborted(signal);
+            await cleanExcessHotSlots(loadedConfig, repoId, signal);
+            if (loadedConfig.hotPoolSize === 0) return;
 
-          const waitForCompletion = async (pid: number, logPath: string): Promise<boolean> => {
-            while (!disposed) {
-              if (await process.isAlive(pid)) {
-                await waitForPoll();
-                continue;
-              }
-              if (await files.exists(hot)) return true;
-              await cleanupStalePreparation();
-              throw new SwarmError(
+            let missingSlot: number | undefined;
+            try {
+              await timed("Inspecting prepared copy pool", onEvent, async () => {
+                for (let slot = 0; slot < loadedConfig.hotPoolSize; slot += 1) {
+                  throwIfAborted(signal);
+                  if (
+                    await waitForDetachedSlot(loadedConfig, repoId, slot, {
+                      signal,
+                      onEvent,
+                    })
+                  ) {
+                    continue;
+                  }
+                  missingSlot = slot;
+                  return;
+                }
+              });
+            } catch (error) {
+              throw toSwarmError(
+                error,
                 "fs",
-                `Prepared copy process exited before publishing: ${repoId}; see ${logPath}`,
+                `Failed to inspect prepared copy pool for: ${repoId}`,
               );
             }
-            return false;
-          };
+            if (missingSlot === undefined) return;
 
-          try {
-            if (await files.exists(hot)) {
-              onEvent?.({ type: "done" });
-              return;
+            const current = await loadState();
+            const repo = resolveRepo(current, repoId);
+            const { defaultBranch } = await refreshRepository(repo, repo.path, onEvent, signal);
+            throwIfAborted(signal);
+            const sha = await git.revision(repo.path, `origin/${defaultBranch}`, signal);
+            const marker: HotCopyMarker = {
+              fetchedAt: clock.now().toISOString(),
+              defaultBranch,
+              sha,
+              prepareFingerprint: prepareFingerprint(repo.hooks.prepare),
+            };
+            const { hot, staging, pidPath, logsDir, logPath } = hotSlotPaths(
+              loadedConfig,
+              repoId,
+              missingSlot,
+            );
+            try {
+              await Promise.all([files.ensureDir(dirname(hot)), files.ensureDir(logsDir)]);
+              const pid = await files.cloneTreeDetached(repo.path, staging, hot, pidPath, logPath, {
+                markerText: `${JSON.stringify(marker, null, 2)}\n`,
+                prepareCommands: repo.hooks.prepare,
+              });
+              launched = { slot: missingSlot, pid };
+            } catch (error) {
+              throw toSwarmError(error, "fs", `Failed to prepare worktree copy for: ${repo.id}`);
             }
-
-            const recordedPidText = await files.readText(pidPath);
-            const recordedPid = parsePid(recordedPidText);
-            let livePid: number | undefined;
-            if (recordedPid !== undefined && (await process.isAlive(recordedPid))) {
-              const snapshot = await process.snapshot();
-              if (
-                snapshot.some(
-                  (candidate) =>
-                    candidate.pid === recordedPid && candidate.command.includes(staging),
-                )
-              ) {
-                livePid = recordedPid;
-              }
-            }
-
-            if (livePid === undefined && (await files.exists(hot))) {
-              onEvent?.({ type: "done" });
-              return;
-            }
-
-            if (livePid !== undefined) {
-              onEvent?.({ type: "step", label: "Waiting for prepared copy" });
-              if (await waitForCompletion(livePid, logPath)) {
-                onEvent?.({ type: "done" });
-              }
-              return;
-            }
-
-            if ((await files.exists(staging)) || recordedPidText !== null) {
-              onEvent?.({ type: "step", label: "Removing stale prepared copy" });
-              await cleanupStalePreparation();
-            }
-          } catch (error) {
-            throw toSwarmError(error, "fs", `Failed to inspect prepared copy for: ${repoId}`);
-          }
-
-          if (disposed) return;
-
-          const current = await loadState();
-          const repo = resolveRepo(current, repoId);
-          await refreshRepository(repo, repo.path, onEvent, async (branch) => {
-            await mutateState(state, (next) => {
-              resolveRepo(next, repo.id).defaultBranch = branch;
-            });
           });
-
-          if (disposed) return;
-
-          onEvent?.({ type: "step", label: "Copying repository" });
-          let pid: number;
-          try {
-            await Promise.all([files.ensureDir(dirname(hot)), files.ensureDir(logsDir)]);
-            pid = await files.cloneTreeDetached(repo.path, staging, hot, pidPath, logPath);
-          } catch (error) {
-            throw toSwarmError(error, "fs", `Failed to prepare worktree copy for: ${repo.id}`);
+          if (launched !== undefined) {
+            const { slot, pid } = launched;
+            await timed(`Copying and publishing prepared copy slot ${slot}`, onEvent, () =>
+              waitForDetachedSlot(loadedConfig, repoId, slot, {
+                expectedPid: pid,
+                signal,
+                onEvent,
+              }).then(() => undefined),
+            );
           }
-
-          if (await waitForCompletion(pid, logPath)) {
-            onEvent?.({ type: "step", label: "Finalizing prepared copy" });
-            onEvent?.({ type: "done" });
-          }
+          onEvent?.({ type: "done" });
         } catch (error) {
           const failure =
             error instanceof SwarmError
@@ -341,8 +1319,9 @@ export function createWorktreeService({
           throw failure;
         }
       })();
+      const preparation: Preparation = { controller, promise };
       preparations.set(repoId, preparation);
-      void preparation.then(
+      void promise.then(
         () => {
           if (preparations.get(repoId) === preparation) preparations.delete(repoId);
         },
@@ -350,11 +1329,22 @@ export function createWorktreeService({
           if (preparations.get(repoId) === preparation) preparations.delete(repoId);
         },
       );
-      return preparation;
+      return promise;
+    },
+
+    refreshPreparedCopy(repoId, opts) {
+      return requestRefresh(repoId, opts);
+    },
+
+    async awaitPendingRefresh(repoId) {
+      const queue = refreshes.get(repoId);
+      if (!queue) return;
+      await (queue.forced?.promise ?? queue.active.promise);
     },
 
     async create(input, onEvent) {
       validateBranch(input.branch);
+      assertRepoActive(input.repoId);
       if (
         input.source?.kind === "pull" &&
         (!Number.isInteger(input.source.number) || input.source.number <= 0)
@@ -362,126 +1352,151 @@ export function createWorktreeService({
         throw new SwarmError("validation", `Invalid pull request number: ${input.source.number}`);
       }
 
-      await preflightCreate(input);
+      const preflight = await preflightCreate(input, onEvent);
+      const pendingRefresh = refreshes.get(input.repoId);
+      if (pendingRefresh) {
+        await timed(
+          "Waiting for prepared copy refresh",
+          onEvent,
+          () => pendingRefresh.forced?.promise ?? pendingRefresh.active.promise,
+        );
+      }
       const pendingPreparation = preparations.get(input.repoId);
       if (pendingPreparation) {
-        onEvent?.({ type: "step", label: "Waiting for prepared copy" });
-        await pendingPreparation.catch((error: unknown) => {
-          logger.warn(`Prepared copy failed; falling back for: ${input.repoId}`, error);
-        });
+        await timed("Waiting for prepared copy", onEvent, () => pendingPreparation.promise).catch(
+          (error: unknown) => {
+            logger.warn(`Prepared copy failed; falling back for: ${input.repoId}`, error);
+          },
+        );
       }
 
-      let destination: string | undefined;
-      let copyStarted = false;
+      const { repo, loadedConfig, slug, id, destination } = preflight;
+      await awaitDetachedPreparations(loadedConfig, repo.id, { onEvent }).catch(
+        (error: unknown) => {
+          logger.warn(`Detached prepared copy failed; falling back for: ${input.repoId}`, error);
+        },
+      );
+      assertRepoActive(repo.id);
+      const attemptPath = `${destination}.creating-${randomUUID()}`;
+      let attemptExists = false;
+      let published = false;
       try {
-        const created = await mutateState(state, async (next) => {
-          const repo = resolveRepo(next, input.repoId);
-          const slug = slugify(input.branch);
-          const id = makeWorktreeId(repo.id, slug);
-          assertAvailable(next, repo, slug);
+        let claimedHotCopy: string | undefined;
+        try {
+          await withRepoMutex(repo.id, async () => {
+            await timed("Claiming prepared copy", onEvent, async () => {
+              for (let slot = 0; slot < loadedConfig.hotPoolSize; slot += 1) {
+                const candidate = hotCopyPath(loadedConfig.worktreesDir, repo.id, slot);
+                try {
+                  await files.move(candidate, attemptPath);
+                  claimedHotCopy = candidate;
+                  attemptExists = true;
+                  onEvent?.({ type: "prepared-copy-claimed", repoId: repo.id });
+                  return;
+                } catch (error) {
+                  if (isFsCode(error, ["ENOENT"])) continue;
+                  throw error;
+                }
+              }
+              await files.ensureDir(dirname(attemptPath));
+              attemptExists = true;
+              await files.cloneTree(repo.path, attemptPath);
+            });
+          });
+        } catch (error) {
+          throw toSwarmError(error, "fs", `Failed to claim or copy worktree: ${id}`);
+        }
 
-          const loadedConfig = await loadConfig();
-          destination = worktreePath(loadedConfig, repo.owner, repo.name, slug);
-          await assertDestinationAvailable(destination);
+        const { defaultBranch, remoteBranches, marker, reset } = await refreshForCreate(
+          repo,
+          attemptPath,
+          input.source?.kind === "pull" ? undefined : input.branch,
+          input.source?.kind === "pull" ? undefined : input.baseRef,
+          loadedConfig.hotFreshnessMs,
+          onEvent,
+        );
 
-          const hot = hotCopyPath(loadedConfig.worktreesDir, repo.id);
-          let defaultBranch: string;
-          let hasHotCopy: boolean;
+        let resolvedBaseRef: string;
+        if (input.source?.kind === "pull") {
+          const pullNumber = input.source.number;
+          resolvedBaseRef = `pull/${pullNumber}/head`;
           try {
-            hasHotCopy = await files.exists(hot);
+            await timed("Fetching PR head", onEvent, async () => {
+              await git.fetchPullHead(attemptPath, pullNumber, input.branch);
+              await git.checkoutTracking(attemptPath, input.branch);
+            });
           } catch (error) {
-            throw toSwarmError(error, "fs", `Failed to inspect prepared copy for: ${repo.id}`);
+            throw toSwarmError(error, "git", `Failed to fetch pull request head: ${id}`);
           }
-
-          if (hasHotCopy) {
-            onEvent?.({ type: "step", label: "Using prepared copy" });
-            try {
-              await files.move(hot, destination);
-              copyStarted = true;
-            } catch (error) {
-              throw toSwarmError(error, "fs", `Failed to use prepared copy for: ${id}`);
-            }
-            defaultBranch = await refreshRepository(repo, destination, onEvent, (branch) => {
-              repo.defaultBranch = branch;
-            });
-          } else {
-            defaultBranch = await refreshRepository(repo, repo.path, onEvent, (branch) => {
-              repo.defaultBranch = branch;
-            });
-            onEvent?.({ type: "step", label: "Copying repository" });
-            try {
-              await files.ensureDir(dirname(destination));
-              copyStarted = true;
-              await files.cloneTree(repo.path, destination);
-            } catch (error) {
-              throw toSwarmError(error, "fs", `Failed to copy worktree: ${id}`);
-            }
-          }
-
-          let resolvedBaseRef: string;
-          if (input.source?.kind === "pull") {
-            resolvedBaseRef = `pull/${input.source.number}/head`;
-            onEvent?.({ type: "step", label: "Fetching PR head" });
-            try {
-              await git.fetchPullHead(destination, input.source.number, input.branch);
-              await git.checkoutTracking(destination, input.branch);
-            } catch (error) {
-              throw toSwarmError(error, "git", `Failed to fetch pull request head: ${id}`);
-            }
-          } else {
-            onEvent?.({ type: "step", label: "Creating branch" });
-            let branches: string[];
-            try {
-              branches = await git.remoteBranches(destination);
-            } catch (error) {
-              throw toSwarmError(error, "git", `Failed to inspect remote branches for: ${id}`);
-            }
-            const remoteBranch = `origin/${input.branch}`;
-            resolvedBaseRef = branches.includes(remoteBranch)
-              ? remoteBranch
-              : (input.baseRef ?? `origin/${defaultBranch}`);
-            try {
-              if (branches.includes(remoteBranch)) {
-                await git.checkoutTracking(destination, input.branch);
+        } else {
+          const remoteBranch = `origin/${input.branch}`;
+          resolvedBaseRef = remoteBranches.includes(remoteBranch)
+            ? remoteBranch
+            : (input.baseRef ?? `origin/${defaultBranch}`);
+          try {
+            await timed("Creating branch", onEvent, async () => {
+              if (remoteBranches.includes(remoteBranch)) {
+                await git.checkoutTracking(attemptPath, input.branch);
               } else {
-                await git.checkoutNewBranch(destination, input.branch, resolvedBaseRef);
+                await git.checkoutNewBranch(attemptPath, input.branch, resolvedBaseRef);
               }
-            } catch (error) {
-              throw toSwarmError(error, "git", `Failed to create worktree branch: ${input.branch}`);
-            }
+            });
+          } catch (error) {
+            throw toSwarmError(error, "git", `Failed to create worktree branch: ${input.branch}`);
           }
+        }
 
-          onEvent?.({ type: "step", label: "Running hooks" });
-          for (const command of repo.hooks.postCreate) {
+        if (
+          claimedHotCopy === undefined ||
+          reset ||
+          marker?.prepareFingerprint !== prepareFingerprint(repo.hooks.prepare)
+        ) {
+          await runHooks("prepare", repo.hooks.prepare, attemptPath, onEvent);
+        }
+
+        const createdAt = clock.now().toISOString();
+        const creatingMarker: CreatingMarker = {
+          id,
+          repoId: repo.id,
+          branch: input.branch,
+          baseRef: resolvedBaseRef,
+          createdAt,
+        };
+        const created = await timed("Registering worktree", onEvent, () =>
+          mutateState(state, async (next) => {
+            const registeredRepo = resolveRepo(next, input.repoId);
+            assertCreateAvailable(next, registeredRepo, slug, destination);
+            await assertDestinationAvailable(destination, loadedConfig.worktreesDir);
             try {
-              const result = await shell.run("sh", ["-c", command], {
-                cwd: destination,
-                onStderrLine: (line) => onEvent?.({ type: "log", line }),
-              });
-              if (result.code !== 0) {
-                const line = `Hook failed (${result.code}): ${command}`;
-                onEvent?.({ type: "log", line });
-                logger.warn(line, { stderr: result.stderr });
-              }
+              await writeCreatingMarker(attemptPath, creatingMarker);
+              await files.move(attemptPath, destination);
+              attemptExists = false;
+              published = true;
             } catch (error) {
-              const line = `Hook failed: ${command}: ${errorMessage(error)}`;
-              onEvent?.({ type: "log", line });
-              logger.warn(line, error);
+              if (isFsCode(error, ["EEXIST", "ENOTEMPTY"])) {
+                throw new SwarmError("conflict", `Worktree path already exists: ${destination}`, {
+                  cause: error,
+                });
+              }
+              throw toSwarmError(error, "fs", `Failed to publish worktree: ${id}`);
             }
-          }
-
-          const worktree: Worktree = {
-            id,
-            repoId: repo.id,
-            slug,
-            branch: input.branch,
-            baseRef: resolvedBaseRef,
-            path: destination,
-            session: sessionName(repo.name, slug),
-            createdAt: clock.now().toISOString(),
-          };
-          next.worktrees.push(worktree);
-          return worktree;
+            const worktree: Worktree = {
+              id,
+              repoId: registeredRepo.id,
+              slug,
+              branch: input.branch,
+              baseRef: resolvedBaseRef,
+              path: destination,
+              session: sessionName(registeredRepo.name, slug),
+              createdAt,
+            };
+            registeredRepo.defaultBranch = defaultBranch;
+            next.worktrees.push(worktree);
+            return worktree;
+          }),
+        );
+        await files.removeTree(creatingMarkerPath(destination)).catch((error: unknown) => {
+          logger.warn(`Failed to remove worktree creation marker: ${id}`, error);
         });
         onEvent?.({ type: "done" });
         return created;
@@ -490,13 +1505,75 @@ export function createWorktreeService({
           error instanceof SwarmError
             ? error
             : new SwarmError("git", "Failed to create worktree", { cause: error });
-        if (copyStarted && destination) {
+        if (published) {
+          const trashPath = join(
+            home ?? dirname(loadedConfig.worktreesDir),
+            "trash",
+            `${clock.now().getTime()}-${slug}`,
+          );
           try {
-            await files.removeDetached(destination);
+            await files.ensureDir(dirname(trashPath));
+            await files.move(destination, trashPath);
+            published = false;
+            await files.removeDetached(trashPath).catch((cleanupError: unknown) => {
+              logger.error("Failed to remove trashed unregistered worktree", cleanupError);
+            });
+          } catch (cleanupError) {
+            logger.error("Failed to trash an unregistered worktree", cleanupError);
+          }
+        }
+        if (attemptExists && failure.code === "conflict") {
+          const trashPath = join(
+            home ?? dirname(loadedConfig.worktreesDir),
+            "trash",
+            `${clock.now().getTime()}-${slug}-${randomUUID()}`,
+          );
+          try {
+            await files.ensureDir(dirname(trashPath));
+            await files.move(attemptPath, trashPath);
+            attemptExists = false;
+            await files.removeDetached(trashPath).catch((cleanupError: unknown) => {
+              logger.error("Failed to remove trashed unregistered worktree", cleanupError);
+            });
+          } catch (cleanupError) {
+            logger.error("Failed to trash an unregistered worktree attempt", cleanupError);
+          }
+        }
+        if (attemptExists) {
+          try {
+            await files.removeDetached(attemptPath);
           } catch (cleanupError) {
             logger.error("Failed to clean up a partial worktree", cleanupError);
           }
         }
+        onEvent?.({ type: "error", error: failure });
+        throw failure;
+      }
+    },
+
+    async runPostCreateHooks(worktreeId, onEvent) {
+      try {
+        const current = await loadState();
+        const worktree = current.worktrees.find((candidate) => candidate.id === worktreeId);
+        if (!worktree) {
+          throw new SwarmError("not-found", `Worktree not found: ${worktreeId}`);
+        }
+        const repo = resolveRepo(current, worktree.repoId);
+        const loadedConfig = await loadConfig();
+        await runPostCreateHookSequence(
+          repo.hooks.postCreate,
+          worktree.path,
+          join(home ?? dirname(loadedConfig.worktreesDir), "logs", "swarm.log"),
+          onEvent,
+        );
+        onEvent?.({ type: "done" });
+      } catch (error) {
+        const failure =
+          error instanceof SwarmError
+            ? error
+            : new SwarmError("fs", `Failed to run post-create hooks for: ${worktreeId}`, {
+                cause: error,
+              });
         onEvent?.({ type: "error", error: failure });
         throw failure;
       }

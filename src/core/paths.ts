@@ -47,14 +47,14 @@ export function worktreePath(config: Config, owner: string, name: string, slug: 
   return join(config.worktreesDir, owner, name, slug);
 }
 
-export function hotCopyPath(worktreesDir: string, id: RepoId): string {
-  return join(worktreesDir, id, ".hot");
+export function hotCopyPath(worktreesDir: string, id: RepoId, slot = 0): string {
+  return join(worktreesDir, id, slot === 0 ? ".hot" : `.hot.${slot}`);
 }
 
-export function hotCopyStagingPath(worktreesDir: string, id: RepoId): string {
-  return join(worktreesDir, id, ".hot.staging");
+export function hotCopyStagingPath(worktreesDir: string, id: RepoId, slot = 0): string {
+  return join(worktreesDir, id, slot === 0 ? ".hot.staging" : `.hot.${slot}.staging`);
 }
 
-export function hotCopyPidPath(worktreesDir: string, id: RepoId): string {
-  return join(worktreesDir, id, ".hot.staging.pid");
+export function hotCopyPidPath(worktreesDir: string, id: RepoId, slot = 0): string {
+  return `${hotCopyStagingPath(worktreesDir, id, slot)}.pid`;
 }

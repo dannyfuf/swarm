@@ -1,5 +1,16 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdirSync } from "node:fs";
+import {
+  lstat,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  readlink,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, test } from "node:test";
@@ -19,19 +30,64 @@ async function waitUntil(predicate: () => Promise<boolean>): Promise<void> {
 }
 
 describe("files adapter", () => {
-  test("uses platform-specific clone argv and verifies the destination", async () => {
+  test("clones a tree end to end with nested content and symlinks", async () => {
     const root = await mkdtemp(join(tmpdir(), "swarm-files-"));
     try {
+      const source = join(root, "source");
+      const nested = join(source, "nested");
+      const destination = join(root, "copies", "destination");
+      await mkdir(nested, { recursive: true });
+      await writeFile(join(source, "root.txt"), "root content");
+      await writeFile(join(nested, "child.txt"), "nested content");
+      await symlink("../root.txt", join(nested, "root-link"));
+
+      const logger = createNullLogger();
+      await createFiles(createShell(logger), logger).cloneTree(source, destination);
+
+      assert.equal(await readFile(join(destination, "root.txt"), "utf8"), "root content");
+      assert.equal(
+        await readFile(join(destination, "nested", "child.txt"), "utf8"),
+        "nested content",
+      );
+      const copiedLink = join(destination, "nested", "root-link");
+      assert.equal((await lstat(copiedLink)).isSymbolicLink(), true);
+      assert.equal(await readlink(copiedLink), "../root.txt");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("uses the macOS fast path and platform-specific cp elsewhere", async () => {
+    const root = await mkdtemp(join(tmpdir(), "swarm-files-"));
+    try {
+      const macDestination = join(root, "darwin");
+      const cloned: Array<[string, string]> = [];
+      const macShell = createFakeShell();
+      await createFiles(macShell, createNullLogger(), "darwin", [], {
+        async cloneDirectory(src, dest) {
+          cloned.push([src, dest]);
+          await mkdir(dest);
+        },
+      }).cloneTree(`${root}/src`, macDestination);
+      assert.deepEqual(cloned, [[`${root}/src`, macDestination]]);
+      assert.deepEqual(macShell.calls, []);
+
       const cases: Array<[NodeJS.Platform, string[]]> = [
-        ["darwin", ["-Rc", `${root}/src`, `${root}/darwin`]],
         ["linux", ["-R", "--reflink=auto", `${root}/src`, `${root}/linux`]],
         ["win32", ["-R", `${root}/src`, `${root}/win32`]],
       ];
       for (const [platform, expectedArgs] of cases) {
         const destination = expectedArgs.at(-1);
         assert.ok(destination);
-        await mkdir(destination);
-        const shell = createFakeShell([{ match: (cmd) => cmd === "cp", result: {} }]);
+        const shell = createFakeShell([
+          {
+            match: (cmd) => cmd === "cp",
+            result: () => {
+              mkdirSync(destination);
+              return {};
+            },
+          },
+        ]);
         await createFiles(shell, createNullLogger(), platform).cloneTree(
           `${root}/src`,
           destination,
@@ -41,6 +97,76 @@ describe("files adapter", () => {
           [["cp", expectedArgs]],
         );
       }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("falls back to cp -Rc and logs the clonefile failure once", async () => {
+    const root = await mkdtemp(join(tmpdir(), "swarm-files-"));
+    try {
+      const shell = createFakeShell([
+        {
+          match: (cmd) => cmd === "cp",
+          result: (_cmd, args) => {
+            const destination = args.at(-1);
+            assert.ok(destination);
+            mkdirSync(destination);
+            return {};
+          },
+        },
+      ]);
+      const logger = createNullLogger();
+      const files = createFiles(shell, logger, "darwin", [], {
+        async cloneDirectory(_src, dest, onDestinationCreated) {
+          await mkdir(dest);
+          onDestinationCreated();
+          await writeFile(join(dest, "partial"), "incomplete clone");
+          throw new Error("forced clonefile failure");
+        },
+      });
+
+      await files.cloneTree(`${root}/source-one`, `${root}/destination-one`);
+      await files.cloneTree(`${root}/source-two`, `${root}/destination-two`);
+
+      assert.deepEqual(
+        shell.calls.map(({ cmd, args }) => [cmd, args]),
+        [
+          ["cp", ["-Rc", `${root}/source-one`, `${root}/destination-one`]],
+          ["cp", ["-Rc", `${root}/source-two`, `${root}/destination-two`]],
+        ],
+      );
+      assert.deepEqual(
+        logger.entries.filter(({ level }) => level === "warn"),
+        [
+          {
+            level: "warn",
+            scope: "files",
+            message: "Directory clonefile unavailable; falling back to cp -Rc",
+            data: { reason: "forced clonefile failure" },
+          },
+        ],
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("does not remove a clone destination created by a concurrent caller", async () => {
+    const root = await mkdtemp(join(tmpdir(), "swarm-files-"));
+    const destination = join(root, "winner");
+    try {
+      const files = createFiles(createFakeShell(), createNullLogger(), "darwin", [], {
+        async cloneDirectory() {
+          await mkdir(destination);
+          await writeFile(join(destination, "owned-by-winner"), "keep");
+          throw Object.assign(new Error("destination appeared"), { code: "EEXIST" });
+        },
+      });
+
+      await assert.rejects(files.cloneTree(join(root, "source"), destination));
+
+      assert.equal(await readFile(join(destination, "owned-by-winner"), "utf8"), "keep");
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -56,12 +182,14 @@ describe("files adapter", () => {
     for (const [platform, expectedCopy] of cases) {
       const shell = createFakeShell();
       const files = createFiles(shell, createNullLogger(), platform);
+      const opts = { markerText: '{"fetchedAt":"now"}\n', prepareCommands: ["npm ci"] };
       const pid = await files.cloneTreeDetached(
         "/repo",
         "/worktrees/owner/repo/.hot.staging",
         "/worktrees/owner/repo/.hot",
         "/worktrees/owner/repo/.hot.staging.pid",
         "/logs/hot-copy-owner-repo.log",
+        opts,
       );
 
       assert.equal(pid, 4242);
@@ -74,13 +202,17 @@ describe("files adapter", () => {
         "/worktrees/owner/repo/.hot.staging",
         "/worktrees/owner/repo/.hot",
         "/worktrees/owner/repo/.hot.staging.pid",
+        opts.markerText,
+        ...opts.prepareCommands,
       ]);
       assert.deepEqual(call?.opts, { logPath: "/logs/hot-copy-owner-repo.log" });
       const script = call?.args[1] ?? "";
       assert.equal(script.includes(expectedCopy), true);
-      assert.match(script, /&& mv "\$staging_path" "\$hot_path"/u);
+      assert.match(script, /mv "\$staging_path" "\$hot_path"/u);
       assert.match(script, /if \[ "\$status" -ne 0 \]; then rm -rf "\$staging_path"; fi/u);
       assert.match(script, /printf '%s\\n' "\$\$" > "\$pid_path"/u);
+      assert.match(script, /swarm-hot\.json/u);
+      assert.match(script, /for command do/u);
     }
   });
 
@@ -92,11 +224,15 @@ describe("files adapter", () => {
       const hot = join(root, ".hot");
       const pidPath = join(root, ".hot.staging.pid");
       const logPath = join(root, "hot-copy.log");
-      await mkdir(source);
+      await mkdir(join(source, ".git"), { recursive: true });
       await writeFile(join(source, "complete.txt"), "complete");
       const files = createFiles(createShell(createNullLogger()), createNullLogger());
+      const opts = {
+        markerText: '{"fetchedAt":"now"}\n',
+        prepareCommands: ["printf prepared > prepared.txt", "exit 7", "printf after > after.txt"],
+      };
 
-      await files.cloneTreeDetached(source, staging, hot, pidPath, logPath);
+      await files.cloneTreeDetached(source, staging, hot, pidPath, logPath, opts);
       await waitUntil(
         async () =>
           (await files.exists(join(hot, "complete.txt"))) && !(await files.exists(pidPath)),
@@ -104,6 +240,9 @@ describe("files adapter", () => {
       assert.equal(await files.exists(staging), false);
       assert.equal(await files.exists(pidPath), false);
       assert.equal(await readFile(join(hot, "complete.txt"), "utf8"), "complete");
+      assert.equal(await readFile(join(hot, "prepared.txt"), "utf8"), "prepared");
+      assert.equal(await readFile(join(hot, "after.txt"), "utf8"), "after");
+      assert.equal(await readFile(join(hot, ".git", "swarm-hot.json"), "utf8"), opts.markerText);
 
       const failedStaging = join(root, ".failed.staging");
       const failedHot = join(root, ".failed");
@@ -116,6 +255,7 @@ describe("files adapter", () => {
         failedHot,
         failedPid,
         logPath,
+        opts,
       );
       await waitUntil(
         async () => !(await files.exists(failedStaging)) && !(await files.exists(failedPid)),
@@ -154,6 +294,8 @@ describe("files adapter", () => {
       await mkdir(join(root, "a-dir"));
       await mkdir(join(root, ".hot"));
       await mkdir(join(root, ".hot.staging"));
+      await mkdir(join(root, ".hot.1"));
+      await mkdir(join(root, ".hot.1.staging"));
       await writeFile(join(root, "file.txt"), "not a directory");
       assert.deepEqual(await files.listDirs(root), ["a-dir", "nested", "z-dir"]);
 

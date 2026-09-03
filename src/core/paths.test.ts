@@ -69,8 +69,20 @@ describe("path helpers", () => {
       "/home/test/.swarm/worktrees/bukhr/payroll/.hot.staging",
     );
     assert.equal(
+      hotCopyPath(config.worktreesDir, "bukhr/payroll", 2),
+      "/home/test/.swarm/worktrees/bukhr/payroll/.hot.2",
+    );
+    assert.equal(
+      hotCopyStagingPath(config.worktreesDir, "bukhr/payroll", 2),
+      "/home/test/.swarm/worktrees/bukhr/payroll/.hot.2.staging",
+    );
+    assert.equal(
       hotCopyPidPath(config.worktreesDir, "bukhr/payroll"),
       "/home/test/.swarm/worktrees/bukhr/payroll/.hot.staging.pid",
+    );
+    assert.equal(
+      hotCopyPidPath(config.worktreesDir, "bukhr/payroll", 2),
+      "/home/test/.swarm/worktrees/bukhr/payroll/.hot.2.staging.pid",
     );
   });
 

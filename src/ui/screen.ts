@@ -661,7 +661,9 @@ function detailLines(state: AppState, layout: ScreenLayout, context: ScreenConte
       cell(` ${glyphs.sep} `, { fg: theme.dim }),
       cell(`${live.length}`, { fg: live.length > 0 ? theme.green : theme.text }),
       cell(" live", { fg: theme.dim }),
-      cell(` ${glyphs.sep} hooks `, { fg: theme.dim }),
+      cell(` ${glyphs.sep} prepare `, { fg: theme.dim }),
+      cell(repo.hooks.prepare.join(" && ") || "none", { fg: theme.muted }),
+      cell(` ${glyphs.sep} post `, { fg: theme.dim }),
       cell(repo.hooks.postCreate.join(" && ") || "none", { fg: theme.muted }),
     ]);
     lines.push([cell(" ", {}), cell(truncate(repo.url, width - 2), { fg: theme.ghost })]);

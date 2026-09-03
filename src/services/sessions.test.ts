@@ -46,6 +46,10 @@ function fakeWorktreeService(): WorktreeService & { touches: string[] } {
   const touches: string[] = [];
   return {
     touches,
+    async reconcileCreating() {},
+    async coordinateRepoDeletion(_repoId, action) {
+      await action();
+    },
     async list() {
       return [];
     },
@@ -53,6 +57,9 @@ function fakeWorktreeService(): WorktreeService & { touches: string[] } {
       return [];
     },
     async prepareHotCopy() {},
+    async refreshPreparedCopy() {},
+    async awaitPendingRefresh() {},
+    async runPostCreateHooks() {},
     async create() {
       return target;
     },

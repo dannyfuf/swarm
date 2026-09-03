@@ -14,6 +14,7 @@ import type {
 } from "../core/services.ts";
 import type {
   CloneJob,
+  Config,
   PrRepoSlice,
   PrTab,
   PullRequest,
@@ -53,8 +54,11 @@ interface Harness {
   logger: NullLogger;
   behavior: {
     snapshot: StatusService["snapshot"];
+    remoteBranches: WorktreeService["remoteBranches"];
     createWorktree: WorktreeService["create"];
     prepareHotCopy: WorktreeService["prepareHotCopy"];
+    refreshPreparedCopy: WorktreeService["refreshPreparedCopy"];
+    runPostCreateHooks: WorktreeService["runPostCreateHooks"];
     cloneRepo: RepoService["clone"];
     reconcileClones: RepoService["reconcileClones"];
     deleteWorktree: WorktreeService["delete"];
@@ -70,12 +74,18 @@ interface Harness {
     snapshots: Worktree[][];
     created: Array<{ input: Parameters<WorktreeService["create"]>[0]; onEvent?: OnEvent }>;
     prepared: Array<{ repoId: RepoId; onEvent?: OnEvent }>;
+    refreshedPrepared: Array<{
+      repoId: RepoId;
+      opts?: Parameters<WorktreeService["refreshPreparedCopy"]>[1];
+    }>;
+    postCreateHooks: Array<{ worktreeId: WorktreeId; onEvent?: OnEvent }>;
     cloned: Array<{ remote: Parameters<RepoService["clone"]>[0]; contextId: string }>;
     deletedWorktrees: WorktreeId[];
     opened: Array<{ worktree: Worktree; options?: { sleepPrevious?: boolean } }>;
     intervals: number[];
     clearedIntervals: unknown[];
     reconciliations: number;
+    creatingReconciliations: number;
     prLoads: Array<{ repoIds: RepoId[]; tab: PrTab; force?: boolean }>;
     prFinds: Array<{ repoId: RepoId; branch: string }>;
     clipboardCopies: string[];
@@ -110,8 +120,12 @@ function statusFor(worktree: Worktree, session: WorktreeStatus["session"] = "det
   } satisfies WorktreeStatus;
 }
 
-function createHarness(initial: State = makeState()): Harness {
+function createHarness(
+  initial: State = makeState(),
+  options: { config?: Config; enableHotRefreshTimer?: boolean } = {},
+): Harness {
   let persisted = structuredClone(initial);
+  const testConfig = structuredClone(options.config ?? config);
   const store = createRecordingStore(
     makeAppState({
       contexts: persisted.contexts,
@@ -119,6 +133,7 @@ function createHarness(initial: State = makeState()): Harness {
       clones: persisted.clones,
       worktrees: persisted.worktrees,
       activeContextId: persisted.activeContextId,
+      config: testConfig,
       loading: true,
     }),
   );
@@ -126,12 +141,15 @@ function createHarness(initial: State = makeState()): Harness {
     snapshots: [],
     created: [],
     prepared: [],
+    refreshedPrepared: [],
+    postCreateHooks: [],
     cloned: [],
     deletedWorktrees: [],
     opened: [],
     intervals: [],
     clearedIntervals: [],
     reconciliations: 0,
+    creatingReconciliations: 0,
     prLoads: [],
     prFinds: [],
     clipboardCopies: [],
@@ -145,12 +163,17 @@ function createHarness(initial: State = makeState()): Harness {
     async snapshot(items) {
       return new Map(items.map((worktree) => [worktree.id, statusFor(worktree)]));
     },
+    async remoteBranches() {
+      return ["origin/main"];
+    },
     async createWorktree(input) {
       const created = worktrees[1];
       assert.ok(created);
       return { ...created, repoId: input.repoId, branch: input.branch };
     },
     async prepareHotCopy() {},
+    async refreshPreparedCopy() {},
+    async runPostCreateHooks() {},
     async cloneRepo(remote, contextId) {
       return {
         id: remote.fullName,
@@ -200,7 +223,7 @@ function createHarness(initial: State = makeState()): Harness {
   };
   const configPort: ConfigPort = {
     async load() {
-      return structuredClone(config);
+      return structuredClone(testConfig);
     },
     async save() {},
   };
@@ -244,18 +267,33 @@ function createHarness(initial: State = makeState()): Harness {
     async delete() {},
   };
   const worktreeService: WorktreeService = {
+    async reconcileCreating() {
+      calls.creatingReconciliations += 1;
+    },
+    async coordinateRepoDeletion(_repoId, action) {
+      await action();
+    },
     dispose() {
       calls.worktreeDisposals += 1;
     },
     async list() {
       return structuredClone(persisted.worktrees);
     },
-    async remoteBranches() {
-      return ["origin/main"];
+    async remoteBranches(repoId) {
+      return behavior.remoteBranches(repoId);
     },
     prepareHotCopy(repoId, onEvent) {
       calls.prepared.push({ repoId, onEvent });
       return behavior.prepareHotCopy(repoId, onEvent);
+    },
+    async refreshPreparedCopy(repoId, opts) {
+      calls.refreshedPrepared.push({ repoId, opts });
+      return behavior.refreshPreparedCopy(repoId, opts);
+    },
+    async awaitPendingRefresh() {},
+    async runPostCreateHooks(worktreeId, onEvent) {
+      calls.postCreateHooks.push({ worktreeId, onEvent });
+      return behavior.runPostCreateHooks(worktreeId, onEvent);
     },
     async create(input, onEvent) {
       calls.created.push({ input, onEvent });
@@ -371,6 +409,7 @@ function createHarness(initial: State = makeState()): Harness {
       },
     },
     installRoot: "/install/swarm",
+    enableHotRefreshTimer: options.enableHotRefreshTimer,
   });
 
   return {
@@ -441,6 +480,7 @@ describe("createController", () => {
     assert.equal(state.currentSession, "swarm/popup");
     assert.equal(state.config.reposDir, config.reposDir);
     assert.equal(Object.keys(state.statuses).length, worktrees.length);
+    assert.equal(harness.calls.creatingReconciliations, 1);
     assert.deepEqual(harness.calls.intervals, [config.ui.statusRefreshMs]);
     const hydrateIndex = harness.store.actions.findIndex(({ type }) => type === "hydrate");
     const statusIndex = harness.store.actions.findIndex(({ type }) => type === "statuses");
@@ -451,7 +491,7 @@ describe("createController", () => {
     assert.equal(harness.calls.worktreeDisposals, 1);
   });
 
-  test("starts repo warm-ups only after the initial state hydration", async () => {
+  test("starts repo warm-ups after hydration with at most two repos active", async () => {
     const harness = createHarness();
     const preparation = deferred<void>();
     harness.behavior.prepareHotCopy = async () => preparation.promise;
@@ -460,7 +500,7 @@ describe("createController", () => {
 
     assert.deepEqual(
       harness.calls.prepared.map(({ repoId }) => repoId),
-      ["bukhr/payroll", "bukhr/platform", "dannyfuf/dotfiles"],
+      ["bukhr/payroll", "bukhr/platform"],
     );
     const hydrateIndex = harness.store.actions.findIndex(({ type }) => type === "hydrate");
     const warmIndex = harness.store.actions.findIndex(
@@ -470,6 +510,10 @@ describe("createController", () => {
 
     preparation.resolve();
     await flush();
+    assert.deepEqual(
+      harness.calls.prepared.map(({ repoId }) => repoId),
+      ["bukhr/payroll", "bukhr/platform", "dannyfuf/dotfiles"],
+    );
     harness.controller.dispose();
   });
 
@@ -615,12 +659,100 @@ describe("createController", () => {
     assert.deepEqual(await harness.controller.remoteBranches("bukhr/payroll"), ["origin/main"]);
   });
 
+  test("pre-fetch refreshes its dialog generation and ignores an older same-repo open", async () => {
+    const harness = createHarness();
+    const firstRefresh = deferred<void>();
+    harness.behavior.refreshPreparedCopy = async () => firstRefresh.promise;
+    harness.behavior.remoteBranches = async () => ["origin/main", "origin/new-remote"];
+    harness.store.dispatch({
+      type: "openDialog",
+      dialog: {
+        kind: "create-worktree",
+        repoId: "bukhr/payroll",
+        generation: 1,
+        branches: ["origin/main"],
+        fetching: true,
+      },
+    });
+
+    harness.controller.refreshPreparedCopy("bukhr/payroll");
+    assert.equal(harness.calls.refreshedPrepared.length, 1);
+    assert.equal(harness.store.getState().dialog?.kind, "create-worktree");
+    firstRefresh.resolve();
+    await flush();
+
+    const updated = harness.store.getState().dialog;
+    assert.equal(updated?.kind, "create-worktree");
+    if (updated?.kind === "create-worktree") {
+      assert.deepEqual(updated.branches, ["origin/main", "origin/new-remote"]);
+      assert.equal(updated.fetching, false);
+    }
+
+    const secondRefresh = deferred<void>();
+    harness.behavior.refreshPreparedCopy = async () => secondRefresh.promise;
+    harness.controller.refreshPreparedCopy("bukhr/payroll");
+    harness.store.dispatch({ type: "closeDialog" });
+    harness.store.dispatch({
+      type: "openDialog",
+      dialog: {
+        kind: "create-worktree",
+        repoId: "bukhr/payroll",
+        generation: 2,
+        branches: ["origin/reopened"],
+        fetching: true,
+      },
+    });
+    secondRefresh.resolve();
+    await flush();
+    const reopened = harness.store.getState().dialog;
+    assert.equal(reopened?.kind, "create-worktree");
+    if (reopened?.kind === "create-worktree") {
+      assert.deepEqual(reopened.branches, ["origin/reopened"]);
+      assert.equal(reopened.fetching, true);
+    }
+  });
+
+  test("dispose aborts an in-flight prepared-copy refresh", async () => {
+    const harness = createHarness();
+    harness.store.dispatch({
+      type: "openDialog",
+      dialog: {
+        kind: "create-worktree",
+        repoId: "bukhr/payroll",
+        generation: 1,
+        branches: ["origin/main"],
+        fetching: true,
+      },
+    });
+    let refreshSignal: AbortSignal | undefined;
+    harness.behavior.refreshPreparedCopy = async (_repoId, opts) => {
+      refreshSignal = opts?.signal;
+      assert.ok(refreshSignal);
+      await new Promise<void>((_resolve, reject) => {
+        refreshSignal?.addEventListener(
+          "abort",
+          () => reject(new SwarmError("cancelled", "refresh cancelled")),
+          { once: true },
+        );
+      });
+    };
+
+    harness.controller.refreshPreparedCopy("bukhr/payroll");
+    await flush();
+    harness.controller.dispose();
+    await flush();
+
+    assert.equal(refreshSignal?.aborted, true);
+  });
+
   test("createWorktree emits progress, ends the operation, refreshes, and toasts", async () => {
     const harness = createHarness();
     harness.store.actions.length = 0;
     harness.behavior.createWorktree = async (input, onEvent) => {
       onEvent?.({ type: "step", label: "Fetching origin" });
+      onEvent?.({ type: "log", line: "Fetching origin 12ms" });
       onEvent?.({ type: "step", label: "Copying tree" });
+      onEvent?.({ type: "log", line: "Copying tree 4ms" });
       onEvent?.({ type: "done" });
       const created = { ...worktrees[1], repoId: input.repoId, branch: input.branch };
       assert.ok(created.id);
@@ -648,7 +780,13 @@ describe("createController", () => {
     });
     assert.deepEqual(
       operationActions.map(({ type }) => type),
-      ["opStart", "opStep", "opStep", "opEnd"],
+      ["opStart", "opStep", "opStep", "opStep", "opStep", "opEnd"],
+    );
+    assert.deepEqual(
+      operationActions.flatMap((action) =>
+        action.type === "opStep" && action.line !== undefined ? [action.line] : [],
+      ),
+      ["Fetching origin 12ms", "Copying tree 4ms"],
     );
     const start = operationActions[0];
     assert.equal(start?.type, "opStart");
@@ -666,6 +804,130 @@ describe("createController", () => {
       harness.calls.prepared.map(({ repoId }) => repoId),
       ["bukhr/payroll"],
     );
+  });
+
+  test("starts post-create hooks as a separate operation and allows opening meanwhile", async () => {
+    const initial = makeState();
+    const payroll = initial.repos.find(({ id }) => id === "bukhr/payroll");
+    assert.ok(payroll);
+    payroll.hooks.postCreate = ["npm install"];
+    const harness = createHarness(initial);
+    const hooks = deferred<void>();
+    const created = initial.worktrees[0];
+    assert.ok(created);
+    harness.behavior.createWorktree = async () => created;
+    harness.behavior.runPostCreateHooks = async (_worktreeId, onEvent) => {
+      onEvent?.({ type: "step", label: "Running post-create hook 1/1" });
+      onEvent?.({ type: "log", line: "$ npm install" });
+      await hooks.promise;
+    };
+
+    const creation = harness.controller.createWorktree({
+      repoId: "bukhr/payroll",
+      branch: "feat/hooks",
+    });
+    await flush();
+
+    assert.deepEqual(
+      harness.calls.postCreateHooks.map(({ worktreeId }) => worktreeId),
+      [created.id],
+    );
+    const hookOperation = harness.store
+      .getState()
+      .operations.find(({ targetId }) => targetId === `post-create:${created.id}`);
+    assert.equal(hookOperation?.label, `Post-create hooks · ${created.slug}`);
+    assert.equal(hookOperation?.step, "Running post-create hook 1/1");
+    assert.equal(
+      harness.store.getState().operations.some(({ label }) => label === "Creating worktree"),
+      false,
+    );
+
+    await harness.controller.openSelected();
+    assert.equal(harness.calls.opened.length, 1);
+    assert.ok(
+      harness.store
+        .getState()
+        .operations.some(({ targetId }) => targetId === `post-create:${created.id}`),
+    );
+    hooks.resolve();
+    await creation;
+    await flush();
+  });
+
+  test("starts replenishment as soon as a prepared copy is claimed", async () => {
+    const harness = createHarness();
+    const claimed = deferred<void>();
+    const finishCreate = deferred<void>();
+    const created = worktrees[0];
+    assert.ok(created);
+    harness.behavior.createWorktree = async (input, onEvent) => {
+      onEvent?.({ type: "prepared-copy-claimed", repoId: input.repoId });
+      claimed.resolve();
+      await finishCreate.promise;
+      return created;
+    };
+
+    const creation = harness.controller.createWorktree({
+      repoId: "bukhr/payroll",
+      branch: "feat/early-replenish",
+    });
+    await claimed.promise;
+    await flush();
+    assert.deepEqual(
+      harness.calls.prepared.map(({ repoId }) => repoId),
+      ["bukhr/payroll"],
+    );
+
+    finishCreate.resolve();
+    await creation;
+  });
+
+  test("periodic prepared-copy refresh is opt-in for tests, sequential, and disableable", async () => {
+    const enabledConfig = { ...config, hotRefreshIntervalMs: 1_000 };
+    const harness = createHarness(makeState(), {
+      config: enabledConfig,
+      enableHotRefreshTimer: true,
+    });
+    let activeRefreshes = 0;
+    let maximumActiveRefreshes = 0;
+    harness.behavior.refreshPreparedCopy = async () => {
+      activeRefreshes += 1;
+      maximumActiveRefreshes = Math.max(maximumActiveRefreshes, activeRefreshes);
+      await Promise.resolve();
+      activeRefreshes -= 1;
+    };
+    await harness.controller.init();
+    await flush();
+    harness.calls.refreshedPrepared.length = 0;
+
+    harness.clock.advance(999);
+    await flush();
+    assert.equal(harness.calls.refreshedPrepared.length, 0);
+    harness.clock.advance(1);
+    await flush();
+    assert.deepEqual(
+      harness.calls.refreshedPrepared.map(({ repoId, opts }) => [repoId, opts?.skipIfFresh]),
+      [
+        ["bukhr/payroll", true],
+        ["bukhr/platform", true],
+        ["dannyfuf/dotfiles", true],
+      ],
+    );
+    assert.equal(maximumActiveRefreshes, 1);
+    harness.controller.dispose();
+    assert.equal(harness.calls.clearedIntervals.length, 2);
+
+    const disabled = createHarness(makeState(), {
+      config: { ...config, hotRefreshIntervalMs: 0 },
+      enableHotRefreshTimer: true,
+    });
+    await disabled.controller.init();
+    await flush();
+    disabled.clock.advance(300_000);
+    await flush();
+    assert.equal(disabled.calls.refreshedPrepared.length, 0);
+    assert.deepEqual(disabled.calls.intervals, [config.ui.statusRefreshMs]);
+    disabled.controller.dispose();
   });
 
   test("a successful update reports progress and requests launcher restart code 75", async () => {
@@ -881,7 +1143,7 @@ describe("createController", () => {
                 defaultBranch: clone.defaultBranch,
                 path: clone.path,
                 clonedAt: harness.clock.now().toISOString(),
-                hooks: { postCreate: [] },
+                hooks: { prepare: [], postCreate: [] },
               },
             ],
           }),
@@ -1056,6 +1318,7 @@ describe("createController", () => {
     assert.deepEqual(sameRepoHarness.calls.created[0]?.input, {
       repoId: sameRepo.repoId,
       branch: sameRepo.headRefName,
+      source: { kind: "pull", number: 80 },
     });
     assert.equal(sameRepoHarness.calls.opened[0]?.options?.sleepPrevious, true);
 

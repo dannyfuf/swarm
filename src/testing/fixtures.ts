@@ -35,7 +35,7 @@ export const repos: Repo[] = [
     defaultBranch: "main",
     path: "/home/test/.swarm/repos/bukhr/payroll",
     clonedAt: "2026-01-03T00:00:00.000Z",
-    hooks: { postCreate: [] },
+    hooks: { prepare: [], postCreate: [] },
   },
   {
     id: "bukhr/platform",
@@ -46,7 +46,7 @@ export const repos: Repo[] = [
     defaultBranch: "main",
     path: "/home/test/.swarm/repos/bukhr/platform",
     clonedAt: "2026-01-04T00:00:00.000Z",
-    hooks: { postCreate: ["npm install"] },
+    hooks: { prepare: [], postCreate: ["npm install"] },
   },
   {
     id: "dannyfuf/dotfiles",
@@ -57,7 +57,7 @@ export const repos: Repo[] = [
     defaultBranch: "main",
     path: "/home/test/.swarm/repos/dannyfuf/dotfiles",
     clonedAt: "2026-01-05T00:00:00.000Z",
-    hooks: { postCreate: [] },
+    hooks: { prepare: [], postCreate: [] },
   },
 ];
 

@@ -29,9 +29,10 @@ export const RepoSchema = z.object({
   clonedAt: z.string().datetime(),
   hooks: z
     .object({
+      prepare: z.array(z.string()).default([]),
       postCreate: z.array(z.string()).default([]),
     })
-    .default({ postCreate: [] }),
+    .default({ prepare: [], postCreate: [] }),
 });
 export type Repo = z.infer<typeof RepoSchema>;
 
@@ -187,6 +188,9 @@ export const ConfigSchema = z.object({
   version: z.literal(1),
   reposDir: z.string(),
   worktreesDir: z.string(),
+  hotPoolSize: z.number().int().nonnegative().default(1),
+  hotFreshnessMs: z.number().int().nonnegative().default(60000),
+  hotRefreshIntervalMs: z.number().int().nonnegative().default(300000),
   agent: AgentNameSchema.default("claude"),
   windows: z.array(WindowSpecSchema),
   sleep: SleepPolicySchema,
@@ -255,6 +259,9 @@ export function defaultConfig(home: string): Config {
     version: 1,
     reposDir: join(home, "repos"),
     worktreesDir: join(home, "worktrees"),
+    hotPoolSize: 1,
+    hotFreshnessMs: 60000,
+    hotRefreshIntervalMs: 300000,
     agent: "claude",
     windows: DEFAULT_WINDOWS.map((window) => ({ ...window })),
     sleep: {

@@ -23,6 +23,7 @@ export type FakeController = Controller & {
   readonly disposed: boolean;
   readonly yankedPrUrls: string[];
   readonly browsedPrUrls: string[];
+  readonly preparedCopyRefreshes: string[];
 };
 
 function wait(milliseconds: number): Promise<void> {
@@ -41,6 +42,7 @@ export function createFakeController(
   const savedConfigPatches: Partial<Config>[] = [];
   const yankedPrUrls: string[] = [];
   const browsedPrUrls: string[] = [];
+  const preparedCopyRefreshes: string[] = [];
   let disposed = false;
   let operationSequence = 0;
 
@@ -90,6 +92,7 @@ export function createFakeController(
     yankedPaths,
     yankedPrUrls,
     browsedPrUrls,
+    preparedCopyRefreshes,
     get disposed() {
       return disposed;
     },
@@ -192,6 +195,29 @@ export function createFakeController(
           .map((worktree) => `origin/${worktree.branch}`),
       ];
     },
+    refreshPreparedCopy(repoId) {
+      preparedCopyRefreshes.push(repoId);
+      const repo = store.getState().repos.find((candidate) => candidate.id === repoId);
+      const dialog = store.getState().dialog;
+      if (!repo || dialog?.kind !== "create-worktree" || dialog.repoId !== repoId) return;
+      const { generation } = dialog;
+      store.dispatch({
+        type: "updateCreateWorktreeBranches",
+        repoId,
+        generation,
+        fetching: true,
+      });
+      queueMicrotask(() => {
+        if (disposed) return;
+        store.dispatch({
+          type: "updateCreateWorktreeBranches",
+          repoId,
+          generation,
+          branches: [`origin/${repo.defaultBranch}`, "origin/fetched-after-open"],
+          fetching: false,
+        });
+      });
+    },
     async deleteSelected() {
       const state = store.getState();
       const worktree = selectedWorktree(state);
@@ -249,7 +275,7 @@ export function createFakeController(
             defaultBranch: remote.defaultBranch,
             path: `${config.reposDir}/${remote.owner}/${remote.name}`,
             clonedAt: new Date().toISOString(),
-            hooks: { postCreate: [] },
+            hooks: { prepare: [], postCreate: [] },
           },
         ],
       });

@@ -53,6 +53,7 @@ export interface ControllerDeps {
   lifecycle: LifecyclePort;
   installRoot: string;
   startup?: StartupTiming;
+  enableHotRefreshTimer?: boolean;
 }
 
 function stateFields(
@@ -89,13 +90,18 @@ export function createController(deps: ControllerDeps): Controller {
   let currentConfig = deps.store.getState().config;
   let statusInterval: unknown;
   let cloneInterval: unknown;
+  let hotRefreshInterval: unknown;
   let snapshotInFlight: Promise<void> | undefined;
   let cloneReconcileInFlight: Promise<State> | undefined;
   let clonePollInFlight: Promise<void> | undefined;
   let disposed = false;
   let sequence = 0;
   const inFlightTargets = new Set<string>();
-  let scheduleHotCopy: (repo: Repo) => void = () => undefined;
+  const hotCopyTasks = new Map<Repo["id"], Promise<void>>();
+  const queuedHotCopies = new Map<Repo["id"], number>();
+  let hotRefreshInFlight: Promise<void> | undefined;
+  let backgroundController = new AbortController();
+  let scheduleHotCopy: (repo: Repo, count?: number) => Promise<void> = () => Promise.resolve();
 
   const dispatch = (action: Action): void => {
     if (!disposed) deps.store.dispatch(action);
@@ -151,7 +157,7 @@ export function createController(deps: ControllerDeps): Controller {
       await deps.repos.reconcileClones();
       const persisted = await deps.state.load();
       for (const repo of persisted.repos) {
-        if (!knownRepoIds.has(repo.id)) scheduleHotCopy(repo);
+        if (!knownRepoIds.has(repo.id)) void scheduleHotCopy(repo, currentConfig.hotPoolSize);
       }
       return persisted;
     })();
@@ -267,6 +273,7 @@ export function createController(deps: ControllerDeps): Controller {
     execute: (onEvent: OnEvent) => Promise<unknown>;
     persistError?: boolean;
     clearError?: boolean;
+    onPreparedCopyClaimed?: (repoId: Repo["id"]) => void;
   }): Promise<boolean> => {
     if (options.targetId && inFlightTargets.has(options.targetId)) {
       if (options.showDuplicateToast !== false) {
@@ -290,14 +297,16 @@ export function createController(deps: ControllerDeps): Controller {
 
     let step = operation.step;
     let eventError: SwarmError | undefined;
-    let pendingLog: string | undefined;
+    let pendingLogs: Array<{ step: string; line: string }> = [];
     let logTimer: ReturnType<typeof setTimeout> | undefined;
     const flushLog = (): void => {
       if (logTimer !== undefined) clearTimeout(logTimer);
       logTimer = undefined;
-      if (pendingLog === undefined) return;
-      dispatch({ type: "opStep", id, step, line: pendingLog });
-      pendingLog = undefined;
+      const logs = pendingLogs;
+      pendingLogs = [];
+      for (const pending of logs) {
+        dispatch({ type: "opStep", id, step: pending.step, line: pending.line });
+      }
     };
     const onEvent: OnEvent = (event) => {
       if (disposed) return;
@@ -305,13 +314,15 @@ export function createController(deps: ControllerDeps): Controller {
         step = event.label;
         dispatch({ type: "opStep", id, step });
       } else if (event.type === "log") {
-        pendingLog = event.line;
+        pendingLogs.push({ step, line: event.line });
         if (logTimer === undefined) {
           logTimer = setTimeout(flushLog, 16);
           logTimer.unref();
         }
       } else if (event.type === "error") {
         eventError = event.error;
+      } else if (event.type === "prepared-copy-claimed") {
+        options.onPreparedCopyClaimed?.(event.repoId);
       }
     };
 
@@ -344,16 +355,105 @@ export function createController(deps: ControllerDeps): Controller {
     }
   };
 
-  scheduleHotCopy = (repo): void => {
-    if (disposed) return;
+  scheduleHotCopy = (repo, count = 1): Promise<void> => {
+    if (disposed || count <= 0) return Promise.resolve();
+    queuedHotCopies.set(repo.id, (queuedHotCopies.get(repo.id) ?? 0) + count);
+    const current = hotCopyTasks.get(repo.id);
+    if (current) return current;
+    const task = (async () => {
+      while (!disposed && (queuedHotCopies.get(repo.id) ?? 0) > 0) {
+        queuedHotCopies.set(repo.id, (queuedHotCopies.get(repo.id) ?? 1) - 1);
+        await runOperation({
+          label: `Preparing next worktree copy for ${repo.id}`,
+          targetId: `hot-copy:${repo.id}`,
+          success: `Prepared next worktree copy for ${repo.id}`,
+          refreshAfterSuccess: false,
+          showDuplicateToast: false,
+          showSuccessToast: false,
+          execute: (onEvent) =>
+            deps.worktrees.prepareHotCopy(repo.id, onEvent, {
+              signal: backgroundController.signal,
+            }),
+        });
+      }
+    })();
+    hotCopyTasks.set(repo.id, task);
+    void task.finally(() => {
+      if (hotCopyTasks.get(repo.id) === task) hotCopyTasks.delete(repo.id);
+      const remaining = queuedHotCopies.get(repo.id) ?? 0;
+      queuedHotCopies.delete(repo.id);
+      if (!disposed && remaining > 0) void scheduleHotCopy(repo, remaining);
+    });
+    return task;
+  };
+
+  const prepareReposWithLimit = async (repos: Repo[], concurrency: number): Promise<void> => {
+    let cursor = 0;
+    const worker = async (): Promise<void> => {
+      while (!disposed) {
+        const repo = repos[cursor];
+        cursor += 1;
+        if (!repo) return;
+        await scheduleHotCopy(repo, Math.max(1, currentConfig.hotPoolSize));
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(concurrency, repos.length) }, () => worker()));
+  };
+
+  const refreshPreparedCopies = (): Promise<void> => {
+    if (hotRefreshInFlight) return hotRefreshInFlight;
+    const task = (async () => {
+      if (disposed || currentConfig.hotPoolSize === 0) return;
+      for (const repo of deps.store.getState().repos) {
+        if (disposed) return;
+        try {
+          await deps.worktrees.refreshPreparedCopy(repo.id, {
+            skipIfFresh: true,
+            signal: backgroundController.signal,
+          });
+        } catch (error) {
+          deps.logger.warn(`Periodic prepared-copy refresh failed: ${repo.id}`, error);
+        }
+      }
+    })();
+    hotRefreshInFlight = task;
+    void task.finally(() => {
+      if (hotRefreshInFlight === task) hotRefreshInFlight = undefined;
+    });
+    return task;
+  };
+
+  const stopHotRefreshTimer = (): void => {
+    if (hotRefreshInterval === undefined) return;
+    deps.clock.clearInterval(hotRefreshInterval);
+    hotRefreshInterval = undefined;
+  };
+
+  const syncHotRefreshTimer = (): void => {
+    stopHotRefreshTimer();
+    if (
+      !deps.enableHotRefreshTimer ||
+      currentConfig.hotPoolSize === 0 ||
+      currentConfig.hotRefreshIntervalMs === 0
+    ) {
+      return;
+    }
+    hotRefreshInterval = deps.clock.setInterval(() => {
+      void refreshPreparedCopies();
+    }, currentConfig.hotRefreshIntervalMs);
+  };
+
+  const schedulePostCreateHooks = (worktree: Worktree): void => {
+    const repo = deps.store.getState().repos.find((candidate) => candidate.id === worktree.repoId);
+    if (!repo || repo.hooks.postCreate.length === 0 || disposed) return;
     void runOperation({
-      label: `Preparing next worktree copy for ${repo.id}`,
-      targetId: `hot-copy:${repo.id}`,
-      success: `Prepared next worktree copy for ${repo.id}`,
+      label: `Post-create hooks · ${worktree.slug}`,
+      targetId: `post-create:${worktree.id}`,
+      success: `Post-create hooks finished · ${worktree.slug}`,
       refreshAfterSuccess: false,
       showDuplicateToast: false,
       showSuccessToast: false,
-      execute: (onEvent) => deps.worktrees.prepareHotCopy(repo.id, onEvent),
+      execute: (onEvent) => deps.worktrees.runPostCreateHooks(worktree.id, onEvent),
     });
   };
 
@@ -370,12 +470,15 @@ export function createController(deps: ControllerDeps): Controller {
 
   const controller: Controller = {
     async init() {
+      backgroundController.abort();
+      backgroundController = new AbortController();
       disposed = false;
       if (statusInterval !== undefined) {
         deps.clock.clearInterval(statusInterval);
         statusInterval = undefined;
       }
       stopClonePolling();
+      stopHotRefreshTimer();
 
       try {
         const currentSession = startup
@@ -388,6 +491,9 @@ export function createController(deps: ControllerDeps): Controller {
           });
         void currentSession;
 
+        await startup.measure("controller.worktreeReconcile", () =>
+          deps.worktrees.reconcileCreating(),
+        );
         const persisted = await startup.measure("controller.stateLoad", () => deps.state.load());
         dispatch({
           type: "hydrate",
@@ -398,7 +504,7 @@ export function createController(deps: ControllerDeps): Controller {
           },
         });
 
-        for (const repo of persisted.repos) scheduleHotCopy(repo);
+        void prepareReposWithLimit(persisted.repos, 2);
 
         syncClonePolling();
         void startup
@@ -418,6 +524,7 @@ export function createController(deps: ControllerDeps): Controller {
           },
           Math.max(minimumRefreshMs, currentConfig.ui.statusRefreshMs),
         );
+        syncHotRefreshTimer();
         void loadPrTabs(["mine", "review"], false, activeContextRepoIds());
       } catch (error) {
         const swarmError = reportError(error);
@@ -501,14 +608,27 @@ export function createController(deps: ControllerDeps): Controller {
 
     async createWorktree(input) {
       const targetId = worktreeId(input.repoId, slugify(input.branch));
-      await runOperation({
+      let created: Worktree | undefined;
+      let replenishing = false;
+      const succeeded = await runOperation({
         label: "Creating worktree",
         targetId,
         success: `Worktree ${input.branch} ready`,
-        execute: (onEvent) => deps.worktrees.create(input, onEvent),
+        execute: async (onEvent) => {
+          created = await deps.worktrees.create(input, onEvent);
+          schedulePostCreateHooks(created);
+        },
+        onPreparedCopyClaimed: (repoId) => {
+          replenishing = true;
+          const repo = deps.store.getState().repos.find((candidate) => candidate.id === repoId);
+          if (repo) void scheduleHotCopy(repo);
+        },
       });
-      const repo = deps.store.getState().repos.find((candidate) => candidate.id === input.repoId);
-      if (repo) scheduleHotCopy(repo);
+      if (!replenishing) {
+        const repo = deps.store.getState().repos.find((candidate) => candidate.id === input.repoId);
+        if (repo) void scheduleHotCopy(repo, currentConfig.hotPoolSize);
+      }
+      if (!succeeded || !created) return;
     },
 
     async remoteBranches(repoId) {
@@ -517,6 +637,36 @@ export function createController(deps: ControllerDeps): Controller {
       } catch (error) {
         throw reportError(error);
       }
+    },
+
+    refreshPreparedCopy(repoId) {
+      const dialog = deps.store.getState().dialog;
+      if (dialog?.kind !== "create-worktree" || dialog.repoId !== repoId) return;
+      const { generation } = dialog;
+      dispatch({ type: "updateCreateWorktreeBranches", repoId, generation, fetching: true });
+      void (async () => {
+        try {
+          await deps.worktrees.refreshPreparedCopy(repoId, {
+            signal: backgroundController.signal,
+          });
+          const branches = await deps.worktrees.remoteBranches(repoId);
+          dispatch({
+            type: "updateCreateWorktreeBranches",
+            repoId,
+            generation,
+            branches,
+            fetching: false,
+          });
+        } catch (error) {
+          deps.logger.warn(`Prepared-copy pre-fetch failed: ${repoId}`, error);
+          dispatch({
+            type: "updateCreateWorktreeBranches",
+            repoId,
+            generation,
+            fetching: false,
+          });
+        }
+      })();
     },
 
     async deleteSelected() {
@@ -690,6 +840,7 @@ export function createController(deps: ControllerDeps): Controller {
       try {
         await deps.config.save(next);
         currentConfig = next;
+        syncHotRefreshTimer();
         dispatch({ type: "setConfig", config: next });
         dispatch({ type: "closeDialog" });
         toast("success", "Settings saved");
@@ -775,6 +926,7 @@ export function createController(deps: ControllerDeps): Controller {
       }
       let created: Worktree | undefined;
       let failure: unknown;
+      let replenishing = false;
       await runOperation({
         label: "Creating worktree",
         targetId: worktreeId(pr.repoId, slugify(branch)),
@@ -785,21 +937,27 @@ export function createController(deps: ControllerDeps): Controller {
               {
                 repoId: pr.repoId,
                 branch,
-                ...(pr.isCrossRepository
-                  ? { source: { kind: "pull" as const, number: pr.number } }
-                  : {}),
+                source: { kind: "pull" as const, number: pr.number },
               },
               onEvent,
             );
+            schedulePostCreateHooks(created);
             return created;
           } catch (error) {
             failure = error;
             throw error;
           }
         },
+        onPreparedCopyClaimed: (repoId) => {
+          replenishing = true;
+          const repo = deps.store.getState().repos.find((candidate) => candidate.id === repoId);
+          if (repo) void scheduleHotCopy(repo);
+        },
       });
-      const repo = deps.store.getState().repos.find((candidate) => candidate.id === pr.repoId);
-      if (repo) scheduleHotCopy(repo);
+      if (!replenishing) {
+        const repo = deps.store.getState().repos.find((candidate) => candidate.id === pr.repoId);
+        if (repo) void scheduleHotCopy(repo, currentConfig.hotPoolSize);
+      }
       if (failure !== undefined) throw failure;
       if (!created) throw new SwarmError("conflict", `Worktree creation already in progress`);
       try {
@@ -862,12 +1020,14 @@ export function createController(deps: ControllerDeps): Controller {
 
     dispose() {
       disposed = true;
+      backgroundController.abort();
       deps.worktrees.dispose?.();
       if (statusInterval !== undefined) {
         deps.clock.clearInterval(statusInterval);
         statusInterval = undefined;
       }
       stopClonePolling();
+      stopHotRefreshTimer();
     },
   };
 

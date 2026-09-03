@@ -76,6 +76,9 @@ export function createFakeFiles(initial: FakeFilesInitial = {}): FakeFiles {
       calls.push({ method: "cloneTree", args: [src, dest] });
       const source = resolve(src);
       const destination = resolve(dest);
+      if (paths.has(destination)) {
+        throw Object.assign(new Error(`Destination exists: ${dest}`), { code: "EEXIST" });
+      }
       for (const path of [...paths]) {
         if (isWithin(path, source)) paths.add(resolve(destination, relative(source, path)));
       }
@@ -83,8 +86,11 @@ export function createFakeFiles(initial: FakeFilesInitial = {}): FakeFiles {
         if (isWithin(path, source)) texts.set(resolve(destination, relative(source, path)), text);
       }
     },
-    async cloneTreeDetached(src, staging, dest, pidPath, logPath) {
-      calls.push({ method: "cloneTreeDetached", args: [src, staging, dest, pidPath, logPath] });
+    async cloneTreeDetached(src, staging, dest, pidPath, logPath, opts) {
+      calls.push({
+        method: "cloneTreeDetached",
+        args: [src, staging, dest, pidPath, logPath, opts],
+      });
       const source = resolve(src);
       const stagingPath = resolve(staging);
       for (const path of [...paths]) {
@@ -93,12 +99,25 @@ export function createFakeFiles(initial: FakeFilesInitial = {}): FakeFiles {
       for (const [path, text] of [...texts]) {
         if (isWithin(path, source)) texts.set(resolve(stagingPath, relative(source, path)), text);
       }
+      texts.set(resolve(stagingPath, ".git/swarm-hot.json"), opts.markerText);
+      paths.add(resolve(stagingPath, ".git/swarm-hot.json"));
       movePrefix(stagingPath, resolve(dest));
       return 4242;
     },
     async move(src, dest) {
       calls.push({ method: "move", args: [src, dest] });
-      movePrefix(resolve(src), resolve(dest));
+      const source = resolve(src);
+      const destination = resolve(dest);
+      const sourceExists =
+        paths.has(source) || [...paths].some((candidate) => isWithin(candidate, source));
+      if (!sourceExists)
+        throw Object.assign(new Error(`Source missing: ${src}`), { code: "ENOENT" });
+      const destinationExists =
+        paths.has(destination) || [...paths].some((candidate) => isWithin(candidate, destination));
+      if (destinationExists) {
+        throw Object.assign(new Error(`Destination exists: ${dest}`), { code: "EEXIST" });
+      }
+      movePrefix(source, destination);
     },
     async removeTree(path) {
       calls.push({ method: "removeTree", args: [path] });
@@ -119,7 +138,7 @@ export function createFakeFiles(initial: FakeFilesInitial = {}): FakeFiles {
       paths.add(absolute);
       texts.set(absolute, text);
     },
-    async listDirs(path) {
+    async listDirs(path, opts) {
       calls.push({ method: "listDirs", args: [path] });
       const absolute = resolve(path);
       const directories = new Set<string>();
@@ -129,7 +148,9 @@ export function createFakeFiles(initial: FakeFilesInitial = {}): FakeFiles {
         if (!child.includes(sep) && texts.has(candidate)) continue;
         directories.add(child.split(sep)[0] ?? child);
       }
-      return [...directories].filter((name) => !name.startsWith(".hot")).sort();
+      return [...directories]
+        .filter((name) => opts?.includeReserved || !name.startsWith(".hot"))
+        .sort();
     },
   };
 }

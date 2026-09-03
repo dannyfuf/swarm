@@ -1,8 +1,19 @@
 import { randomUUID } from "node:crypto";
 import { access, mkdir, readdir, readFile, rename, rm, unlink, writeFile } from "node:fs/promises";
-import { relative, resolve, sep } from "node:path";
+import { dirname, relative, resolve, sep } from "node:path";
+import { getSystemErrorMessage, getSystemErrorName } from "node:util";
 import { SwarmError } from "../core/errors.ts";
 import type { FilesPort, Logger, Shell } from "../core/ports.ts";
+
+type CloneDirectory = (
+  src: string,
+  dest: string,
+  onDestinationCreated: () => void,
+) => Promise<void>;
+
+export interface FilesOptions {
+  cloneDirectory?: CloneDirectory;
+}
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -16,6 +27,41 @@ function fsError(action: string, error: unknown): SwarmError {
 
 function isNotFound(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
+}
+
+async function cloneDirectoryWithNodeFfi(
+  src: string,
+  dest: string,
+  onDestinationCreated: () => void,
+): Promise<void> {
+  const ffi = await import("node:ffi");
+  const handle = ffi.dlopen("/usr/lib/libSystem.B.dylib", {
+    clonefile: {
+      arguments: ["pointer", "pointer", "uint32"],
+      return: "int32",
+    },
+    __error: { return: "pointer" },
+  });
+  try {
+    if (handle.functions.clonefile(src, dest, 0) === 0) return;
+    const errno = ffi.getInt32(handle.functions.__error());
+    const systemErrorName = getSystemErrorName(-errno);
+    const error = new Error(
+      `clonefile failed: ${systemErrorName} (${getSystemErrorMessage(-errno)})`,
+    );
+    (error as NodeJS.ErrnoException).code = systemErrorName;
+    if (systemErrorName !== "EEXIST" && systemErrorName !== "ENOTEMPTY") {
+      try {
+        await access(dest);
+        onDestinationCreated();
+      } catch {
+        // clonefile failed before creating the destination.
+      }
+    }
+    throw error;
+  } finally {
+    handle.lib.close();
+  }
 }
 
 function cloneArgs(platform: NodeJS.Platform, src: string, dest: string): string[] {
@@ -33,6 +79,8 @@ function detachedCloneScript(platform: NodeJS.Platform): string {
 staging_path=$2
 hot_path=$3
 pid_path=$4
+marker_text=$5
+shift 5
 cleanup() {
   status=$?
   trap - EXIT HUP INT TERM
@@ -43,7 +91,24 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 printf '%s\\n' "$$" > "$pid_path"
-${copy} "$source_path" "$staging_path" && mv "$staging_path" "$hot_path"`;
+${copy} "$source_path" "$staging_path" || exit $?
+cd "$staging_path" || exit $?
+hook_index=0
+for command do
+  hook_index=$((hook_index + 1))
+  started=$(date +%s)
+  printf '[prepare hook %s] start: %s\\n' "$hook_index" "$command"
+  sh -c "$command"
+  hook_status=$?
+  ended=$(date +%s)
+  duration=$(((ended - started) * 1000))
+  printf '[prepare hook %s] end: exit=%s duration=%sms\\n' "$hook_index" "$hook_status" "$duration"
+done
+marker_tmp="$staging_path/.git/swarm-hot.json.tmp-$$"
+printf '%s' "$marker_text" > "$marker_tmp" || exit $?
+mv "$marker_tmp" "$staging_path/.git/swarm-hot.json" || exit $?
+[ ! -e "$hot_path" ] || exit 1
+mv "$staging_path" "$hot_path"`;
 }
 
 export function createFiles(
@@ -51,8 +116,11 @@ export function createFiles(
   logger: Logger,
   platform: NodeJS.Platform = process.platform,
   allowedRemovalRoots: string[] = [],
+  options: FilesOptions = {},
 ): FilesPort {
   const log = logger.child("files");
+  const cloneDirectory = options.cloneDirectory ?? cloneDirectoryWithNodeFfi;
+  let loggedCloneFallback = false;
 
   const fail = (action: string, error: unknown): never => {
     const wrapped = fsError(action, error);
@@ -92,6 +160,59 @@ export function createFiles(
     },
 
     async cloneTree(src, dest): Promise<void> {
+      if (platform === "darwin") {
+        try {
+          await mkdir(dirname(dest), { recursive: true });
+        } catch (error) {
+          fail(`Could not prepare clone destination ${dest}`, error);
+        }
+
+        let destinationExists = false;
+        try {
+          await access(dest);
+          destinationExists = true;
+        } catch (error) {
+          if (!isNotFound(error)) fail(`Could not access clone destination ${dest}`, error);
+        }
+        if (destinationExists) {
+          fail(`Could not clone ${src} to ${dest}`, new Error("clone destination already exists"));
+        }
+
+        let cloneMadeProgress = false;
+        try {
+          await cloneDirectory(src, dest, () => {
+            cloneMadeProgress = true;
+          });
+          return;
+        } catch (error) {
+          let existsAfterFailure = false;
+          try {
+            await access(dest);
+            existsAfterFailure = true;
+          } catch (accessError) {
+            if (!isNotFound(accessError)) {
+              fail(`Could not access failed clone destination ${dest}`, accessError);
+            }
+          }
+          if (existsAfterFailure && !cloneMadeProgress) {
+            fail(`Could not clone ${src} to ${dest}`, error);
+          }
+          if (cloneMadeProgress) {
+            try {
+              await rm(dest, { recursive: true, force: true });
+            } catch (cleanupError) {
+              fail(`Could not clean failed clone destination ${dest}`, cleanupError);
+            }
+          }
+          if (!loggedCloneFallback) {
+            loggedCloneFallback = true;
+            log.warn("Directory clonefile unavailable; falling back to cp -Rc", {
+              reason: errorMessage(error),
+            });
+          }
+        }
+      }
+
       const args = cloneArgs(platform, src, dest);
       const result = await shell
         .run("cp", args)
@@ -109,11 +230,21 @@ export function createFiles(
       }
     },
 
-    async cloneTreeDetached(src, staging, dest, pidPath, logPath): Promise<number> {
+    async cloneTreeDetached(src, staging, dest, pidPath, logPath, opts): Promise<number> {
       try {
         return await shell.spawnDetached(
           "sh",
-          ["-c", detachedCloneScript(platform), "swarm-hot-copy", src, staging, dest, pidPath],
+          [
+            "-c",
+            detachedCloneScript(platform),
+            "swarm-hot-copy",
+            src,
+            staging,
+            dest,
+            pidPath,
+            opts.markerText,
+            ...opts.prepareCommands,
+          ],
           { logPath },
         );
       } catch (error) {
@@ -168,11 +299,14 @@ export function createFiles(
       }
     },
 
-    async listDirs(path): Promise<string[]> {
+    async listDirs(path, opts): Promise<string[]> {
       try {
         const entries = await readdir(path, { withFileTypes: true });
         return entries
-          .filter((entry) => entry.isDirectory() && !entry.name.startsWith(".hot"))
+          .filter(
+            (entry) =>
+              entry.isDirectory() && (opts?.includeReserved || !entry.name.startsWith(".hot")),
+          )
           .map((entry) => entry.name)
           .sort();
       } catch (error) {
