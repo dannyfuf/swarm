@@ -15,7 +15,7 @@ missing prepared copy falls back to the normal base-clone copy.
 - tmux 3.2 or newer
 - Git and an authenticated GitHub CLI (`gh`)
 - macOS `cp -c`, or GNU `cp --reflink=auto` on Linux
-- Optional: Neovim, Claude Code, and lazygit for the default windows
+- Optional: Neovim, Claude Code, OpenCode, and lazygit for agent popups and default windows
 
 Run `swarm doctor` after installation to check the required tools and authentication.
 
@@ -42,10 +42,14 @@ The project-owned [`tmux/tmux.conf`](tmux/tmux.conf) is a complete tmux configur
 sources it. Both entry points prefer `~/buk/swarm` and fall back to this refactor worktree.
 Set `SWARM_ROOT` to use another checkout.
 
-The configuration uses `C-s` as its prefix and `prefix` + `s` opens swarm (replacing the built-in session chooser). It enables
-tmux-resurrect and tmux-continuum, saves every 10 minutes, restores sessions automatically,
-and restores Neovim sessions and lazygit processes without auto-restarting coding agents.
-On first use, press `prefix` + `I` to install the configured TPM plugins.
+The configuration uses `C-s` as its prefix. `prefix` + `s` opens swarm (replacing the built-in
+session chooser), `prefix` + `a` opens Claude Code, and `prefix` + `A` opens OpenCode. Agent
+popups use persistent `swarm-agent-*` tmux sessions rooted at the configured `reposDir`; press
+`C-q` to hide one without stopping the agent, then use the same prefix binding to reopen it with
+its live terminal and scrollback intact. It enables tmux-resurrect and tmux-continuum, saves every
+10 minutes, restores sessions automatically, and restores Neovim sessions and lazygit processes
+without auto-restarting coding agents. On first use, press `prefix` + `I` to install the configured
+TPM plugins.
 
 ## Commands
 
@@ -54,6 +58,7 @@ swarm                                  Open the TUI
 swarm open owner/repo#slug             Mount and open a worktree by id
 swarm open repo/slug                   Mount and open a worktree by tmux session
 swarm sleep [session]                  Apply the sleep policy and print a JSON report
+swarm agent <claude|opencode>          Create or reopen a persistent agent tmux session
 swarm doctor                           Check runtime dependencies
 swarm --version                        Print the installed version
 ```

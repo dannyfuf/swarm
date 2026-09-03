@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { SwarmError } from "./core/errors.ts";
 import type { Shell, ShellResult } from "./core/ports.ts";
@@ -6,6 +7,14 @@ import { createStartupProfiler } from "./core/startup.ts";
 import type { State, Worktree } from "./core/types.ts";
 import { VERSION } from "./core/version.ts";
 import type { Runtime } from "./runtime.ts";
+import {
+  type AgentName,
+  agentCommandArgv,
+  agentSessionName,
+  isAgentName,
+  stripTmuxEnv,
+  tmuxAttachArgv,
+} from "./services/agentPopup.ts";
 
 export { VERSION };
 
@@ -16,6 +25,7 @@ export type CliCommand =
   | { kind: "tui" }
   | { kind: "open"; target: string }
   | { kind: "sleep"; session?: string }
+  | { kind: "agent"; agent: AgentName }
   | { kind: "doctor" }
   | { kind: "version" }
   | { kind: "help" };
@@ -28,7 +38,7 @@ interface DoctorCheck {
 }
 
 const USAGE =
-  "Usage: swarm [open <owner/name#slug|repo/slug> | sleep [session] | doctor | --version]";
+  "Usage: swarm [open <owner/name#slug|repo/slug> | sleep [session] | agent <claude|opencode> | doctor | --version]";
 
 export function parseArgv(argv: string[]): CliCommand {
   const [command, ...args] = argv;
@@ -45,6 +55,9 @@ export function parseArgv(argv: string[]): CliCommand {
   }
   if (command === "sleep" && args.length <= 1) {
     return args[0] ? { kind: "sleep", session: args[0] } : { kind: "sleep" };
+  }
+  if (command === "agent" && args.length === 1 && isAgentName(args[0])) {
+    return { kind: "agent", agent: args[0] };
   }
   throw new SwarmError("validation", USAGE);
 }
@@ -175,6 +188,60 @@ async function runRuntimeCommand(runtime: Runtime, command: CliCommand): Promise
   }
 }
 
+async function attachAgentSession(session: string, env: NodeJS.ProcessEnv): Promise<number> {
+  const args = tmuxAttachArgv(session, env.TMUX);
+  return await new Promise<number>((resolve, reject) => {
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn("tmux", args, { env: stripTmuxEnv(env), stdio: "inherit" });
+    } catch (cause) {
+      reject(
+        new SwarmError("tmux", "tmux is required to open an agent popup but could not be run", {
+          cause,
+        }),
+      );
+      return;
+    }
+    child.once("error", (cause) => {
+      reject(
+        new SwarmError("tmux", "tmux is required to open an agent popup but could not be run", {
+          cause,
+        }),
+      );
+    });
+    child.once("close", (code) => resolve(code ?? 1));
+  });
+}
+
+async function runAgentCommand(
+  runtime: Runtime,
+  agent: AgentName,
+  env: NodeJS.ProcessEnv,
+): Promise<number> {
+  const session = agentSessionName(agent);
+  let exists: boolean;
+  try {
+    exists = await runtime.tmux.hasSession(session);
+  } catch (cause) {
+    throw new SwarmError("tmux", "tmux is required to open an agent popup but could not be run", {
+      cause,
+    });
+  }
+  if (!exists) {
+    await runtime.tmux.newSession({
+      name: session,
+      cwd: runtime.configValue.reposDir,
+      windowName: agent,
+    });
+    const windows = await runtime.tmux.listWindows(session);
+    const firstIndex = Math.min(...windows.map(({ index }) => index));
+    await runtime.tmux.sendKeys(`=${session}:${firstIndex}`, agentCommandArgv(agent), {
+      enter: true,
+    });
+  }
+  return await attachAgentSession(session, env);
+}
+
 export async function main(argv: string[] = process.argv.slice(2)): Promise<number> {
   let runtime: Runtime | undefined;
   try {
@@ -237,6 +304,9 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     );
     startupProfiler.mark("runtime.created");
     runtime = createdRuntime;
+    if (command.kind === "agent") {
+      return await runAgentCommand(createdRuntime, command.agent, process.env);
+    }
     await runRuntimeCommand(createdRuntime, command);
     return 0;
   } catch (error) {

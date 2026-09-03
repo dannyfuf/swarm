@@ -55,8 +55,8 @@ PATH binary needs a version-probe process.
 
 ```
 bin/swarm                 launcher (runs dist or src, restarts in place when the TUI returns 75)
-tmux/tmux.conf            full tmux config (theme, persistence) with the ONE swarm binding: prefix+s → popup (replaces the default session chooser)
-src/main.ts               CLI entry: `swarm` (TUI), `swarm open <repo>/<slug>`, `swarm sleep <session>`, `swarm doctor`
+tmux/tmux.conf            full tmux config (theme, persistence) with swarm and persistent agent popup bindings
+src/main.ts               CLI entry: `swarm` (TUI), `swarm open <repo>/<slug>`, `swarm sleep <session>`, `swarm agent <claude|opencode>`, `swarm doctor`
 src/core/                 contracts and pure helpers; no I/O
   types.ts                domain zod schemas + inferred types (section 4)
   ports.ts                infrastructure port interfaces (section 5)
@@ -67,6 +67,7 @@ src/core/                 contracts and pure helpers; no I/O
   errors.ts               SwarmError with `code` union
 src/adapters/             one file per port, shell-based; each has *.test.ts using FakeShell
 src/services/             one file per service interface; tests use fakes from src/testing
+  agentPopup.ts           pure agent names/commands, tmux attach argv/socket parsing, and env stripping
 src/app/                  store.ts (createStore), keymap.ts, controller.ts (wires services→store)
 src/ui/                   OpenTUI React components; depends only on src/core
 src/testing/              fakes for every port (FakeShell, FakeGit, FakeFiles, FakeTmux, FakeProcess, FakeGithub, MemoryState, MemoryConfig) and fixtures
@@ -77,6 +78,12 @@ Dependency rule (enforced by review): `core` imports nothing internal. `adapters
 `app`, `ui` import `core`. `ui` never imports `services`/`adapters`. Fuzzy matching lives in
 `core` because both services and UI need it, and the UI may import core but not services.
 `main.ts` is the only composition root.
+
+tmux uses `prefix+s` for the control-panel popup, `prefix+a` for Claude Code, and `prefix+A`
+for OpenCode. Each agent command creates or reuses `swarm-agent-<agent>` with cwd set to
+`config.reposDir`, then attaches a nested client through the invoking popup's tmux socket. Global
+`C-q` detaches that nested client only while an agent session is active, closing the popup while
+leaving the agent and scrollback alive; reopening the same binding reattaches to that session.
 
 ## 4. Domain types (`src/core/types.ts`) — zod schemas, export both schema and type
 
@@ -483,6 +490,9 @@ cursor row, green for attached, yellow for running agents, red only for danger d
   copies are staged under `.hot.staging`, atomically published as `.hot`, consumed by rename,
   refreshed in their destination, and rebuilt by controller-managed background operations.
   Missing or failed pools retain the original base-refresh and copy fallback.
+- 2026-09-03: `swarm agent <claude|opencode>` creates or reuses a persistent tmux session rooted
+  at `config.reposDir`; `prefix+a` / `prefix+A` open those sessions in popups and `C-q` detaches
+  their nested client so the popup can close without stopping the agent.
 - 2026-09-02: PR cache reads and network refreshes are now separate `GithubPort` operations.
   `PrService` emits validated cached slices before refresh, retains them with a short error on
   refresh failure, and owns one four-call limiter plus repo/tab generations and abort signals
