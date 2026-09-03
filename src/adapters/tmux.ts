@@ -224,6 +224,16 @@ export function createTmux(
       await run(["kill-session", "-t", exactTarget(name)]);
     },
 
+    async killSessionIfPresent(name) {
+      const args = ["kill-session", "-t", exactTarget(name)];
+      const result = await invoke(args);
+      if (result.code === 0) return;
+      const detail = `${result.stderr}\n${result.stdout}`;
+      if (/(?:can't find session|session not found)/iu.test(detail)) return;
+      log.error("tmux command failed", { args, code: result.code, stderr: result.stderr });
+      throw new SwarmError("tmux", failureMessage(args, result), { cause: result });
+    },
+
     async switchClient(session) {
       await run(["switch-client", "-t", exactTarget(session)]);
     },

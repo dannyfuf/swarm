@@ -603,6 +603,52 @@ describe("SessionService remote routing", () => {
     assert.equal(tmux.sentKeys.length, 0);
   });
 
+  test("mount reuses an existing proxy whose only pane is ssh", async () => {
+    const proxy = "devbox/payroll/main";
+    const tmux = createFakeTmux({
+      sessions: [session(proxy, false, 1)],
+      windows: [window(proxy, 0, "ssh", [pane("%1", 10, "ssh")])],
+    });
+    const { service } = serviceOptions(tmux, {
+      config: configured({ hosts: { devbox: { ssh: "devbox", swarmCommand: "swarm" } } }),
+      remoteHosts: fakeRemoteHostService(),
+    });
+
+    await service.mount(remote);
+
+    assert.equal(tmux.calls.filter(({ method }) => method === "listWindows").length, 1);
+    assert.equal(
+      tmux.calls.some(({ method }) => method === "killSessionIfPresent"),
+      false,
+    );
+    assert.equal(
+      tmux.calls.some(({ method }) => method === "newSession"),
+      false,
+    );
+  });
+
+  test("mount replaces a restored proxy whose pane is not ssh", async () => {
+    const proxy = "devbox/payroll/main";
+    const tmux = createFakeTmux({
+      sessions: [session(proxy, false, 1)],
+      windows: [window(proxy, 0, "ssh", [pane("%1", 10, "zsh")])],
+    });
+    const { service } = serviceOptions(tmux, {
+      config: configured({ hosts: { devbox: { ssh: "devbox", swarmCommand: "swarm" } } }),
+      remoteHosts: fakeRemoteHostService(),
+    });
+
+    await service.mount(remote);
+
+    assert.deepEqual(
+      tmux.calls
+        .filter(({ method }) => method === "killSessionIfPresent" || method === "newSession")
+        .map(({ method }) => method),
+      ["killSessionIfPresent", "newSession"],
+    );
+    assert.equal(tmux.windows.get(proxy)?.[0]?.panes[0]?.currentCommand, "ssh");
+  });
+
   test("sleep delegates without touching the proxy, and kill delegates then removes it", async () => {
     const tmux = createFakeTmux({
       sessions: [session("devbox/payroll/main", false, 1)],
@@ -629,5 +675,24 @@ describe("SessionService remote routing", () => {
       { method: "kill", hostId: "devbox", target: remote.id },
     ]);
     assert.equal(tmux.sessions.has("devbox/payroll/main"), false);
+  });
+
+  test("kill succeeds when the proxy vanishes after the remote command", async () => {
+    const proxy = "devbox/payroll/main";
+    const tmux = createFakeTmux({ sessions: [session(proxy, false, 1)] });
+    const remoteHosts = fakeRemoteHostService();
+    remoteHosts.kill = async (hostId, worktreeId) => {
+      remoteHosts.calls.push({ method: "kill", hostId, target: worktreeId });
+      tmux.sessions.delete(proxy);
+    };
+    const { service } = serviceOptions(tmux, {
+      config: configured({ hosts: { devbox: { ssh: "devbox", swarmCommand: "swarm" } } }),
+      remoteHosts,
+    });
+
+    await service.kill(remote);
+
+    assert.deepEqual(remoteHosts.calls, [{ method: "kill", hostId: "devbox", target: remote.id }]);
+    assert.ok(tmux.calls.some(({ method }) => method === "killSessionIfPresent"));
   });
 });

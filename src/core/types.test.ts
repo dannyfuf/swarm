@@ -55,6 +55,16 @@ describe("ConfigSchema", () => {
       ConfigSchema.parse({ ...defaults, hosts: { local: { ssh: "localhost" } } }),
     );
   });
+
+  test("requires the remote status refresh interval to be a positive integer", () => {
+    const defaults = defaultConfig("/home/test/.swarm");
+    assert.throws(() =>
+      ConfigSchema.parse({ ...defaults, ui: { ...defaults.ui, remoteStatusRefreshMs: 0 } }),
+    );
+    assert.throws(() =>
+      ConfigSchema.parse({ ...defaults, ui: { ...defaults.ui, remoteStatusRefreshMs: 1.5 } }),
+    );
+  });
 });
 
 test("HostId reserves local and worktreeHost defaults absent placement to local", () => {

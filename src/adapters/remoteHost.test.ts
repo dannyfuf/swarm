@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdtemp, stat } from "node:fs/promises";
+import { chmod, mkdtemp, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { SwarmError } from "../core/errors.ts";
 import { createFakeShell } from "../testing/fakeShell.ts";
+import { createNullLogger } from "../testing/nullLogger.ts";
 import { createRemoteHost, sshArgv, sshInteractiveCommand } from "./remoteHost.ts";
+import { createShell } from "./shell.ts";
 
 const host = { id: "devbox", ssh: "devbox", swarmCommand: "swarm" };
 
@@ -45,4 +48,19 @@ test("remote host adapter prepares a private control socket directory and never 
   assert.equal(shell.calls.length, 2);
   assert.deepEqual(shell.calls[0]?.opts, { timeoutMs: 1234 });
   assert.equal("input" in (shell.calls[0]?.opts ?? {}), false);
+});
+
+test("remote host adapter terminates a timed-out ssh child and rejects as remote", async () => {
+  const home = await mkdtemp(join(tmpdir(), "swarm-remote-timeout-"));
+  const fakeSsh = join(home, "ssh");
+  await writeFile(fakeSsh, "#!/bin/sh\nwhile :; do :; done\n");
+  await chmod(fakeSsh, 0o700);
+  const remote = createRemoteHost(createShell(createNullLogger()), home, fakeSsh);
+
+  await assert.rejects(remote.run(host, ["status", "--json"], { timeoutMs: 250 }), (error) => {
+    assert.ok(error instanceof SwarmError);
+    assert.equal(error.code, "remote");
+    assert.match(error.message, /command timed out/);
+    return true;
+  });
 });

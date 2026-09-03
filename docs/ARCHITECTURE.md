@@ -14,12 +14,14 @@ change a contract without recording it in `INTEGRATION NOTES`.
   *pristine*: nobody works in it. It is only fetched and reset to the remote.
 - **Worktree**: a copy-on-write copy of the base (`worktreesDir/<owner>/<name>/<slug>`)
   with its own branch, and exactly one tmux session named `<name>/<slug>`.
-  Not a `git worktree`: a full independent copy (APFS `cp -c` clonefile / reflink).
+  Its plain id is globally unique across hosts. Not a `git worktree`: a full independent copy
+  (APFS `cp -c` clonefile / reflink).
 - **Prepared-copy pool**: zero or more pristine-base copies with repo `prepare` hooks already run.
   Creation claims the lowest slot by rename and immediately replenishes it from the base clone.
 - **Mount** a worktree = ensure its tmux session exists with the configured windows, resolving
   `{agent}` to the selected coding agent's configured start command (default: `nvim`,
   `cc` → `claude`, `lg` → `lazygit`), and switch the client to it.
+  Remote proxy reuse additionally requires a single pane whose current command is `ssh`.
 - **Unmount / sleep** a worktree = apply the sleep policy to its session: keep windows whose
   process tree matches a keep-alive rule (default: `claude`, `opencode`, `codex`, and any
   process listening on a TCP port); gracefully close the rest (nvim gets `:qa`; if it refuses
@@ -78,7 +80,7 @@ src/core/                 contracts and pure helpers; no I/O
   remote.ts               POSIX argument quoting and interactive SSH proxy command helper
   errors.ts               SwarmError with `code` union
 src/adapters/             one file per port, shell-based; each has *.test.ts using FakeShell
-  remoteHost.ts           BatchMode SSH transport + POSIX quoting and interactive proxy command
+  remoteHost.ts           BatchMode SSH transport + POSIX quoting; 30s short-command timeout
 src/services/             one file per service interface; tests use fakes from src/testing
   remoteHosts.ts          versioned JSON client, mirror reconciliation, and remote status fallback
   agentPopup.ts           agent-name re-exports, resolved-command argv, tmux attach argv/socket parsing, and env stripping
@@ -191,7 +193,7 @@ export const ConfigSchema = z.object({
   }).default({ cacheTtlSeconds: 3600, cloneProtocol: "ssh" }),
   ui: z.object({
     statusRefreshMs: z.number().int().default(2000),
-    remoteStatusRefreshMs: z.number().int().default(10000),
+    remoteStatusRefreshMs: z.number().int().positive().default(10000),
   }).default({ statusRefreshMs: 2000, remoteStatusRefreshMs: 10000 }),
 });
 export function defaultConfig(home: string): Config;   // fills all defaults

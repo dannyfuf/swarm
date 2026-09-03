@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { SwarmError } from "../core/errors.ts";
 import type { ContextService, RepoService, WorktreeService } from "../core/services.ts";
-import type { Worktree } from "../core/types.ts";
+import type { CloneJob, Worktree } from "../core/types.ts";
 import { createSessionService } from "../services/sessions.ts";
 import { createStatusService } from "../services/status.ts";
 import { createFakeProcess } from "../testing/fakeProcess.ts";
@@ -225,7 +225,7 @@ describe("CLI protocol handlers", () => {
     harness.deps.repos.reconcileClones = async () => {
       await harness.state.mutate((state) => {
         const job = state.clones[0];
-        assert.ok(job);
+        if (!job) return;
         state.repos.push({
           id: job.id,
           owner: job.owner,
@@ -273,6 +273,121 @@ describe("CLI protocol handlers", () => {
       branch: "feat/feature",
       baseRef: "origin/trunk",
     });
+  });
+
+  test("create resumes an active clone job instead of cloning the repo again", async () => {
+    const clone: CloneJob = {
+      id: "bukhr/new-repo",
+      owner: "bukhr",
+      name: "new-repo",
+      url: "ssh://git@example.test/bukhr/new-repo.git",
+      contextId: "buk",
+      defaultBranch: "trunk",
+      path: "/home/test/.swarm/repos/bukhr/new-repo",
+      stagingPath: "/home/test/.swarm/repos/bukhr/new-repo.staging",
+      logPath: "/home/test/.swarm/logs/clone.log",
+      pid: 42,
+      startedAt: "2026-09-03T00:00:00.000Z",
+      status: "cloning",
+    };
+    const harness = createHarness(
+      makeState({ contexts: [contexts[0]], repos: [], clones: [clone], worktrees: [] }),
+    );
+    let cloneCalls = 0;
+    let reconciliations = 0;
+    harness.deps.repos.clone = async () => {
+      cloneCalls += 1;
+      throw new Error("clone should not be called");
+    };
+    harness.deps.repos.reconcileClones = async () => {
+      reconciliations += 1;
+      if (reconciliations === 2) {
+        await harness.state.mutate((state) => {
+          state.repos.push({
+            id: clone.id,
+            owner: clone.owner,
+            name: clone.name,
+            url: clone.url,
+            contextId: clone.contextId,
+            defaultBranch: clone.defaultBranch,
+            path: clone.path,
+            clonedAt: "2026-09-03T00:00:00.000Z",
+            hooks: { prepare: [], postCreate: [] },
+          });
+          state.clones = [];
+        });
+      }
+      return harness.state.state.clones;
+    };
+    harness.deps.waitForClonePoll = async () => {
+      assert.fail("completed reconciliation should not sleep");
+    };
+    const hooks = { prepare: ["npm ci"], postCreate: ["npm test"] };
+
+    await handleProtocolCommand(
+      {
+        kind: "create",
+        repoId: clone.id,
+        slug: "feature",
+        branch: "feat/feature",
+        baseRef: "origin/trunk",
+        hooks,
+        json: true,
+      },
+      harness.deps,
+    );
+
+    assert.equal(cloneCalls, 0);
+    assert.equal(reconciliations, 2);
+    assert.deepEqual(harness.state.state.repos[0]?.hooks, hooks);
+    assert.equal(harness.createdInputs[0]?.repoId, clone.id);
+  });
+
+  test("create surfaces the persisted failure from an interrupted clone", async () => {
+    const clone: CloneJob = {
+      id: "bukhr/new-repo",
+      owner: "bukhr",
+      name: "new-repo",
+      url: "ssh://git@example.test/bukhr/new-repo.git",
+      contextId: "buk",
+      defaultBranch: "trunk",
+      path: "/home/test/.swarm/repos/bukhr/new-repo",
+      stagingPath: "/home/test/.swarm/repos/bukhr/new-repo.staging",
+      logPath: "/home/test/.swarm/logs/clone.log",
+      startedAt: "2026-09-03T00:00:00.000Z",
+      status: "failed",
+      error: "Clone stopped: authentication failed",
+    };
+    const harness = createHarness(
+      makeState({ contexts: [contexts[0]], repos: [], clones: [clone], worktrees: [] }),
+    );
+    let cloneCalls = 0;
+    harness.deps.repos.clone = async () => {
+      cloneCalls += 1;
+      throw new Error("clone should not be called");
+    };
+
+    await assert.rejects(
+      handleProtocolCommand(
+        {
+          kind: "create",
+          repoId: clone.id,
+          slug: "feature",
+          branch: "feat/feature",
+          baseRef: "origin/trunk",
+          hooks: { prepare: [], postCreate: [] },
+          json: true,
+        },
+        harness.deps,
+      ),
+      (error: unknown) => {
+        assert.ok(error instanceof SwarmError);
+        assert.equal(error.code, "git");
+        assert.equal(error.message, clone.error);
+        return true;
+      },
+    );
+    assert.equal(cloneCalls, 0);
   });
 
   test("create returns a validation error envelope when an unregistered repo has no URL", async () => {
@@ -339,6 +454,28 @@ describe("CLI protocol handlers", () => {
         windows: [],
         running: [],
       })),
+    });
+  });
+
+  test("status ignores remote mirrors and returns local statuses successfully", async () => {
+    const local = worktrees[0];
+    const source = worktrees[1];
+    assert.ok(local && source);
+    const mirror = { ...source, host: "devbox" };
+    const { deps } = createHarness(makeState({ worktrees: [local, mirror] }));
+
+    const response = await handleProtocolCommand({ kind: "status", json: true }, deps);
+
+    assert.deepEqual(response, {
+      protocol: 1,
+      statuses: [
+        {
+          worktreeId: local.id,
+          session: "none",
+          windows: [],
+          running: [],
+        },
+      ],
     });
   });
 });

@@ -145,6 +145,7 @@ export interface TmuxPort {
   selectWindow(session: string, index: number): Promise<void>;
   killWindow(session: string, index: number): Promise<void>;
   killSession(name: string): Promise<void>;
+  killSessionIfPresent(name: string): Promise<void>;
   switchClient(session: string): Promise<void>;
   attach(session: string): Promise<never>;
   displayMessage(msg: string): Promise<void>;

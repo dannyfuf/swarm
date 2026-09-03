@@ -233,9 +233,12 @@ export function createController(deps: ControllerDeps): Controller {
     for (const hostId of Object.keys(currentConfig.hosts)) {
       remoteStatusIntervals.set(
         hostId,
-        deps.clock.setInterval(() => {
-          void refreshRemoteStatus(hostId, true);
-        }, currentConfig.ui.remoteStatusRefreshMs),
+        deps.clock.setInterval(
+          () => {
+            void refreshRemoteStatus(hostId, true);
+          },
+          Math.max(minimumRefreshMs, currentConfig.ui.remoteStatusRefreshMs),
+        ),
       );
     }
   };

@@ -94,6 +94,31 @@ describe("RemoteHostService protocol", () => {
       '{"prepare":[],"postCreate":[]}',
       "--json",
     ]);
+    assert.equal(transport.calls[0]?.timeoutMs, 30_000);
+    assert.equal(transport.calls[1]?.timeoutMs, undefined);
+  });
+
+  test("rejects a globally duplicate id before invoking ssh", async () => {
+    const existing = remoteWorktree({ host: "lab" });
+    const { service, transport } = createHarness(makeState({ worktrees: [existing] }));
+    const repo = repos[0];
+    assert.ok(repo);
+
+    await assert.rejects(
+      service.create("devbox", {
+        repo,
+        slug: existing.slug,
+        branch: existing.branch,
+        baseRef: existing.baseRef,
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof SwarmError);
+        assert.equal(error.code, "validation");
+        assert.equal(error.message, `Worktree already exists: ${existing.id}`);
+        return true;
+      },
+    );
+    assert.deepEqual(transport.calls, []);
   });
 
   test("maps unreachable, protocol mismatch, and remote error envelopes", async () => {
@@ -158,12 +183,12 @@ describe("RemoteHostService protocol", () => {
     });
     assert.deepEqual(await service.status("devbox"), [status]);
     assert.deepEqual(
-      transport.calls.map(({ args }) => args),
+      transport.calls.map(({ args, timeoutMs }) => ({ args, timeoutMs })),
       [
-        ["delete", "bukhr/payroll#main", "--json"],
-        ["kill", "bukhr/payroll#main", "--json"],
-        ["sleep", "payroll/main", "--json"],
-        ["status", "--json"],
+        { args: ["delete", "bukhr/payroll#main", "--json"], timeoutMs: 30_000 },
+        { args: ["kill", "bukhr/payroll#main", "--json"], timeoutMs: 30_000 },
+        { args: ["sleep", "payroll/main", "--json"], timeoutMs: 30_000 },
+        { args: ["status", "--json"], timeoutMs: 30_000 },
       ],
     );
   });
@@ -236,6 +261,47 @@ describe("RemoteHostService sync", () => {
     );
     assert.equal(result[0]?.error, undefined);
     assert.equal(result[1]?.error?.code, "remote");
+  });
+
+  test("skips ids owned by other hosts without overwriting or removing those records", async () => {
+    const local = remoteWorktree();
+    const lab = remoteWorktree({
+      id: "bukhr/payroll#lab",
+      slug: "lab",
+      host: "lab",
+      path: "/lab/original",
+    });
+    const vanished = remoteWorktree({
+      id: "bukhr/payroll#vanished",
+      slug: "vanished",
+      host: "devbox",
+    });
+    const { service, transport, state, logger } = createHarness(
+      makeState({ worktrees: [local, lab, vanished] }),
+    );
+    transport.script(
+      "devbox",
+      "list",
+      response({
+        protocol: 1,
+        version: "swarm 0.1.0",
+        repos: [],
+        worktrees: [
+          remoteWorktree({ path: "/devbox/replacement" }),
+          remoteWorktree({ id: lab.id, slug: lab.slug, path: "/devbox/lab-replacement" }),
+        ],
+      }),
+    );
+
+    assert.deepEqual(await service.sync("devbox"), []);
+    assert.deepEqual(state.state.worktrees, [local, lab]);
+    const warnings = logger.entries.filter(({ level }) => level === "warn");
+    assert.ok(
+      warnings.some(({ message }) => message.includes("devbox") && message.includes("host local")),
+    );
+    assert.ok(
+      warnings.some(({ message }) => message.includes("devbox") && message.includes("host lab")),
+    );
   });
 
   test("remoteSnapshot filters status and falls back to unknown", async () => {

@@ -2312,6 +2312,35 @@ describe("createWorktreeService", () => {
     );
   });
 
+  test("rejects a local create when the id belongs to a remote mirror", async () => {
+    const repo = repos[0];
+    const source = worktrees[0];
+    assert.ok(repo && source);
+    const mirror = { ...source, host: "devbox" };
+    const git = createFakeGit();
+    const service = createWorktreeService({
+      state: createMemoryState(
+        makeState({ contexts: [contexts[0]], repos: [repo], worktrees: [mirror] }),
+      ),
+      config: createMemoryConfig(),
+      git,
+      files: createFakeFiles({ paths: [repo.path] }),
+      tmux: createFakeTmux(),
+      shell: createFakeShell(),
+      process: createFakeProcess(),
+      clock: createFixedClock(),
+      logger: createNullLogger(),
+    });
+
+    await assert.rejects(service.create({ repoId: repo.id, branch: source.branch }), (error) => {
+      assert.ok(error instanceof SwarmError);
+      assert.equal(error.code, "validation");
+      assert.equal(error.message, `Worktree already exists: ${mirror.id}`);
+      return true;
+    });
+    assert.deepEqual(git.calls, []);
+  });
+
   test("rejects a tmux session name collision across repos", async () => {
     const registered = repos[1];
     const existing = worktrees[0];
@@ -2657,5 +2686,44 @@ describe("createWorktreeService", () => {
     assert.deepEqual(calls, [`devbox:${target.id}`, `devbox:${target.id}`]);
     assert.deepEqual(state.state.worktrees, []);
     assert.equal(tmux.sessions.has("devbox/payroll/main"), false);
+  });
+
+  test("remote deletion removes the mirror when its proxy vanishes during teardown", async () => {
+    const source = worktrees[0];
+    assert.ok(source);
+    const target = { ...source, host: "devbox", path: "/srv/worktrees/payroll/main" };
+    const state = createMemoryState(makeState({ worktrees: [target] }));
+    const tmux = createFakeTmux({
+      sessions: [
+        {
+          name: "devbox/payroll/main",
+          attached: false,
+          windows: 1,
+          createdAt: 0,
+          lastActivityAt: 0,
+        },
+      ],
+    });
+    const remoteHosts = {
+      async delete() {
+        tmux.sessions.delete("devbox/payroll/main");
+      },
+    } as unknown as RemoteHostService;
+    const service = createWorktreeService({
+      state,
+      config: createMemoryConfig(),
+      git: createFakeGit(),
+      files: createFakeFiles(),
+      tmux,
+      shell: createFakeShell(),
+      clock: createFixedClock(),
+      logger: createNullLogger(),
+      remoteHosts,
+    });
+
+    await service.delete(target.id);
+
+    assert.deepEqual(state.state.worktrees, []);
+    assert.ok(tmux.calls.some(({ method }) => method === "killSessionIfPresent"));
   });
 });

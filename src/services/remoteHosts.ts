@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { type ErrorCode, SwarmError } from "../core/errors.ts";
+import { worktreeId as makeWorktreeId } from "../core/paths.ts";
 import type { ConfigPort, Logger, RemoteHostPort, ShellResult, StatePort } from "../core/ports.ts";
 import { PROTOCOL_VERSION } from "../core/protocol.ts";
 import type { RemoteHostService, UnmountReport } from "../core/services.ts";
@@ -9,6 +10,7 @@ import {
   type Worktree,
   WorktreeId,
   WorktreeSchema,
+  worktreeHost,
 } from "../core/types.ts";
 import { mutateState } from "./stateMutation.ts";
 
@@ -64,6 +66,7 @@ const errorCodes = new Set<ErrorCode>([
   "cancelled",
   "unsupported",
 ]);
+const SHORT_COMMAND_TIMEOUT_MS = 30_000;
 
 export interface RemoteHostServiceDependencies {
   transport: RemoteHostPort;
@@ -169,10 +172,17 @@ export function createRemoteHostService({
 
   const service: RemoteHostService = {
     list(hostId) {
-      return invoke(hostId, ["list", "--json"], ListEnvelopeSchema);
+      return invoke(hostId, ["list", "--json"], ListEnvelopeSchema, {
+        timeoutMs: SHORT_COMMAND_TIMEOUT_MS,
+      });
     },
 
     async create(hostId, { repo, slug, branch, baseRef }) {
+      const id = makeWorktreeId(repo.id, slug);
+      const current = await state.load();
+      if (current.worktrees.some((worktree) => worktree.id === id)) {
+        throw new SwarmError("validation", `Worktree already exists: ${id}`);
+      }
       const response = await invoke(
         hostId,
         [
@@ -197,15 +207,21 @@ export function createRemoteHostService({
     },
 
     async delete(hostId, worktreeId) {
-      await invoke(hostId, ["delete", worktreeId, "--json"], OkEnvelopeSchema);
+      await invoke(hostId, ["delete", worktreeId, "--json"], OkEnvelopeSchema, {
+        timeoutMs: SHORT_COMMAND_TIMEOUT_MS,
+      });
     },
 
     async kill(hostId, worktreeId) {
-      await invoke(hostId, ["kill", worktreeId, "--json"], OkEnvelopeSchema);
+      await invoke(hostId, ["kill", worktreeId, "--json"], OkEnvelopeSchema, {
+        timeoutMs: SHORT_COMMAND_TIMEOUT_MS,
+      });
     },
 
     async sleep(hostId, session) {
-      const response = await invoke(hostId, ["sleep", session, "--json"], SleepEnvelopeSchema);
+      const response = await invoke(hostId, ["sleep", session, "--json"], SleepEnvelopeSchema, {
+        timeoutMs: SHORT_COMMAND_TIMEOUT_MS,
+      });
       return {
         kept: response.kept,
         closed: response.closed,
@@ -214,7 +230,9 @@ export function createRemoteHostService({
     },
 
     async status(hostId) {
-      const response = await invoke(hostId, ["status", "--json"], StatusEnvelopeSchema);
+      const response = await invoke(hostId, ["status", "--json"], StatusEnvelopeSchema, {
+        timeoutMs: SHORT_COMMAND_TIMEOUT_MS,
+      });
       return response.statuses;
     },
 
@@ -229,6 +247,15 @@ export function createRemoteHostService({
         );
         const mirrored: Worktree[] = [];
         for (const worktree of remote.worktrees) {
+          const collision = next.worktrees.find(
+            (candidate) => candidate.id === worktree.id && worktreeHost(candidate) !== hostId,
+          );
+          if (collision) {
+            logger.warn(
+              `Skipping ${hostId} worktree ${worktree.id}: id already belongs to host ${worktreeHost(collision)}`,
+            );
+            continue;
+          }
           if (!repoIds.has(worktree.repoId)) {
             logger.warn(`Skipping ${hostId} worktree with unregistered repo: ${worktree.id}`);
             continue;

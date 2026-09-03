@@ -239,7 +239,7 @@ export const ConfigSchema = z
     ui: z
       .object({
         statusRefreshMs: z.number().int().default(2000),
-        remoteStatusRefreshMs: z.number().int().default(10000),
+        remoteStatusRefreshMs: z.number().int().positive().default(10000),
       })
       .default({ statusRefreshMs: 2000, remoteStatusRefreshMs: 10000 }),
   })

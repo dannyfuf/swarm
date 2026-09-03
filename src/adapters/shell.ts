@@ -129,7 +129,7 @@ export function createShell(logger: Logger, startup: StartupTiming = noStartupTi
             reject(new SwarmError("cancelled", `Command cancelled: ${cmd}`));
             return;
           }
-          resolve({ code: code ?? (timedOut ? 124 : 1), stdout, stderr });
+          resolve({ code: timedOut ? 124 : (code ?? 1), stdout, stderr });
         });
 
         if (opts?.timeoutMs !== undefined) {

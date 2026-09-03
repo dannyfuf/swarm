@@ -28,13 +28,15 @@ Non-goals:
 
 - **Host**: a named target in `config.json`. The local machine is the implicit host `local`.
 - **Placement**: every worktree record has an optional `host` field. Absent means `local`.
+- **Identity**: the plain worktree id is globally unique across local and remote hosts; host is
+  placement metadata, not part of identity.
 - **Mirror**: remote worktrees are stored in the local `state.json` as full worktree records
   (with the remote `path` and `session`) so the list renders offline. The remote state is
   authoritative. A sync replaces every local record for that host with the remote list.
 - **Proxy session**: opening a remote worktree creates a local tmux session named
   `<host>/<remote session>` whose only window runs `ssh -t -- <target> <swarm> open '<id>'`.
-  The TUI then `switch-client`s to it exactly like a local session. When SSH exits the proxy
-  session disappears; the next open recreates it.
+  The TUI then `switch-client`s to it exactly like a local session. Reuse requires exactly one
+  `ssh` pane, so shell-only sessions restored by tmux-resurrect are replaced.
 
 ## Configuration
 
@@ -59,7 +61,7 @@ Non-goals:
 Authentication is SSH's job. swarm uses `BatchMode=yes`, so keys must be loaded in an agent or
 be passwordless. Multiplexing is enabled with `ControlMaster=auto`,
 `ControlPath=$SWARM_HOME/cache/ssh/%C`, `ControlPersist=120`, so repeated status calls reuse one
-connection.
+connection. List, status, sleep, kill, and delete have a 30-second timeout; create is unbounded.
 
 ## CLI protocol
 

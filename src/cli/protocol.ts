@@ -19,6 +19,7 @@ import {
   type WorktreeId,
   WorktreeId as WorktreeIdSchema,
   type WorktreeStatus,
+  worktreeHost,
 } from "../core/types.ts";
 import { VERSION } from "../core/version.ts";
 import { mutateState } from "../services/stateMutation.ts";
@@ -132,6 +133,26 @@ async function registerRepo(
   command: Extract<ProtocolCommand, { kind: "create" }>,
   deps: ProtocolDependencies,
 ): Promise<Repo> {
+  const persistHooks = (): Promise<Repo> =>
+    mutateState(deps.state, (state) => {
+      const repo = state.repos.find((candidate) => candidate.id === command.repoId);
+      if (!repo) throw new SwarmError("not-found", `Repository not found: ${command.repoId}`);
+      repo.hooks = structuredClone(command.hooks);
+      return structuredClone(repo);
+    });
+
+  await deps.repos.reconcileClones();
+  const reconciled = await deps.state.load();
+  const existing = reconciled.repos.find((candidate) => candidate.id === command.repoId);
+  if (existing) return persistHooks();
+  const clone = reconciled.clones.find((candidate) => candidate.id === command.repoId);
+  if (clone?.status === "failed") {
+    throw new SwarmError("git", clone.error ?? `Failed to clone repository: ${command.repoId}`);
+  }
+  if (clone) {
+    await awaitClonedRepo(command.repoId, deps);
+    return persistHooks();
+  }
   if (!command.url) {
     throw new SwarmError(
       "validation",
@@ -156,12 +177,7 @@ async function registerRepo(
     { url: command.url },
   );
   await awaitClonedRepo(command.repoId, deps);
-  return mutateState(deps.state, (state) => {
-    const repo = state.repos.find((candidate) => candidate.id === command.repoId);
-    if (!repo) throw new SwarmError("not-found", `Repository not found: ${command.repoId}`);
-    repo.hooks = structuredClone(command.hooks);
-    return structuredClone(repo);
-  });
+  return persistHooks();
 }
 
 async function createWorktree(
@@ -206,10 +222,11 @@ export async function handleProtocolCommand(
 
   const state = await deps.state.load();
   if (command.kind === "status") {
-    const statuses = await deps.status.snapshot(state.worktrees);
+    const localWorktrees = state.worktrees.filter((worktree) => worktreeHost(worktree) === "local");
+    const statuses = await deps.status.snapshot(localWorktrees);
     return {
       protocol: PROTOCOL_VERSION,
-      statuses: state.worktrees.map((worktree) => {
+      statuses: localWorktrees.map((worktree) => {
         const status = statuses.get(worktree.id);
         if (!status) {
           throw new SwarmError("tmux", `Status snapshot omitted worktree: ${worktree.id}`);

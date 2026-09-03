@@ -421,6 +421,7 @@ function createHarness(
     async selectWindow() {},
     async killWindow() {},
     async killSession() {},
+    async killSessionIfPresent() {},
     async switchClient() {},
     async attach(): Promise<never> {
       throw new SwarmError("unsupported", "Not used by controller tests");
@@ -573,6 +574,23 @@ describe("createController", () => {
     ]);
     pending.resolve([{ hostId: "devbox" }]);
     await flush();
+    harness.controller.dispose();
+  });
+
+  test("clamps the remote status timer to the local minimum refresh interval", async () => {
+    const remoteHosts = fakeRemoteHosts();
+    const harness = createHarness(makeState(), {
+      config: {
+        ...config,
+        hosts: { devbox: { ssh: "devbox", swarmCommand: "swarm" } },
+        ui: { ...config.ui, remoteStatusRefreshMs: 1 },
+      },
+      remoteHosts,
+    });
+
+    await harness.controller.init();
+
+    assert.deepEqual(harness.calls.intervals, [config.ui.statusRefreshMs, 500]);
     harness.controller.dispose();
   });
 

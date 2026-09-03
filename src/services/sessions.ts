@@ -177,7 +177,20 @@ export function createSessionService({
       "tmux",
       `Failed to inspect tmux session ${proxy}`,
     );
-    if (exists) return;
+    if (exists) {
+      const windows = await attempt(
+        () => tmux.listWindows(proxy),
+        "tmux",
+        `Failed to inspect tmux proxy session ${proxy}`,
+      );
+      const panes = windows.flatMap((window) => window.panes);
+      if (panes.length === 1 && panes[0]?.currentCommand === "ssh") return;
+      await attempt(
+        () => tmux.killSessionIfPresent(proxy),
+        "tmux",
+        `Failed to replace tmux proxy session ${proxy}`,
+      );
+    }
     await attempt(
       () =>
         tmux.newSession({
@@ -465,18 +478,11 @@ export function createSessionService({
     if (hostId !== "local") {
       await requireRemoteHosts(hostId).kill(hostId, worktree.id);
       const proxy = proxySessionName(hostId, worktree.session);
-      const proxyExists = await attempt(
-        () => tmux.hasSession(proxy),
+      await attempt(
+        () => tmux.killSessionIfPresent(proxy),
         "tmux",
-        `Failed to inspect tmux session ${proxy}`,
+        `Failed to kill tmux session ${proxy}`,
       );
-      if (proxyExists) {
-        await attempt(
-          () => tmux.killSession(proxy),
-          "tmux",
-          `Failed to kill tmux session ${proxy}`,
-        );
-      }
       return;
     }
 

@@ -1,5 +1,6 @@
 import { chmod, mkdir } from "node:fs/promises";
 import { join } from "node:path";
+import { SwarmError } from "../core/errors.ts";
 import type { RemoteHostPort, Shell } from "../core/ports.ts";
 import { quotePosixArg } from "../core/remote.ts";
 import type { HostConfigEntry, HostId } from "../core/types.ts";
@@ -31,7 +32,11 @@ export function sshArgv(host: ResolvedHost, args: string[], swarmHome: string): 
   ];
 }
 
-export function createRemoteHost(shell: Shell, swarmHome: string): RemoteHostPort {
+export function createRemoteHost(
+  shell: Shell,
+  swarmHome: string,
+  sshCommand = "ssh",
+): RemoteHostPort {
   const cacheDir = join(swarmHome, "cache", "ssh");
   let prepareCache: Promise<void> | undefined;
 
@@ -49,9 +54,16 @@ export function createRemoteHost(shell: Shell, swarmHome: string): RemoteHostPor
   return {
     async run(host, args, opts) {
       await ensureCache();
-      return shell.run("ssh", sshArgv(host, args, swarmHome), {
+      const result = await shell.run(sshCommand, sshArgv(host, args, swarmHome), {
         timeoutMs: opts?.timeoutMs,
       });
+      if (opts?.timeoutMs !== undefined && result.code === 124) {
+        throw new SwarmError(
+          "remote",
+          `${host.id}: remote command timed out after ${opts.timeoutMs}ms`,
+        );
+      }
+      return result;
     },
   };
 }

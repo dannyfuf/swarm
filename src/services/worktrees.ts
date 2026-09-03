@@ -274,8 +274,12 @@ export function createWorktreeService({
     destination: string,
   ): void => {
     const id = makeWorktreeId(repo.id, slug);
-    if (current.worktrees.some((worktree) => worktree.id === id)) {
-      throw new SwarmError("conflict", `Worktree already exists: ${id}`);
+    const existingId = current.worktrees.find((worktree) => worktree.id === id);
+    if (existingId) {
+      throw new SwarmError(
+        worktreeHost(existingId) === "local" ? "conflict" : "validation",
+        `Worktree already exists: ${id}`,
+      );
     }
     const session = sessionName(repo.name, slug);
     if (current.worktrees.some((worktree) => worktree.session === session)) {
@@ -1653,7 +1657,7 @@ export function createWorktreeService({
         try {
           await remoteHosts.delete(hostId, registered.id);
           const proxy = proxySessionName(hostId, registered.session);
-          if (await tmux.hasSession(proxy)) await tmux.killSession(proxy);
+          await tmux.killSessionIfPresent(proxy);
           await mutateState(state, (next) => {
             next.worktrees = next.worktrees.filter(
               (candidate) => !(candidate.id === worktreeId && candidate.host === hostId),
