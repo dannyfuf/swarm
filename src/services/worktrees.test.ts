@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { SwarmError } from "../core/errors.ts";
+import { hotCopyPath, hotCopyStagingPath } from "../core/paths.ts";
 import type { TmuxSession } from "../core/ports.ts";
 import { createFakeFiles } from "../testing/fakeFiles.ts";
 import { createFakeGit } from "../testing/fakeGit.ts";
@@ -12,6 +13,24 @@ import { createMemoryConfig } from "../testing/memoryConfig.ts";
 import { createMemoryState } from "../testing/memoryState.ts";
 import { createNullLogger } from "../testing/nullLogger.ts";
 import { createWorktreeService } from "./worktrees.ts";
+
+function deferred(): { promise: Promise<void>; resolve(): void } {
+  let resolvePromise: (() => void) | undefined;
+  const promise = new Promise<void>((resolve) => {
+    resolvePromise = resolve;
+  });
+  return {
+    promise,
+    resolve() {
+      assert.ok(resolvePromise);
+      resolvePromise();
+    },
+  };
+}
+
+async function flush(): Promise<void> {
+  await new Promise<void>((resolve) => setImmediate(resolve));
+}
 
 describe("createWorktreeService", () => {
   test("creates a new branch with ordered progress and treats hook failures as warnings", async () => {
@@ -56,7 +75,7 @@ describe("createWorktreeService", () => {
     assert.deepEqual(steps, [
       "Fetching origin",
       "Updating base",
-      "Copying tree",
+      "Copying repository",
       "Creating branch",
       "Running hooks",
     ]);
@@ -66,7 +85,272 @@ describe("createWorktreeService", () => {
     assert.deepEqual(logs, ["Hook failed (7): npm install"]);
     assert.equal(logger.entries[0]?.level, "warn");
     assert.ok(git.calls.some((call) => call.method === "checkoutNewBranch"));
+    assert.deepEqual(files.calls.find(({ method }) => method === "cloneTree")?.args, [
+      repo.path,
+      destination,
+    ]);
+    assert.equal(
+      files.calls.some(({ method }) => method === "move"),
+      false,
+    );
     assert.deepEqual(state.state.worktrees, [created]);
+  });
+
+  test("consumes a hot copy, refreshes it in place, then runs hooks and persists", async () => {
+    const currentRepo = repos[1];
+    assert.ok(currentRepo);
+    const repo = { ...currentRepo, defaultBranch: "master" };
+    const destination = "/home/test/.swarm/worktrees/bukhr/platform/feat-hot";
+    const hot = hotCopyPath("/home/test/.swarm/worktrees", repo.id);
+    const state = createMemoryState(
+      makeState({ contexts: [contexts[0]], repos: [repo], worktrees: [] }),
+    );
+    const files = createFakeFiles({ paths: [repo.path, hot] });
+    const git = createFakeGit({
+      defaultBranches: { [destination]: "main" },
+      remoteBranches: { [destination]: ["origin/main"] },
+    });
+    const shell = createFakeShell([
+      { match: (cmd, args) => cmd === "sh" && args[1] === "npm install", result: {} },
+    ]);
+    const service = createWorktreeService({
+      state,
+      config: createMemoryConfig(),
+      git,
+      files,
+      tmux: createFakeTmux(),
+      shell,
+      clock: createFixedClock("2026-03-04T00:00:00.000Z"),
+      logger: createNullLogger(),
+    });
+    const steps: string[] = [];
+
+    const created = await service.create({ repoId: repo.id, branch: "feat/hot" }, (event) => {
+      if (event.type === "step") steps.push(event.label);
+    });
+
+    assert.deepEqual(steps, [
+      "Using prepared copy",
+      "Fetching origin",
+      "Updating base",
+      "Creating branch",
+      "Running hooks",
+    ]);
+    assert.ok(
+      files.calls.some(
+        ({ method, args }) => method === "move" && args[0] === hot && args[1] === destination,
+      ),
+    );
+    assert.equal(
+      files.calls.some(({ method }) => method === "cloneTree"),
+      false,
+    );
+    const destinationFetch = git.calls.find(
+      ({ method, args }) => method === "fetch" && args[0] === destination,
+    );
+    assert.deepEqual(destinationFetch?.args, [destination, { prune: true }]);
+    assert.ok(
+      git.calls.some(
+        ({ method, args }) =>
+          method === "resetToRemote" && args[0] === destination && args[1] === "main",
+      ),
+    );
+    assert.equal(
+      git.calls.some(({ method, args }) => method === "fetch" && args[0] === repo.path),
+      false,
+    );
+    assert.equal(state.state.repos[0]?.defaultBranch, "main");
+    assert.deepEqual(state.state.worktrees, [created]);
+    assert.equal(shell.calls[0]?.opts?.cwd, destination);
+  });
+
+  test("prepareHotCopy is idempotent when the hot copy already exists", async () => {
+    const repo = repos[0];
+    assert.ok(repo);
+    const hot = hotCopyPath("/home/test/.swarm/worktrees", repo.id);
+    const files = createFakeFiles({ paths: [repo.path, hot] });
+    const git = createFakeGit();
+    const service = createWorktreeService({
+      state: createMemoryState(
+        makeState({ contexts: [contexts[0]], repos: [repo], worktrees: [] }),
+      ),
+      config: createMemoryConfig(),
+      git,
+      files,
+      tmux: createFakeTmux(),
+      shell: createFakeShell(),
+      clock: createFixedClock(),
+      logger: createNullLogger(),
+    });
+
+    await service.prepareHotCopy(repo.id);
+
+    assert.deepEqual(git.calls, []);
+    assert.equal(
+      files.calls.some(({ method }) => method === "cloneTree"),
+      false,
+    );
+    assert.equal(files.paths.has(hot), true);
+  });
+
+  test("prepareHotCopy removes stale staging, stages the copy, and atomically publishes it", async () => {
+    const repo = repos[0];
+    assert.ok(repo);
+    const hot = hotCopyPath("/home/test/.swarm/worktrees", repo.id);
+    const staging = hotCopyStagingPath("/home/test/.swarm/worktrees", repo.id);
+    const files = createFakeFiles({ paths: [repo.path, staging] });
+    const git = createFakeGit({ remoteBranches: { [repo.path]: ["origin/main"] } });
+    const service = createWorktreeService({
+      state: createMemoryState(
+        makeState({ contexts: [contexts[0]], repos: [repo], worktrees: [] }),
+      ),
+      config: createMemoryConfig(),
+      git,
+      files,
+      tmux: createFakeTmux(),
+      shell: createFakeShell(),
+      clock: createFixedClock(),
+      logger: createNullLogger(),
+    });
+
+    await service.prepareHotCopy(repo.id);
+
+    assert.ok(
+      files.calls.some(({ method, args }) => method === "removeTree" && args[0] === staging),
+    );
+    assert.ok(
+      files.calls.some(
+        ({ method, args }) =>
+          method === "cloneTree" && args[0] === repo.path && args[1] === staging,
+      ),
+    );
+    assert.ok(
+      files.calls.some(
+        ({ method, args }) => method === "move" && args[0] === staging && args[1] === hot,
+      ),
+    );
+    assert.equal(files.paths.has(hot), true);
+    assert.equal(files.paths.has(staging), false);
+  });
+
+  test("prepareHotCopy cleans staging when copying fails", async () => {
+    const repo = repos[0];
+    assert.ok(repo);
+    const staging = hotCopyStagingPath("/home/test/.swarm/worktrees", repo.id);
+    const files = createFakeFiles({ paths: [repo.path] });
+    const cloneTree = files.cloneTree.bind(files);
+    files.cloneTree = async (source, destination) => {
+      await cloneTree(source, destination);
+      throw new Error("copy failed");
+    };
+    const service = createWorktreeService({
+      state: createMemoryState(
+        makeState({ contexts: [contexts[0]], repos: [repo], worktrees: [] }),
+      ),
+      config: createMemoryConfig(),
+      git: createFakeGit({ remoteBranches: { [repo.path]: ["origin/main"] } }),
+      files,
+      tmux: createFakeTmux(),
+      shell: createFakeShell(),
+      clock: createFixedClock(),
+      logger: createNullLogger(),
+    });
+
+    await assert.rejects(service.prepareHotCopy(repo.id), /Failed to prepare worktree copy/u);
+
+    assert.equal(files.paths.has(staging), false);
+    assert.ok(
+      files.calls.some(({ method, args }) => method === "removeTree" && args[0] === staging),
+    );
+  });
+
+  test("concurrent prepareHotCopy calls share one in-flight promise", async () => {
+    const repo = repos[0];
+    assert.ok(repo);
+    const gate = deferred();
+    const files = createFakeFiles({ paths: [repo.path] });
+    files.cloneTree = async (source, destination) => {
+      files.calls.push({ method: "cloneTree", args: [source, destination] });
+      await gate.promise;
+      files.paths.add(destination);
+    };
+    const service = createWorktreeService({
+      state: createMemoryState(
+        makeState({ contexts: [contexts[0]], repos: [repo], worktrees: [] }),
+      ),
+      config: createMemoryConfig(),
+      git: createFakeGit({ remoteBranches: { [repo.path]: ["origin/main"] } }),
+      files,
+      tmux: createFakeTmux(),
+      shell: createFakeShell(),
+      clock: createFixedClock(),
+      logger: createNullLogger(),
+    });
+
+    const first = service.prepareHotCopy(repo.id);
+    const second = service.prepareHotCopy(repo.id);
+    assert.equal(first, second);
+    await flush();
+    assert.equal(files.calls.filter(({ method }) => method === "cloneTree").length, 1);
+    gate.resolve();
+    await first;
+  });
+
+  test("create awaits an in-flight preparation and then consumes the completed hot copy", async () => {
+    const repo = repos[0];
+    assert.ok(repo);
+    const destination = "/home/test/.swarm/worktrees/bukhr/payroll/feat-wait";
+    const hot = hotCopyPath("/home/test/.swarm/worktrees", repo.id);
+    const gate = deferred();
+    const files = createFakeFiles({ paths: [repo.path] });
+    const cloneTree = files.cloneTree.bind(files);
+    files.cloneTree = async (source, target) => {
+      await gate.promise;
+      await cloneTree(source, target);
+    };
+    const git = createFakeGit({
+      remoteBranches: {
+        [repo.path]: ["origin/main"],
+        [destination]: ["origin/main"],
+      },
+    });
+    const service = createWorktreeService({
+      state: createMemoryState(
+        makeState({ contexts: [contexts[0]], repos: [repo], worktrees: [] }),
+      ),
+      config: createMemoryConfig(),
+      git,
+      files,
+      tmux: createFakeTmux(),
+      shell: createFakeShell(),
+      clock: createFixedClock(),
+      logger: createNullLogger(),
+    });
+
+    const preparation = service.prepareHotCopy(repo.id);
+    await flush();
+    const creation = service.create({ repoId: repo.id, branch: "feat/wait" });
+    await flush();
+    assert.equal(
+      git.calls.some(({ method, args }) => method === "fetch" && args[0] === destination),
+      false,
+    );
+
+    gate.resolve();
+    await preparation;
+    await creation;
+
+    assert.equal(files.paths.has(hot), false);
+    assert.ok(
+      files.calls.some(
+        ({ method, args }) => method === "move" && args[0] === hot && args[1] === destination,
+      ),
+    );
+    assert.equal(
+      files.calls.filter(({ method, args }) => method === "cloneTree" && args[0] === repo.path)
+        .length,
+      1,
+    );
   });
 
   test("self-heals a stale default branch and persists the resolved branch", async () => {
@@ -255,6 +539,8 @@ describe("createWorktreeService", () => {
       "bad*name",
       "bad[name",
       "bad\\name",
+      ".hot",
+      ".hot.staging",
     ];
 
     for (const branch of invalid) {

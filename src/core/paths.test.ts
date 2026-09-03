@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import {
+  hotCopyPath,
+  hotCopyStagingPath,
   parseWorktreeId,
   repoId,
   repoPath,
@@ -10,6 +12,7 @@ import {
   worktreeId,
   worktreePath,
 } from "./paths.ts";
+import { validateBranch } from "./prs.ts";
 import { defaultConfig } from "./types.ts";
 
 describe("path helpers", () => {
@@ -46,5 +49,24 @@ describe("path helpers", () => {
       worktreePath(config, "bukhr", "payroll", "feat-fix"),
       "/home/test/.swarm/worktrees/bukhr/payroll/feat-fix",
     );
+    assert.equal(
+      hotCopyPath(config.worktreesDir, "bukhr/payroll"),
+      "/home/test/.swarm/worktrees/bukhr/payroll/.hot",
+    );
+    assert.equal(
+      hotCopyStagingPath(config.worktreesDir, "bukhr/payroll"),
+      "/home/test/.swarm/worktrees/bukhr/payroll/.hot.staging",
+    );
+  });
+
+  test("rejects branch slugs reserved for the hot-copy pool", () => {
+    for (const branch of [".hot", ".hot.staging", " .hot-next"]) {
+      assert.throws(
+        () => validateBranch(branch),
+        (error: unknown) =>
+          error instanceof Error &&
+          error.message === `Branch name is reserved for prepared copies: ${branch}`,
+      );
+    }
   });
 });

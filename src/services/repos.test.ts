@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { SwarmError } from "../core/errors.ts";
+import { hotCopyPath, hotCopyStagingPath } from "../core/paths.ts";
 import type { GithubPort, TmuxSession } from "../core/ports.ts";
 import type { WorktreeService } from "../core/services.ts";
 import type { RemoteRepo } from "../core/types.ts";
@@ -35,6 +36,7 @@ function createWorktreeStub(): WorktreeService & { deleted: string[] } {
     async remoteBranches() {
       return [];
     },
+    async prepareHotCopy() {},
     async create() {
       throw new SwarmError("unsupported", "not used");
     },
@@ -339,8 +341,15 @@ describe("createRepoService", () => {
         worktrees: payrollWorktrees,
       }),
     );
+    const hot = hotCopyPath(fixtureConfig.worktreesDir, "bukhr/payroll");
+    const staging = hotCopyStagingPath(fixtureConfig.worktreesDir, "bukhr/payroll");
     const files = createFakeFiles({
-      paths: [repos[0]?.path ?? "", ...payrollWorktrees.map((worktree) => worktree.path)],
+      paths: [
+        repos[0]?.path ?? "",
+        ...payrollWorktrees.map((worktree) => worktree.path),
+        hot,
+        staging,
+      ],
     });
     const sessions: TmuxSession[] = payrollWorktrees.map((worktree) => ({
       name: worktree.session,
@@ -385,5 +394,7 @@ describe("createRepoService", () => {
     );
     assert.deepEqual(state.state.repos, []);
     assert.deepEqual(state.state.worktrees, []);
+    assert.ok(files.removed.includes(hot));
+    assert.ok(files.removed.includes(staging));
   });
 });

@@ -36,6 +36,7 @@ import {
   repos,
   worktrees,
 } from "../testing/fixtures.ts";
+import type { NullLogger } from "../testing/nullLogger.ts";
 import { createNullLogger } from "../testing/nullLogger.ts";
 import { createController } from "./controller.ts";
 import { createStore } from "./store.ts";
@@ -48,9 +49,11 @@ interface Harness {
   controller: ReturnType<typeof createController>;
   store: RecordingStore;
   clock: FixedClock;
+  logger: NullLogger;
   behavior: {
     snapshot: StatusService["snapshot"];
     createWorktree: WorktreeService["create"];
+    prepareHotCopy: WorktreeService["prepareHotCopy"];
     cloneRepo: RepoService["clone"];
     reconcileClones: RepoService["reconcileClones"];
     deleteWorktree: WorktreeService["delete"];
@@ -63,6 +66,7 @@ interface Harness {
   calls: {
     snapshots: Worktree[][];
     created: Array<{ input: Parameters<WorktreeService["create"]>[0]; onEvent?: OnEvent }>;
+    prepared: Array<{ repoId: RepoId; onEvent?: OnEvent }>;
     cloned: Array<{ remote: Parameters<RepoService["clone"]>[0]; contextId: string }>;
     deletedWorktrees: WorktreeId[];
     opened: Array<{ worktree: Worktree; options?: { sleepPrevious?: boolean } }>;
@@ -114,6 +118,7 @@ function createHarness(initial: State = makeState()): Harness {
   const calls: Harness["calls"] = {
     snapshots: [],
     created: [],
+    prepared: [],
     cloned: [],
     deletedWorktrees: [],
     opened: [],
@@ -134,6 +139,7 @@ function createHarness(initial: State = makeState()): Harness {
       assert.ok(created);
       return { ...created, repoId: input.repoId, branch: input.branch };
     },
+    async prepareHotCopy() {},
     async cloneRepo(remote, contextId) {
       return {
         id: remote.fullName,
@@ -225,6 +231,10 @@ function createHarness(initial: State = makeState()): Harness {
     async remoteBranches() {
       return ["origin/main"];
     },
+    prepareHotCopy(repoId, onEvent) {
+      calls.prepared.push({ repoId, onEvent });
+      return behavior.prepareHotCopy(repoId, onEvent);
+    },
     async create(input, onEvent) {
       calls.created.push({ input, onEvent });
       return behavior.createWorktree(input, onEvent);
@@ -308,6 +318,7 @@ function createHarness(initial: State = makeState()): Harness {
   calls.clipboardCopies = clipboard.copies;
   const process = createFakeProcess();
   calls.openedUrls = process.openedUrls;
+  const logger = createNullLogger();
   const controller = createController({
     store,
     contexts: contextService,
@@ -322,13 +333,14 @@ function createHarness(initial: State = makeState()): Harness {
     clipboard,
     process,
     clock,
-    logger: createNullLogger(),
+    logger,
   });
 
   return {
     controller,
     store,
     clock,
+    logger,
     behavior,
     calls,
     setPersisted(next) {
@@ -399,6 +411,28 @@ describe("createController", () => {
 
     harness.controller.dispose();
     assert.equal(harness.calls.clearedIntervals.length, 1);
+  });
+
+  test("starts repo warm-ups only after the initial state hydration", async () => {
+    const harness = createHarness();
+    const preparation = deferred<void>();
+    harness.behavior.prepareHotCopy = async () => preparation.promise;
+
+    await harness.controller.init();
+
+    assert.deepEqual(
+      harness.calls.prepared.map(({ repoId }) => repoId),
+      ["bukhr/payroll", "bukhr/platform", "dannyfuf/dotfiles"],
+    );
+    const hydrateIndex = harness.store.actions.findIndex(({ type }) => type === "hydrate");
+    const warmIndex = harness.store.actions.findIndex(
+      (action) => action.type === "opStart" && action.op.targetId?.startsWith("hot-copy:"),
+    );
+    assert.ok(hydrateIndex >= 0 && warmIndex > hydrateIndex);
+
+    preparation.resolve();
+    await flush();
+    harness.controller.dispose();
   });
 
   test("init starts both PR tabs in the background without awaiting them", async () => {
@@ -561,7 +595,19 @@ describe("createController", () => {
       branch: "Feat/Payroll Fix",
     });
 
-    const operationActions = harness.store.actions.filter((action) => action.type.startsWith("op"));
+    const createStart = harness.store.actions.find(
+      (action) =>
+        action.type === "opStart" && action.op.targetId === "bukhr/payroll#feat-payroll-fix",
+    );
+    assert.equal(createStart?.type, "opStart");
+    const createOperationId = createStart?.type === "opStart" ? createStart.op.id : undefined;
+    const operationActions = harness.store.actions.filter((action) => {
+      if (action.type === "opStart") return action.op.id === createOperationId;
+      if (action.type === "opStep" || action.type === "opEnd") {
+        return action.id === createOperationId;
+      }
+      return false;
+    });
     assert.deepEqual(
       operationActions.map(({ type }) => type),
       ["opStart", "opStep", "opStep", "opEnd"],
@@ -573,7 +619,15 @@ describe("createController", () => {
       assert.match(start.op.id, /^op-1767225600000-\d+$/);
     }
     assert.equal(harness.store.getState().operations.length, 0);
-    assert.equal(harness.store.getState().toasts.at(-1)?.text, "Worktree Feat/Payroll Fix ready");
+    assert.ok(
+      harness.store
+        .getState()
+        .toasts.some(({ text }) => text === "Worktree Feat/Payroll Fix ready"),
+    );
+    assert.deepEqual(
+      harness.calls.prepared.map(({ repoId }) => repoId),
+      ["bukhr/payroll"],
+    );
   });
 
   test("deduplicates concurrent operations for the same target", async () => {
@@ -587,11 +641,56 @@ describe("createController", () => {
     await harness.controller.createWorktree(input);
 
     assert.equal(harness.calls.created.length, 1);
-    assert.match(harness.store.getState().toasts.at(-1)?.text ?? "", /already in progress/);
+    assert.ok(
+      harness.store.getState().toasts.some(({ text }) => /already in progress/u.test(text)),
+    );
     const completed = worktrees[0];
     assert.ok(completed);
     completion.resolve(completed);
     await first;
+  });
+
+  test("dispatches a background warm-up after create failure and reports warm-up failures", async () => {
+    const harness = createHarness();
+    harness.behavior.createWorktree = async () => {
+      throw new SwarmError("git", "checkout failed");
+    };
+    harness.behavior.prepareHotCopy = async (_repoId, onEvent) => {
+      const failure = new SwarmError("fs", "hot copy failed");
+      onEvent?.({ type: "error", error: failure });
+      throw failure;
+    };
+
+    await harness.controller.createWorktree({
+      repoId: "bukhr/payroll",
+      branch: "feat/failing",
+    });
+    await flush();
+
+    assert.deepEqual(
+      harness.calls.prepared.map(({ repoId }) => repoId),
+      ["bukhr/payroll"],
+    );
+    assert.ok(harness.store.getState().toasts.some(({ text }) => text === "checkout failed"));
+    assert.ok(harness.store.getState().toasts.some(({ text }) => text === "hot copy failed"));
+    assert.ok(harness.logger.entries.some(({ message }) => message === "hot copy failed"));
+  });
+
+  test("deduplicates background warm-ups by repo", async () => {
+    const harness = createHarness();
+    const preparation = deferred<void>();
+    harness.behavior.prepareHotCopy = async () => preparation.promise;
+
+    await harness.controller.createWorktree({ repoId: "bukhr/payroll", branch: "feat/one" });
+    await harness.controller.createWorktree({ repoId: "bukhr/payroll", branch: "feat/two" });
+
+    assert.equal(harness.calls.prepared.length, 1);
+    const warmOperations = harness.store
+      .getState()
+      .operations.filter(({ targetId }) => targetId === "hot-copy:bukhr/payroll");
+    assert.equal(warmOperations.length, 1);
+    preparation.resolve();
+    await flush();
   });
 
   test("dispose during an in-flight clone never dispatches into the torn-down store", async () => {
@@ -686,6 +785,7 @@ describe("createController", () => {
 
     assert.equal(harness.store.getState().clones.length, 0);
     assert.ok(harness.store.getState().repos.some((repo) => repo.id === clone.id));
+    assert.ok(harness.calls.prepared.some(({ repoId }) => repoId === clone.id));
     assert.equal(harness.calls.reconciliations, 2);
     assert.equal(harness.calls.clearedIntervals.length, 1);
     harness.controller.dispose();

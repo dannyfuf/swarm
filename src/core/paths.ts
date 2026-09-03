@@ -41,3 +41,11 @@ export function repoPath(config: Config, owner: string, name: string): string {
 export function worktreePath(config: Config, owner: string, name: string, slug: string): string {
   return join(config.worktreesDir, owner, name, slug);
 }
+
+export function hotCopyPath(worktreesDir: string, id: RepoId): string {
+  return join(worktreesDir, id, ".hot");
+}
+
+export function hotCopyStagingPath(worktreesDir: string, id: RepoId): string {
+  return join(worktreesDir, id, ".hot.staging");
+}

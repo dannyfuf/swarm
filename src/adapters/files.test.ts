@@ -61,6 +61,8 @@ describe("files adapter", () => {
 
       await mkdir(join(root, "z-dir"));
       await mkdir(join(root, "a-dir"));
+      await mkdir(join(root, ".hot"));
+      await mkdir(join(root, ".hot.staging"));
       await writeFile(join(root, "file.txt"), "not a directory");
       assert.deepEqual(await files.listDirs(root), ["a-dir", "nested", "z-dir"]);
 
@@ -68,6 +70,11 @@ describe("files adapter", () => {
       await files.move(path, moved);
       assert.ok(["second", "third"].includes((await files.readText(moved)) ?? ""));
       assert.equal(await files.exists(path), false);
+
+      const removable = join(root, "remove-me", "nested");
+      await files.ensureDir(removable);
+      await files.removeTree(join(root, "remove-me"));
+      assert.equal(await files.exists(removable), false);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -85,6 +92,10 @@ describe("files adapter", () => {
     for (const path of unsafe) {
       await assert.rejects(
         files.removeDetached(path),
+        (error: unknown) => error instanceof SwarmError && error.code === "validation",
+      );
+      await assert.rejects(
+        files.removeTree(path),
         (error: unknown) => error instanceof SwarmError && error.code === "validation",
       );
     }

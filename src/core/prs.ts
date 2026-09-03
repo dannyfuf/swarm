@@ -1,4 +1,5 @@
 import { SwarmError } from "./errors.ts";
+import { slugify } from "./paths.ts";
 import type { PrState, PullRequest, Worktree } from "./types.ts";
 
 export function prState(pr: PullRequest): PrState {
@@ -46,6 +47,9 @@ export function prBaseRef(pr: PullRequest): string | undefined {
 }
 
 export function validateBranch(branch: string): void {
+  if (slugify(branch).startsWith(".hot")) {
+    throw new SwarmError("validation", `Branch name is reserved for prepared copies: ${branch}`);
+  }
   const components = branch.split("/");
   const invalid =
     branch.length === 0 ||
