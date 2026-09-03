@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import type { Action, AppState, Store } from "../core/app.ts";
 import { SwarmError } from "../core/errors.ts";
-import type { ConfigPort, StatePort, TmuxPort } from "../core/ports.ts";
+import type { ConfigPort, StatePort, TmuxPort, UpdaterPort } from "../core/ports.ts";
 import type {
   ContextService,
   OnEvent,
@@ -25,6 +25,7 @@ import type {
 } from "../core/types.ts";
 import { createFakeClipboard } from "../testing/fakeClipboard.ts";
 import { createFakeProcess } from "../testing/fakeProcess.ts";
+import { createFakeUpdater } from "../testing/fakeUpdater.ts";
 import { createFixedClock, type FixedClock } from "../testing/fixedClock.ts";
 import {
   config,
@@ -62,6 +63,7 @@ interface Harness {
     loadPr: PrService["load"];
     loadState: StatePort["load"];
     currentSession: TmuxPort["currentSession"];
+    update: UpdaterPort["update"];
   };
   calls: {
     snapshots: Worktree[][];
@@ -76,6 +78,8 @@ interface Harness {
     prLoads: Array<{ repoIds: RepoId[]; tab: PrTab; force?: boolean }>;
     clipboardCopies: string[];
     openedUrls: string[];
+    updateRoots: string[];
+    exitCodes: number[];
   };
   setPersisted(state: State): void;
 }
@@ -128,6 +132,8 @@ function createHarness(initial: State = makeState()): Harness {
     prLoads: [],
     clipboardCopies: [],
     openedUrls: [],
+    updateRoots: [],
+    exitCodes: [],
   };
 
   const behavior: Harness["behavior"] = {
@@ -168,6 +174,11 @@ function createHarness(initial: State = makeState()): Harness {
     },
     async currentSession() {
       return "swarm/popup";
+    },
+    async update(_installRoot, onEvent) {
+      onEvent?.({ type: "step", label: "pulling main…" });
+      onEvent?.({ type: "step", label: "installing dependencies…" });
+      onEvent?.({ type: "step", label: "building…" });
     },
   };
 
@@ -318,6 +329,10 @@ function createHarness(initial: State = makeState()): Harness {
   calls.clipboardCopies = clipboard.copies;
   const process = createFakeProcess();
   calls.openedUrls = process.openedUrls;
+  const updater = createFakeUpdater((installRoot, onEvent) =>
+    behavior.update(installRoot, onEvent),
+  );
+  calls.updateRoots = updater.calls;
   const logger = createNullLogger();
   const controller = createController({
     store,
@@ -334,6 +349,13 @@ function createHarness(initial: State = makeState()): Harness {
     process,
     clock,
     logger,
+    updater,
+    lifecycle: {
+      requestExit(code) {
+        calls.exitCodes.push(code);
+      },
+    },
+    installRoot: "/install/swarm",
   });
 
   return {
@@ -628,6 +650,88 @@ describe("createController", () => {
       harness.calls.prepared.map(({ repoId }) => repoId),
       ["bukhr/payroll"],
     );
+  });
+
+  test("a successful update reports progress and requests launcher restart code 75", async () => {
+    const harness = createHarness();
+    harness.store.actions.length = 0;
+
+    await harness.controller.update();
+
+    assert.deepEqual(harness.calls.updateRoots, ["/install/swarm"]);
+    assert.deepEqual(harness.calls.exitCodes, [75]);
+    assert.deepEqual(
+      harness.store.actions
+        .filter((action) => action.type.startsWith("op"))
+        .map(({ type }) => type),
+      ["opStart", "opStep", "opStep", "opStep", "opEnd"],
+    );
+  });
+
+  test("a non-main update error stays visible and does not request a restart", async () => {
+    const harness = createHarness();
+    harness.behavior.update = async () => {
+      throw new SwarmError("git", "update requires the main branch (current: feature)");
+    };
+
+    await harness.controller.update();
+
+    assert.deepEqual(harness.calls.exitCodes, []);
+    assert.equal(
+      harness.store.getState().error,
+      "update requires the main branch (current: feature)",
+    );
+    assert.equal(harness.store.getState().toasts.at(-1)?.level, "error");
+  });
+
+  test("a dirty-tree update error does not request a restart", async () => {
+    const harness = createHarness();
+    harness.behavior.update = async () => {
+      throw new SwarmError("git", "update requires a clean working tree");
+    };
+
+    await harness.controller.update();
+
+    assert.deepEqual(harness.calls.exitCodes, []);
+    assert.equal(harness.store.getState().error, "update requires a clean working tree");
+  });
+
+  test("a failed build exposes the step and stderr tail without restarting", async () => {
+    const harness = createHarness();
+    harness.behavior.update = async (_root, onEvent) => {
+      onEvent?.({ type: "step", label: "building…" });
+      throw new SwarmError("unsupported", "Updating swarm: building failed: TypeScript exploded");
+    };
+
+    await harness.controller.update();
+
+    assert.deepEqual(harness.calls.exitCodes, []);
+    assert.equal(
+      harness.store.getState().error,
+      "Updating swarm: building failed: TypeScript exploded",
+    );
+    assert.equal(harness.store.getState().operations.length, 0);
+  });
+
+  test("ignores another update request while one is in flight", async () => {
+    const harness = createHarness();
+    const completion = deferred<void>();
+    harness.behavior.update = async () => completion.promise;
+
+    const first = harness.controller.update();
+    await flush();
+    const actionsBeforeSecondRequest = harness.store.actions.length;
+    await harness.controller.update();
+
+    assert.deepEqual(harness.calls.updateRoots, ["/install/swarm"]);
+    assert.equal(harness.store.actions.length, actionsBeforeSecondRequest);
+    assert.equal(
+      harness.store.getState().toasts.some(({ text }) => text.includes("already in progress")),
+      false,
+    );
+    completion.resolve();
+    await first;
+    assert.deepEqual(harness.calls.exitCodes, [75]);
   });
 
   test("deduplicates concurrent operations for the same target", async () => {

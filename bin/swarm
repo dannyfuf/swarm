@@ -128,10 +128,19 @@ if [ -z "$node_bin" ]; then
 fi
 
 export SWARM_CWD="$swarm_cwd"
+export SWARM_INSTALL_ROOT="$repo_root"
 cd "$repo_root"
 
+swarm_status=0
 if [ -f dist/swarm.mjs ]; then
-  exec "$node_bin" --experimental-ffi --no-warnings=ExperimentalWarning dist/swarm.mjs "$@"
+  "$node_bin" --experimental-ffi --no-warnings=ExperimentalWarning dist/swarm.mjs "$@" || swarm_status=$?
+else
+  "$node_bin" --experimental-ffi --no-warnings=ExperimentalWarning --import tsx src/main.ts "$@" || swarm_status=$?
 fi
 
-exec "$node_bin" --experimental-ffi --no-warnings=ExperimentalWarning --import tsx src/main.ts "$@"
+if [ "$swarm_status" -eq 75 ]; then
+  cd "$swarm_cwd"
+  exec "$0" "$@"
+fi
+
+exit "$swarm_status"

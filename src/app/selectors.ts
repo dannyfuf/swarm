@@ -150,6 +150,7 @@ export function prHints(state: AppState): Array<{ key: string; label: string }> 
       : []),
     { key: "/", label: "filter" },
     { key: "r", label: "refresh" },
+    { key: "U", label: "update" },
     { key: "Tab", label: "switch tab" },
     { key: "Esc", label: "back" },
     { key: "?", label: "help" },

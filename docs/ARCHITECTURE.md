@@ -46,14 +46,15 @@ Runtime: **Node ≥ 26.4 with `--experimental-ffi`** (OpenTUI's native library l
 `node:ffi`; Deno has no `node:ffi`, and Bun is excluded by policy). Verified 2026-09-02 with
 Node 26.8.1 + `@opentui/core`/`@opentui/react` 0.5.10 + React 19. TypeScript runs through
 `tsx` (`node --experimental-ffi --import tsx src/main.ts`); `npm run build` bundles with esbuild
-to `dist/swarm.mjs` for fast popup start-up (`bin/swarm` prefers `dist/` when present).
+to `dist/swarm.mjs` for fast popup start-up (`bin/swarm` prefers `dist/` when present) and bakes
+the package version plus current short Git SHA into the CLI.
 Validation: `zod` v4. Tests: `node --test` (+ tsx). Lint/format: biome. Package manager: npm.
 `.nvmrc` pins 26.8.1. `bin/swarm` honors an executable `SWARM_NODE`, then a cached Node path, a
 known versioned PATH binary, or the newest compatible nvm/nodenv install. Only an otherwise opaque
 PATH binary needs a version-probe process.
 
 ```
-bin/swarm                 launcher (exec runtime with src/main.ts, passes args)
+bin/swarm                 launcher (runs dist or src, restarts in place when the TUI returns 75)
 tmux/tmux.conf            full tmux config (theme, persistence) with the ONE swarm binding: prefix+s → popup (replaces the default session chooser)
 src/main.ts               CLI entry: `swarm` (TUI), `swarm open <repo>/<slug>`, `swarm sleep <session>`, `swarm doctor`
 src/core/                 contracts and pure helpers; no I/O
@@ -62,7 +63,7 @@ src/core/                 contracts and pure helpers; no I/O
   services.ts             service interfaces + operation events (section 6)
   app.ts                  AppState, Action, Store, Keymap contracts (section 7)
   fuzzy.ts                pure fuzzy matching shared by services and UI
-  paths.ts                pure helpers: swarmHome(), slugify(), sessionName(), repoId(), worktreeId()
+  paths.ts                pure helpers: swarmHome(), installRoot(), slugify(), sessionName(), repoId(), worktreeId()
   errors.ts               SwarmError with `code` union
 src/adapters/             one file per port, shell-based; each has *.test.ts using FakeShell
 src/services/             one file per service interface; tests use fakes from src/testing
@@ -172,6 +173,7 @@ Errors (`src/core/errors.ts`): `class SwarmError extends Error { code: ErrorCode
 
 Pure helpers (`src/core/paths.ts`):
 - `swarmHome(env)` → `env.SWARM_HOME ?? join(env.HOME, ".swarm")`
+- `installRoot(env, moduleUrl)` → `SWARM_INSTALL_ROOT`, or the parent of the running `src/` / `dist/` module directory
 - `slugify(branch)` → lowercase, `/` and non `[a-z0-9._-]` → `-`, collapse, trim `-`; e.g. `feat/Payroll Fix` → `feat-payroll-fix`
 - `sessionName(repoName, slug)` → `${repoName}/${slug}` with `.` and `:` replaced by `-` (tmux forbids them)
 - `repoId(owner, name)`, `worktreeId(repoId, slug)`, `parseWorktreeId(id)`
@@ -411,10 +413,11 @@ export interface Controller {                           // src/app/controller.ts
   saveContext(input: { id?: ContextId; name: string; owners: string[] }): Promise<void>; deleteContext(id: ContextId): Promise<void>;
   saveConfig(patch: Partial<Config>): Promise<void>; getConfig(): Config;
   yankPath(): Promise<void>;
+  update(): Promise<void>;                              // clean main → pull, install, build → request exit 75
   dispose(): void;
 }
 export interface KeyEvent { name: string; ctrl: boolean; shift: boolean; meta: boolean; sequence: string }
-export type Command = "down"|"up"|"top"|"bottom"|"halfDown"|"halfUp"|"left"|"right"|"open"|"openKeep"|"new"|"newContext"|"delete"|"deleteContext"|"sleep"|"kill"|"move"|"refresh"|"filter"|"palette"|"settings"|"help"|"yank"|"quit"|"nextContext"|"prevContext"|`context:${number}`|"clearFilter"|"none";
+export type Command = "down"|"up"|"top"|"bottom"|"halfDown"|"halfUp"|"left"|"right"|"open"|"openKeep"|"new"|"newContext"|"delete"|"deleteContext"|"sleep"|"kill"|"move"|"refresh"|"update"|"filter"|"palette"|"settings"|"help"|"yank"|"quit"|"nextContext"|"prevContext"|`context:${number}`|"clearFilter"|"none";
 export type ResolveKey = (mode: Mode, pending: string, ev: KeyEvent, ctx: { hasFilter: boolean }) => { command: Command; pending: string }; // src/app/keymap.ts; handles gg/gt/gT chords via `pending`, and ctx controls retained-filter Esc behavior
 export interface UiDeps { store: Store; controller: Controller; config: Config }
 export type UiExit = "quit" | "opened";
@@ -438,6 +441,7 @@ export type UiExit = "quit" | "opened";
 | `s` / `K` | sleep worktree / kill session |
 | `m` | move repo to another context |
 | `r` | refresh |
+| `U` | update swarm from a clean `main`, rebuild, and restart |
 | `/` | filter (Enter opens selected match; Esc exits input, keeps filter; Esc again clears) |
 | `:` | command palette (fuzzy list of all commands + contexts) |
 | `,` | settings (sleep policy; windows and clone protocol are read-only) |

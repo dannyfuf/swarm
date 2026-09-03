@@ -3,6 +3,7 @@ import { describe, test } from "node:test";
 import {
   hotCopyPath,
   hotCopyStagingPath,
+  installRoot,
   parseWorktreeId,
   repoId,
   repoPath,
@@ -19,6 +20,15 @@ describe("path helpers", () => {
   test("resolves SWARM_HOME before HOME", () => {
     assert.equal(swarmHome({ SWARM_HOME: "/tmp/custom", HOME: "/home/test" }), "/tmp/custom");
     assert.equal(swarmHome({ HOME: "/home/test" }), "/home/test/.swarm");
+  });
+
+  test("resolves the install root from the launcher override or running module", () => {
+    assert.equal(
+      installRoot({ SWARM_INSTALL_ROOT: "/opt/swarm" }, "file:///ignored/src/main.ts"),
+      "/opt/swarm",
+    );
+    assert.equal(installRoot({}, "file:///opt/swarm/src/main.ts"), "/opt/swarm");
+    assert.equal(installRoot({}, "file:///opt/swarm/dist/swarm.mjs"), "/opt/swarm");
   });
 
   test("slugifies branches with case, slashes, spaces, and punctuation", () => {

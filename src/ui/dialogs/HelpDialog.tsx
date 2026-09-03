@@ -1,5 +1,6 @@
 import { useKeyboard } from "@opentui/react";
 import type { Store } from "../../core/app.ts";
+import { VERSION } from "../../core/version.ts";
 import { LinesView } from "../components/LineView.tsx";
 import { isEnter, isEscape, toKeyEvent } from "../keys.ts";
 import { cell, fitLine, type Line, padStart } from "../text.ts";
@@ -27,6 +28,7 @@ const LEFT_COLUMN: Line[] = [
   entry("O", "Open, keep previous"),
   entry("y", "Copy worktree path"),
   entry("r", "Refresh"),
+  entry("U", "Update swarm"),
   entry("q / Esc", "Quit"),
 ];
 
@@ -54,6 +56,7 @@ const PR_LEFT_COLUMN: Line[] = [
 const PR_RIGHT_COLUMN: Line[] = [
   entry("/", "Filter pull requests"),
   entry("r", "Force refresh scope"),
+  entry("U", "Update swarm"),
   entry("1-9 gt gT", "Context (rescopes)"),
   entry("p / q / Esc", "Back to worktrees"),
 ];
@@ -97,7 +100,11 @@ export function HelpDialog({ store }: { store: Store }) {
   const columnWidth = Math.floor(inner / 2);
 
   return (
-    <DialogFrame title="Keymap" width={78} hints={[{ key: "Esc", label: "close" }]}>
+    <DialogFrame
+      title={`Keymap · swarm ${VERSION}`}
+      width={78}
+      hints={[{ key: "Esc", label: "close" }]}
+    >
       <Spacer />
       <SectionLabel text="  NORMAL" />
       <LinesView lines={twoColumns(LEFT_COLUMN, RIGHT_COLUMN, columnWidth)} />

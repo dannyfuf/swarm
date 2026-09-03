@@ -430,6 +430,7 @@ test("the help dialog documents the pull request keys", async () => {
     harness.setup.mockInput.pressKey("?");
     await harness.setup.flush();
     const frame = harness.frame();
+    assert.ok(frame.includes("swarm 0.1.0+dev"));
     assert.ok(frame.includes("PULL REQUESTS"));
     assert.ok(frame.includes("Pull requests"), "p is listed in the normal section");
     assert.ok(frame.includes("Back to worktrees"));

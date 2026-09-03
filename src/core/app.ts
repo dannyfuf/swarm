@@ -146,6 +146,7 @@ export interface Controller {
   yankPath(): Promise<void>;
   openPrs(): Promise<void>;
   refreshPrs(opts: { force: boolean }): Promise<void>;
+  update(): Promise<void>;
   openSelectedPr(opts: { keepPrevious: boolean }): Promise<void>;
   browseSelectedPr(): Promise<void>;
   yankSelectedPr(): Promise<void>;
@@ -186,6 +187,7 @@ export type Command =
   | "kill"
   | "move"
   | "refresh"
+  | "update"
   | "filter"
   | "palette"
   | "settings"

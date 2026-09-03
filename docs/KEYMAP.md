@@ -18,6 +18,7 @@
 | `s` / `K` | Sleep the worktree / kill its session |
 | `m` | Move the repo to another context |
 | `r` | Refresh |
+| `U` | Update swarm from `origin/main`, rebuild, and restart |
 | `/` | Enter filter mode |
 | `:` | Open the command palette |
 | `,` | Open settings |

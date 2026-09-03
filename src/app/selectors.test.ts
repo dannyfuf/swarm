@@ -97,7 +97,7 @@ describe("pull request selectors", () => {
     assert.equal(prHints(current)[0]?.label, "open");
     assert.deepEqual(
       prHints(current).map(({ key }) => key),
-      ["Enter", "O", "b", "y", "/", "r", "Tab", "Esc", "?"],
+      ["Enter", "O", "b", "y", "/", "r", "U", "Tab", "Esc", "?"],
     );
     assert.equal(
       prHints({
@@ -138,7 +138,7 @@ describe("pull request selectors", () => {
   test("omits row actions when the active PR list is empty", () => {
     assert.deepEqual(
       prHints(state()).map(({ key }) => key),
-      ["/", "r", "Tab", "Esc", "?"],
+      ["/", "r", "U", "Tab", "Esc", "?"],
     );
   });
 });
