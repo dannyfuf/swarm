@@ -80,6 +80,7 @@ interface Harness {
     openedUrls: string[];
     updateRoots: string[];
     exitCodes: number[];
+    worktreeDisposals: number;
   };
   setPersisted(state: State): void;
 }
@@ -134,6 +135,7 @@ function createHarness(initial: State = makeState()): Harness {
     openedUrls: [],
     updateRoots: [],
     exitCodes: [],
+    worktreeDisposals: 0,
   };
 
   const behavior: Harness["behavior"] = {
@@ -236,6 +238,9 @@ function createHarness(initial: State = makeState()): Harness {
     async delete() {},
   };
   const worktreeService: WorktreeService = {
+    dispose() {
+      calls.worktreeDisposals += 1;
+    },
     async list() {
       return structuredClone(persisted.worktrees);
     },
@@ -433,6 +438,7 @@ describe("createController", () => {
 
     harness.controller.dispose();
     assert.equal(harness.calls.clearedIntervals.length, 1);
+    assert.equal(harness.calls.worktreeDisposals, 1);
   });
 
   test("starts repo warm-ups only after the initial state hydration", async () => {

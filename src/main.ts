@@ -37,6 +37,30 @@ interface DoctorCheck {
   hint: string;
 }
 
+export interface TuiExitDependencies {
+  flushStdout(): Promise<void>;
+  flushStderr(): Promise<void>;
+  exit(code: number): void;
+}
+
+function flushWritable(stream: NodeJS.WriteStream): Promise<void> {
+  return new Promise<void>((resolve) => {
+    stream.write("", () => resolve());
+  });
+}
+
+export async function exitTuiProcess(
+  code: number,
+  deps: TuiExitDependencies = {
+    flushStdout: () => flushWritable(process.stdout),
+    flushStderr: () => flushWritable(process.stderr),
+    exit: (exitCode) => process.exit(exitCode),
+  },
+): Promise<void> {
+  await Promise.all([deps.flushStdout(), deps.flushStderr()]);
+  deps.exit(code);
+}
+
 const USAGE =
   "Usage: swarm [open <owner/name#slug|repo/slug> | sleep [session] | agent <claude|opencode> | doctor | --version]";
 
@@ -315,10 +339,14 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     return 1;
   } finally {
     startupProfiler.flush();
+    await runtime?.logger.flush();
   }
 }
 
 const entryPath = process.argv[1];
 if (entryPath && import.meta.url === pathToFileURL(entryPath).href) {
-  process.exitCode = await main();
+  const argv = process.argv.slice(2);
+  const exitCode = await main(argv);
+  if (argv.length === 0) await exitTuiProcess(exitCode);
+  else process.exitCode = exitCode;
 }

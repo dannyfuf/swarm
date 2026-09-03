@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import {
   hotCopyPath,
+  hotCopyPidPath,
   hotCopyStagingPath,
   installRoot,
   parseWorktreeId,
@@ -66,6 +67,10 @@ describe("path helpers", () => {
     assert.equal(
       hotCopyStagingPath(config.worktreesDir, "bukhr/payroll"),
       "/home/test/.swarm/worktrees/bukhr/payroll/.hot.staging",
+    );
+    assert.equal(
+      hotCopyPidPath(config.worktreesDir, "bukhr/payroll"),
+      "/home/test/.swarm/worktrees/bukhr/payroll/.hot.staging.pid",
     );
   });
 

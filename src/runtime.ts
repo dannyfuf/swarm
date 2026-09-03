@@ -97,6 +97,7 @@ export async function createRuntime(
     files,
     tmux,
     shell,
+    process: processPort,
     clock,
     logger,
     home,

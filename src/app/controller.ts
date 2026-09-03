@@ -306,7 +306,10 @@ export function createController(deps: ControllerDeps): Controller {
         dispatch({ type: "opStep", id, step });
       } else if (event.type === "log") {
         pendingLog = event.line;
-        logTimer ??= setTimeout(flushLog, 16);
+        if (logTimer === undefined) {
+          logTimer = setTimeout(flushLog, 16);
+          logTimer.unref();
+        }
       } else if (event.type === "error") {
         eventError = event.error;
       }
@@ -843,6 +846,7 @@ export function createController(deps: ControllerDeps): Controller {
 
     dispose() {
       disposed = true;
+      deps.worktrees.dispose?.();
       if (statusInterval !== undefined) {
         deps.clock.clearInterval(statusInterval);
         statusInterval = undefined;

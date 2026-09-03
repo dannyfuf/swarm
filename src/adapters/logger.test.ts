@@ -28,6 +28,7 @@ describe("logger adapter", () => {
       logger.info("started", { pid: 42 });
       logger.child("git").warn("slow", { elapsed: 10 });
       logger.error("failed");
+      await logger.flush();
 
       const entries = (await waitForLines(path, 3)).map((line) => JSON.parse(line));
       assert.deepEqual(
@@ -47,13 +48,15 @@ describe("logger adapter", () => {
     }
   });
 
-  test("never throws for unavailable paths or unserializable data", () => {
+  test("never throws for unavailable paths or unserializable data", async () => {
     const circular: { self?: unknown } = {};
     circular.self = circular;
     const logger = createLogger("/definitely/missing/swarm/log.txt");
     assert.doesNotThrow(() => logger.info("circular", circular));
+    await logger.flush();
 
     const nullLogger = createNullLogger();
     assert.doesNotThrow(() => nullLogger.child("anything").error("ignored", circular));
+    await nullLogger.flush();
   });
 });

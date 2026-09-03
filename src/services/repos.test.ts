@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { SwarmError } from "../core/errors.ts";
-import { hotCopyPath, hotCopyStagingPath } from "../core/paths.ts";
+import { hotCopyPath, hotCopyPidPath, hotCopyStagingPath } from "../core/paths.ts";
 import type { GithubPort, TmuxSession } from "../core/ports.ts";
 import type { WorktreeService } from "../core/services.ts";
 import type { RemoteRepo } from "../core/types.ts";
@@ -343,12 +343,14 @@ describe("createRepoService", () => {
     );
     const hot = hotCopyPath(fixtureConfig.worktreesDir, "bukhr/payroll");
     const staging = hotCopyStagingPath(fixtureConfig.worktreesDir, "bukhr/payroll");
+    const pidPath = hotCopyPidPath(fixtureConfig.worktreesDir, "bukhr/payroll");
     const files = createFakeFiles({
       paths: [
         repos[0]?.path ?? "",
         ...payrollWorktrees.map((worktree) => worktree.path),
         hot,
         staging,
+        pidPath,
       ],
     });
     const sessions: TmuxSession[] = payrollWorktrees.map((worktree) => ({
@@ -369,6 +371,7 @@ describe("createRepoService", () => {
       files,
       tmux,
       shell: createFakeShell(),
+      process: createFakeProcess(),
       clock,
       logger,
     });
@@ -396,5 +399,6 @@ describe("createRepoService", () => {
     assert.deepEqual(state.state.worktrees, []);
     assert.ok(files.removed.includes(hot));
     assert.ok(files.removed.includes(staging));
+    assert.ok(files.removed.includes(pidPath));
   });
 });
