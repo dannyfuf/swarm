@@ -170,8 +170,11 @@ test("h and l switch the focused pane", async () => {
   }
 });
 
+// The keymap dialog is 35 rows tall, so help tests mount a terminal that shows all of it.
+const HELP_TERMINAL_HEIGHT = 40;
+
 test("? opens the help dialog and a cancel key closes it", async () => {
-  const harness = await mount();
+  const harness = await mount(110, HELP_TERMINAL_HEIGHT);
   try {
     harness.setup.mockInput.pressKey("?");
     await harness.setup.flush();
@@ -425,7 +428,7 @@ test("the worktree list badges the branch that already has a pull request", asyn
 });
 
 test("the help dialog documents the pull request keys", async () => {
-  const harness = await mount();
+  const harness = await mount(110, HELP_TERMINAL_HEIGHT);
   try {
     harness.setup.mockInput.pressKey("?");
     await harness.setup.flush();
@@ -434,6 +437,21 @@ test("the help dialog documents the pull request keys", async () => {
     assert.ok(frame.includes("PULL REQUESTS"));
     assert.ok(frame.includes("Pull requests"), "p is listed in the normal section");
     assert.ok(frame.includes("Back to worktrees"));
+  } finally {
+    harness.stop();
+  }
+});
+
+test("the help dialog documents the tmux popup keys", async () => {
+  const harness = await mount(110, HELP_TERMINAL_HEIGHT);
+  try {
+    harness.setup.mockInput.pressKey("?");
+    await harness.setup.flush();
+    const frame = harness.frame();
+    assert.ok(frame.includes("TMUX (prefix is ctrl-s)"));
+    assert.ok(frame.includes("Claude Code popup"), "prefix a opens Claude Code");
+    assert.ok(frame.includes("OpenCode popup"), "prefix A opens OpenCode");
+    assert.ok(frame.includes("Hide agent, keep running"), "ctrl-q hides the agent popup");
   } finally {
     harness.stop();
   }
