@@ -75,6 +75,16 @@ const DIALOG_COLUMN: Line[] = [
   entry("ctrl-n/p", "Next / previous item"),
 ];
 
+const TMUX_LEFT_COLUMN: Line[] = [
+  entry("prefix s", "Open swarm popup"),
+  entry("prefix a", "Claude Code popup"),
+];
+
+const TMUX_RIGHT_COLUMN: Line[] = [
+  entry("prefix A", "OpenCode popup"),
+  entry("ctrl-q", "Hide agent, keep running"),
+];
+
 function twoColumns(left: Line[], right: Line[], columnWidth: number): Line[] {
   const rows = Math.max(left.length, right.length);
   const result: Line[] = [];
@@ -121,6 +131,9 @@ export function HelpDialog({ store }: { store: Store }) {
         ]}
       />
       <LinesView lines={twoColumns(FILTER_COLUMN, DIALOG_COLUMN, columnWidth)} />
+      <Spacer />
+      <SectionLabel text="  TMUX (prefix is ctrl-s)" />
+      <LinesView lines={twoColumns(TMUX_LEFT_COLUMN, TMUX_RIGHT_COLUMN, columnWidth)} />
     </DialogFrame>
   );
 }
