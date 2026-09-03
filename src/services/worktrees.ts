@@ -1,6 +1,13 @@
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { SwarmError } from "../core/errors.ts";
-import { worktreeId as makeWorktreeId, sessionName, slugify, worktreePath } from "../core/paths.ts";
+import {
+  hotCopyPath,
+  hotCopyStagingPath,
+  worktreeId as makeWorktreeId,
+  sessionName,
+  slugify,
+  worktreePath,
+} from "../core/paths.ts";
 import type {
   Clock,
   ConfigPort,
@@ -12,8 +19,8 @@ import type {
   TmuxPort,
 } from "../core/ports.ts";
 import { validateBranch } from "../core/prs.ts";
-import type { WorktreeService } from "../core/services.ts";
-import type { Config, State, Worktree } from "../core/types.ts";
+import type { OnEvent, WorktreeService } from "../core/services.ts";
+import type { Config, Repo, RepoId, State, Worktree } from "../core/types.ts";
 import { mutateState } from "./stateMutation.ts";
 
 export interface WorktreeServiceDependencies {
@@ -69,12 +76,103 @@ export function createWorktreeService({
   logger,
   home,
 }: WorktreeServiceDependencies): WorktreeService {
+  const preparations = new Map<RepoId, Promise<void>>();
+
   const loadState = async (): Promise<State> => {
     try {
       return await state.load();
     } catch (error) {
       throw toSwarmError(error, "fs", "Failed to load swarm state");
     }
+  };
+
+  const loadConfig = async (): Promise<Config> => {
+    try {
+      return await config.load();
+    } catch (error) {
+      throw toSwarmError(error, "fs", "Failed to load swarm configuration");
+    }
+  };
+
+  const resolveRepo = (current: State, id: RepoId): Repo => {
+    const repo = current.repos.find((candidate) => candidate.id === id);
+    if (!repo) throw new SwarmError("not-found", `Repository not found: ${id}`);
+    return repo;
+  };
+
+  const assertAvailable = (current: State, repo: Repo, slug: string): void => {
+    const id = makeWorktreeId(repo.id, slug);
+    if (current.worktrees.some((worktree) => worktree.id === id)) {
+      throw new SwarmError("conflict", `Worktree already exists: ${id}`);
+    }
+    const session = sessionName(repo.name, slug);
+    if (current.worktrees.some((worktree) => worktree.session === session)) {
+      throw new SwarmError("conflict", `Tmux session name already exists: ${session}`);
+    }
+  };
+
+  const assertDestinationAvailable = async (destination: string): Promise<void> => {
+    try {
+      if (await files.exists(destination)) {
+        throw new SwarmError("conflict", `Worktree path already exists: ${destination}`);
+      }
+    } catch (error) {
+      throw toSwarmError(error, "fs", `Failed to inspect worktree path: ${destination}`);
+    }
+  };
+
+  const refreshRepository = async (
+    repo: Repo,
+    repoPath: string,
+    onEvent?: OnEvent,
+    persistDefaultBranch?: (branch: string) => Promise<void> | void,
+  ): Promise<string> => {
+    onEvent?.({ type: "step", label: "Fetching origin" });
+    try {
+      await git.fetch(repoPath, { prune: true });
+    } catch (error) {
+      throw toSwarmError(error, "git", `Failed to fetch repository: ${repo.id}`);
+    }
+
+    let defaultBranch: string;
+    try {
+      defaultBranch = await git.defaultBranch(repoPath, repo.defaultBranch);
+      const remoteBranches = await git.remoteBranches(repoPath);
+      if (!remoteBranches.includes(`origin/${defaultBranch}`)) {
+        throw new SwarmError(
+          "git",
+          `Remote has no '${defaultBranch}' branch yet; push an initial commit to ${repo.id} first`,
+        );
+      }
+    } catch (error) {
+      throw toSwarmError(error, "git", `Failed to resolve repository base: ${repo.id}`);
+    }
+
+    if (defaultBranch !== repo.defaultBranch) {
+      try {
+        await persistDefaultBranch?.(defaultBranch);
+        repo.defaultBranch = defaultBranch;
+      } catch (error) {
+        throw toSwarmError(error, "fs", `Failed to persist default branch for: ${repo.id}`);
+      }
+    }
+
+    onEvent?.({ type: "step", label: "Updating base" });
+    try {
+      await git.resetToRemote(repoPath, defaultBranch);
+    } catch (error) {
+      throw toSwarmError(error, "git", `Failed to update repository base: ${repo.id}`);
+    }
+    return defaultBranch;
+  };
+
+  const preflightCreate = async (input: { repoId: RepoId; branch: string }): Promise<void> => {
+    const current = await loadState();
+    const repo = resolveRepo(current, input.repoId);
+    const slug = slugify(input.branch);
+    assertAvailable(current, repo, slug);
+    const loadedConfig = await loadConfig();
+    await assertDestinationAvailable(worktreePath(loadedConfig, repo.owner, repo.name, slug));
   };
 
   const service: WorktreeService = {
@@ -97,6 +195,81 @@ export function createWorktreeService({
       }
     },
 
+    prepareHotCopy(repoId, onEvent) {
+      const existing = preparations.get(repoId);
+      if (existing) return existing;
+
+      const preparation = (async (): Promise<void> => {
+        let staging: string | undefined;
+        try {
+          const loadedConfig = await loadConfig();
+          const hot = hotCopyPath(loadedConfig.worktreesDir, repoId);
+          staging = hotCopyStagingPath(loadedConfig.worktreesDir, repoId);
+
+          try {
+            if (await files.exists(hot)) {
+              onEvent?.({ type: "done" });
+              return;
+            }
+            if (await files.exists(staging)) {
+              onEvent?.({ type: "step", label: "Removing stale prepared copy" });
+              await files.removeTree(staging);
+            }
+          } catch (error) {
+            throw toSwarmError(error, "fs", `Failed to inspect prepared copy for: ${repoId}`);
+          }
+
+          const current = await loadState();
+          const repo = resolveRepo(current, repoId);
+          await refreshRepository(repo, repo.path, onEvent, async (branch) => {
+            await mutateState(state, (next) => {
+              resolveRepo(next, repo.id).defaultBranch = branch;
+            });
+          });
+
+          onEvent?.({ type: "step", label: "Copying repository" });
+          try {
+            await files.ensureDir(dirname(hot));
+            await files.cloneTree(repo.path, staging);
+          } catch (error) {
+            throw toSwarmError(error, "fs", `Failed to prepare worktree copy for: ${repo.id}`);
+          }
+
+          onEvent?.({ type: "step", label: "Finalizing prepared copy" });
+          try {
+            await files.move(staging, hot);
+          } catch (error) {
+            throw toSwarmError(error, "fs", `Failed to finalize prepared copy for: ${repo.id}`);
+          }
+          onEvent?.({ type: "done" });
+        } catch (error) {
+          const failure =
+            error instanceof SwarmError
+              ? error
+              : new SwarmError("fs", `Failed to prepare worktree copy for: ${repoId}`, {
+                  cause: error,
+                });
+          if (staging) {
+            await files.removeTree(staging).catch((cleanupError: unknown) => {
+              logger.error(`Failed to clean up prepared copy staging for: ${repoId}`, cleanupError);
+            });
+          }
+          onEvent?.({ type: "error", error: failure });
+          throw failure;
+        }
+      })();
+      preparations.set(repoId, preparation);
+      void preparation.then(
+        () => {
+          if (preparations.get(repoId) === preparation) preparations.delete(repoId);
+        },
+        () => {
+          if (preparations.get(repoId) === preparation) preparations.delete(repoId);
+        },
+      );
+      return preparation;
+    },
+
     async create(input, onEvent) {
       validateBranch(input.branch);
       if (
@@ -105,74 +278,60 @@ export function createWorktreeService({
       ) {
         throw new SwarmError("validation", `Invalid pull request number: ${input.source.number}`);
       }
+
+      await preflightCreate(input);
+      const pendingPreparation = preparations.get(input.repoId);
+      if (pendingPreparation) {
+        await pendingPreparation.catch((error: unknown) => {
+          logger.warn(`Prepared copy failed; falling back for: ${input.repoId}`, error);
+        });
+      }
+
       let destination: string | undefined;
       let copyStarted = false;
       try {
         const created = await mutateState(state, async (next) => {
-          const repo = next.repos.find((candidate) => candidate.id === input.repoId);
-          if (!repo) throw new SwarmError("not-found", `Repository not found: ${input.repoId}`);
-
+          const repo = resolveRepo(next, input.repoId);
           const slug = slugify(input.branch);
           const id = makeWorktreeId(repo.id, slug);
-          if (next.worktrees.some((worktree) => worktree.id === id)) {
-            throw new SwarmError("conflict", `Worktree already exists: ${id}`);
-          }
-          const session = sessionName(repo.name, slug);
-          if (next.worktrees.some((worktree) => worktree.session === session)) {
-            throw new SwarmError("conflict", `Tmux session name already exists: ${session}`);
-          }
+          assertAvailable(next, repo, slug);
 
-          let loadedConfig: Config;
-          try {
-            loadedConfig = await config.load();
-          } catch (error) {
-            throw toSwarmError(error, "fs", "Failed to load swarm configuration");
-          }
+          const loadedConfig = await loadConfig();
           destination = worktreePath(loadedConfig, repo.owner, repo.name, slug);
-          try {
-            if (await files.exists(destination)) {
-              throw new SwarmError("conflict", `Worktree path already exists: ${destination}`);
-            }
-          } catch (error) {
-            throw toSwarmError(error, "fs", `Failed to inspect worktree path: ${destination}`);
-          }
+          await assertDestinationAvailable(destination);
 
-          onEvent?.({ type: "step", label: "Fetching origin" });
-          try {
-            await git.fetch(repo.path, { prune: true });
-          } catch (error) {
-            throw toSwarmError(error, "git", `Failed to fetch repository: ${repo.id}`);
-          }
-
+          const hot = hotCopyPath(loadedConfig.worktreesDir, repo.id);
           let defaultBranch: string;
+          let hasHotCopy: boolean;
           try {
-            defaultBranch = await git.defaultBranch(repo.path, repo.defaultBranch);
-            if (defaultBranch !== repo.defaultBranch) repo.defaultBranch = defaultBranch;
-            const remoteBranches = await git.remoteBranches(repo.path);
-            if (!remoteBranches.includes(`origin/${defaultBranch}`)) {
-              throw new SwarmError(
-                "git",
-                `Remote has no '${defaultBranch}' branch yet; push an initial commit to ${repo.id} first`,
-              );
+            hasHotCopy = await files.exists(hot);
+          } catch (error) {
+            throw toSwarmError(error, "fs", `Failed to inspect prepared copy for: ${repo.id}`);
+          }
+
+          if (hasHotCopy) {
+            onEvent?.({ type: "step", label: "Using prepared copy" });
+            try {
+              await files.move(hot, destination);
+              copyStarted = true;
+            } catch (error) {
+              throw toSwarmError(error, "fs", `Failed to use prepared copy for: ${id}`);
             }
-          } catch (error) {
-            throw toSwarmError(error, "git", `Failed to resolve repository base: ${repo.id}`);
-          }
-
-          onEvent?.({ type: "step", label: "Updating base" });
-          try {
-            await git.resetToRemote(repo.path, defaultBranch);
-          } catch (error) {
-            throw toSwarmError(error, "git", `Failed to update repository base: ${repo.id}`);
-          }
-
-          onEvent?.({ type: "step", label: "Copying tree" });
-          try {
-            await files.ensureDir(dirname(destination));
-            copyStarted = true;
-            await files.cloneTree(repo.path, destination);
-          } catch (error) {
-            throw toSwarmError(error, "fs", `Failed to copy worktree: ${id}`);
+            defaultBranch = await refreshRepository(repo, destination, onEvent, (branch) => {
+              repo.defaultBranch = branch;
+            });
+          } else {
+            defaultBranch = await refreshRepository(repo, repo.path, onEvent, (branch) => {
+              repo.defaultBranch = branch;
+            });
+            onEvent?.({ type: "step", label: "Copying repository" });
+            try {
+              await files.ensureDir(dirname(destination));
+              copyStarted = true;
+              await files.cloneTree(repo.path, destination);
+            } catch (error) {
+              throw toSwarmError(error, "fs", `Failed to copy worktree: ${id}`);
+            }
           }
 
           let resolvedBaseRef: string;
@@ -234,7 +393,7 @@ export function createWorktreeService({
             branch: input.branch,
             baseRef: resolvedBaseRef,
             path: destination,
-            session,
+            session: sessionName(repo.name, slug),
             createdAt: clock.now().toISOString(),
           };
           next.worktrees.push(worktree);

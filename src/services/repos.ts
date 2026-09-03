@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { SwarmError } from "../core/errors.ts";
 import { fuzzyFilter } from "../core/fuzzy.ts";
-import { repoId as makeRepoId, repoPath } from "../core/paths.ts";
+import { hotCopyPath, hotCopyStagingPath, repoId as makeRepoId, repoPath } from "../core/paths.ts";
 import type {
   Clock,
   ConfigPort,
@@ -306,6 +306,7 @@ export function createRepoService({
 
     async delete(repoId, onEvent) {
       let moved: { source: string; trash: string } | undefined;
+      let preparedCopyPaths: string[] = [];
       try {
         const trashPath = await mutateState(state, async (next) => {
           const repo = next.repos.find((candidate) => candidate.id === repoId);
@@ -318,6 +319,10 @@ export function createRepoService({
             throw toSwarmError(error, "fs", "Failed to load swarm configuration");
           }
           assertRepoPath(repo, loadedConfig);
+          preparedCopyPaths = [
+            hotCopyPath(loadedConfig.worktreesDir, repo.id),
+            hotCopyStagingPath(loadedConfig.worktreesDir, repo.id),
+          ];
 
           const progress = forwardProgress(onEvent);
           for (const worktree of next.worktrees.filter(
@@ -346,6 +351,13 @@ export function createRepoService({
         await files.removeDetached(trashPath).catch((error: unknown) => {
           logger.error(`Failed to remove trashed repository: ${repoId}`, error);
         });
+        await Promise.all(
+          preparedCopyPaths.map((path) =>
+            files.removeDetached(path).catch((error: unknown) => {
+              logger.error(`Failed to remove prepared copy for: ${repoId}`, error);
+            }),
+          ),
+        );
         onEvent?.({ type: "done" });
       } catch (error) {
         if (moved) {

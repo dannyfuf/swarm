@@ -60,6 +60,7 @@ export interface FilesPort {
   ensureDir(p: string): Promise<void>;
   cloneTree(src: string, dest: string): Promise<void>;
   move(src: string, dest: string): Promise<void>;
+  removeTree(p: string): Promise<void>;
   removeDetached(p: string): Promise<void>;
   readText(p: string): Promise<string | null>;
   writeTextAtomic(p: string, text: string): Promise<void>;

@@ -23,7 +23,7 @@ import type {
   WorktreeService,
 } from "../core/services.ts";
 import { noStartupTiming, type StartupTiming } from "../core/startup.ts";
-import type { PrTab, State, Worktree, WorktreeId, WorktreeStatus } from "../core/types.ts";
+import type { PrTab, Repo, State, Worktree, WorktreeId, WorktreeStatus } from "../core/types.ts";
 import {
   prsInScope,
   prWorktree,
@@ -95,6 +95,7 @@ export function createController(deps: ControllerDeps): Controller {
   let disposed = false;
   let sequence = 0;
   const inFlightTargets = new Set<string>();
+  let scheduleHotCopy: (repo: Repo) => void = () => undefined;
 
   const dispatch = (action: Action): void => {
     if (!disposed) deps.store.dispatch(action);
@@ -146,8 +147,13 @@ export function createController(deps: ControllerDeps): Controller {
   const reconcileCloneState = (): Promise<State> => {
     if (cloneReconcileInFlight) return cloneReconcileInFlight;
     const task = (async () => {
+      const knownRepoIds = new Set(deps.store.getState().repos.map((repo) => repo.id));
       await deps.repos.reconcileClones();
-      return deps.state.load();
+      const persisted = await deps.state.load();
+      for (const repo of persisted.repos) {
+        if (!knownRepoIds.has(repo.id)) scheduleHotCopy(repo);
+      }
+      return persisted;
     })();
     cloneReconcileInFlight = task;
     void task.then(
@@ -255,14 +261,17 @@ export function createController(deps: ControllerDeps): Controller {
     label: string;
     targetId?: string;
     success: string;
+    refreshAfterSuccess?: boolean;
+    showDuplicateToast?: boolean;
+    showSuccessToast?: boolean;
     execute: (onEvent: OnEvent) => Promise<unknown>;
-    refreshAfter?: boolean;
     persistError?: boolean;
-    silentIfBusy?: boolean;
     clearError?: boolean;
   }): Promise<boolean> => {
     if (options.targetId && inFlightTargets.has(options.targetId)) {
-      if (!options.silentIfBusy) toast("info", `${options.label} is already in progress`);
+      if (options.showDuplicateToast !== false) {
+        toast("info", `${options.label} is already in progress`);
+      }
       return false;
     }
     if (options.targetId) inFlightTargets.add(options.targetId);
@@ -318,14 +327,31 @@ export function createController(deps: ControllerDeps): Controller {
     }
 
     if (!succeeded || disposed) return false;
+    if (options.refreshAfterSuccess === false) {
+      if (options.showSuccessToast !== false) toast("success", options.success);
+      return true;
+    }
     try {
-      if (options.refreshAfter !== false) await refresh();
-      toast("success", options.success);
+      await refresh();
+      if (options.showSuccessToast !== false) toast("success", options.success);
       return true;
     } catch (error) {
       reportError(error);
       return false;
     }
+  };
+
+  scheduleHotCopy = (repo): void => {
+    if (disposed) return;
+    void runOperation({
+      label: `Preparing next worktree copy for ${repo.id}`,
+      targetId: `hot-copy:${repo.id}`,
+      success: `Prepared next worktree copy for ${repo.id}`,
+      refreshAfterSuccess: false,
+      showDuplicateToast: false,
+      showSuccessToast: false,
+      execute: (onEvent) => deps.worktrees.prepareHotCopy(repo.id, onEvent),
+    });
   };
 
   const requireWorktree = (): Worktree | undefined => {
@@ -368,6 +394,8 @@ export function createController(deps: ControllerDeps): Controller {
             error: undefined,
           },
         });
+
+        for (const repo of persisted.repos) scheduleHotCopy(repo);
 
         syncClonePolling();
         void startup
@@ -476,6 +504,8 @@ export function createController(deps: ControllerDeps): Controller {
         success: `Worktree ${input.branch} ready`,
         execute: (onEvent) => deps.worktrees.create(input, onEvent),
       });
+      const repo = deps.store.getState().repos.find((candidate) => candidate.id === input.repoId);
+      if (repo) scheduleHotCopy(repo);
     },
 
     async remoteBranches(repoId) {
@@ -709,9 +739,9 @@ export function createController(deps: ControllerDeps): Controller {
         label: "Updating swarm",
         targetId: "swarm:update",
         success: "Swarm updated; restarting…",
-        refreshAfter: false,
+        refreshAfterSuccess: false,
+        showDuplicateToast: false,
         persistError: true,
-        silentIfBusy: true,
         clearError: true,
         execute: (onEvent) => deps.updater.update(deps.installRoot, onEvent),
       });
@@ -765,6 +795,8 @@ export function createController(deps: ControllerDeps): Controller {
           }
         },
       });
+      const repo = deps.store.getState().repos.find((candidate) => candidate.id === pr.repoId);
+      if (repo) scheduleHotCopy(repo);
       if (failure !== undefined) throw failure;
       if (!created) throw new SwarmError("conflict", `Worktree creation already in progress`);
       try {

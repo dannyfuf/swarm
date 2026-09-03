@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { access, mkdir, readdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { access, mkdir, readdir, readFile, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { relative, resolve, sep } from "node:path";
 import { SwarmError } from "../core/errors.ts";
 import type { FilesPort, Logger, Shell } from "../core/ports.ts";
@@ -30,6 +30,18 @@ export function createFiles(
     const wrapped = fsError(action, error);
     log.error(wrapped.message);
     throw wrapped;
+  };
+
+  const safeRemovalPath = (path: string): string => {
+    const absolute = resolve(path);
+    const allowed = allowedRemovalRoots.some((root) => {
+      const child = relative(resolve(root), absolute);
+      return child !== "" && child !== ".." && !child.startsWith(`..${sep}`);
+    });
+    if (!allowed) {
+      throw new SwarmError("validation", `Refusing to recursively remove unsafe path: ${path}`);
+    }
+    return absolute;
   };
 
   return {
@@ -82,15 +94,17 @@ export function createFiles(
       }
     },
 
-    async removeDetached(path): Promise<void> {
-      const absolute = resolve(path);
-      const allowed = allowedRemovalRoots.some((root) => {
-        const child = relative(resolve(root), absolute);
-        return child !== "" && child !== ".." && !child.startsWith(`..${sep}`);
-      });
-      if (!allowed) {
-        throw new SwarmError("validation", `Refusing to recursively remove unsafe path: ${path}`);
+    async removeTree(path): Promise<void> {
+      const absolute = safeRemovalPath(path);
+      try {
+        await rm(absolute, { recursive: true, force: true });
+      } catch (error) {
+        fail(`Could not remove ${absolute}`, error);
       }
+    },
+
+    async removeDetached(path): Promise<void> {
+      const absolute = safeRemovalPath(path);
       try {
         await shell.spawnDetached("rm", ["-rf", absolute]);
       } catch (error) {
@@ -123,7 +137,7 @@ export function createFiles(
       try {
         const entries = await readdir(path, { withFileTypes: true });
         return entries
-          .filter((entry) => entry.isDirectory())
+          .filter((entry) => entry.isDirectory() && !entry.name.startsWith(".hot"))
           .map((entry) => entry.name)
           .sort();
       } catch (error) {
