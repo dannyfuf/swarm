@@ -2482,6 +2482,44 @@ describe("createWorktreeService", () => {
     );
   });
 
+  test("startup reconciliation reads no marker when .git is not a directory", async () => {
+    const repo = repos[0];
+    assert.ok(repo);
+    const linkedPath = "/home/test/.swarm/worktrees/bukhr/payroll/feat-linked";
+    const state = createMemoryState(
+      makeState({ contexts: [contexts[0]], repos: [repo], worktrees: [] }),
+    );
+    const files = createFakeFiles({ paths: [repo.path, linkedPath] });
+    const readText = files.readText.bind(files);
+    files.readText = async (path) => {
+      if (resolve(path) === resolve(creatingMarkerPath(linkedPath))) {
+        throw new SwarmError("fs", `Could not read ${path}`, {
+          cause: Object.assign(new Error("ENOTDIR: not a directory"), { code: "ENOTDIR" }),
+        });
+      }
+      return readText(path);
+    };
+    const service = createWorktreeService({
+      state,
+      config: createMemoryConfig(),
+      git: createFakeGit(),
+      files,
+      tmux: createFakeTmux(),
+      shell: createFakeShell(),
+      clock: createFixedClock("2026-03-04T00:00:00.000Z"),
+      logger: createNullLogger(),
+    });
+
+    await service.reconcileCreating();
+
+    assert.deepEqual(state.state.worktrees, []);
+    assert.equal(files.paths.has(resolve(linkedPath)), true);
+    assert.equal(
+      files.calls.some(({ method }) => method === "move" || method === "removeDetached"),
+      false,
+    );
+  });
+
   test("preflight reclaims an orphan intent and publish writes a new intent before rename", async () => {
     const repo = repos[0];
     assert.ok(repo);

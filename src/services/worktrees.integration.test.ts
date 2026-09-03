@@ -165,3 +165,63 @@ test("a real-state write failure after publish rolls the destination back", asyn
     false,
   );
 });
+
+test("startup reconciliation ignores linked git worktrees and directories without .git", async (t) => {
+  const harness = await makeRealHarness();
+  t.after(() => rm(harness.root, { recursive: true, force: true }));
+  const root = join(harness.config.worktreesDir, harness.repo.id);
+
+  // (a) A real `git worktree`: `.git` is a gitdir pointer file, not a directory.
+  const linked = join(root, "feat-linked");
+  await mkdir(linked, { recursive: true });
+  await writeFile(
+    join(linked, ".git"),
+    `gitdir: ${join(harness.repo.path, ".git", "worktrees", "feat-linked")}\n`,
+    "utf8",
+  );
+
+  // (b) A directory with no `.git` at all.
+  const plain = join(root, "feat-plain");
+  await mkdir(plain, { recursive: true });
+
+  // (c) An interrupted swarm copy with a valid intent marker.
+  const recovered = join(root, "feat-recovered");
+  await mkdir(join(recovered, ".git"), { recursive: true });
+  await writeFile(
+    join(recovered, ".git", "swarm-creating.json"),
+    JSON.stringify({
+      id: `${harness.repo.id}#feat-recovered`,
+      repoId: harness.repo.id,
+      branch: "main",
+      baseRef: "origin/main",
+      createdAt: "2026-03-04T00:00:00.000Z",
+    }),
+    "utf8",
+  );
+
+  // (d) A swarm copy whose intent marker is corrupt.
+  const corrupt = join(root, "feat-corrupt");
+  await mkdir(join(corrupt, ".git"), { recursive: true });
+  await writeFile(join(corrupt, ".git", "swarm-creating.json"), "{not json", "utf8");
+
+  const service = makeService(harness, makeStatePort(harness));
+  await service.reconcileCreating();
+
+  // (a) and (b) are untouched and raise nothing.
+  assert.equal(await harness.files.exists(linked), true);
+  assert.equal(await harness.files.exists(join(linked, ".git")), true);
+  assert.equal(await harness.files.exists(plain), true);
+
+  // (c) is registered and its marker cleared.
+  const persisted = await makeStatePort(harness).load();
+  assert.deepEqual(
+    persisted.worktrees.map((worktree) => worktree.slug),
+    ["feat-recovered"],
+  );
+  assert.equal(persisted.worktrees[0]?.path, recovered);
+  assert.equal(await harness.files.exists(join(recovered, ".git", "swarm-creating.json")), false);
+
+  // (d) is reclaimed as an unregistered leftover.
+  await waitForRemoval(corrupt, harness.files);
+  assert.equal(await harness.files.exists(corrupt), false);
+});
