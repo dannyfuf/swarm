@@ -9,7 +9,7 @@ import type { State } from "../core/types.ts";
 import { defaultState } from "../core/types.ts";
 import { createFakeFiles } from "../testing/fakeFiles.ts";
 import { createFakeProcess } from "../testing/fakeProcess.ts";
-import { repos } from "../testing/fixtures.ts";
+import { repos, worktrees } from "../testing/fixtures.ts";
 import { createNullLogger } from "../testing/nullLogger.ts";
 import { createStateStore, type StateStoreOptions } from "./state.ts";
 
@@ -67,6 +67,15 @@ describe("state adapter", () => {
     const store = createTestStore(files);
 
     assert.deepEqual((await store.load()).clones, []);
+  });
+
+  test("preserves optional remote worktree placement", async () => {
+    const worktree = worktrees[0];
+    assert.ok(worktree);
+    const state = { ...defaultState(), worktrees: [{ ...worktree, host: "devbox" }] };
+    const files = createFakeFiles({ texts: { [statePath]: JSON.stringify(state) } });
+
+    assert.equal((await createTestStore(files).load()).worktrees[0]?.host, "devbox");
   });
 
   test("defaults legacy prepare hooks and rejects invalid hook commands", async () => {

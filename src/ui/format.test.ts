@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { aggregateSession, relativeTime, runningLabel, stateGlyph, tildePath } from "./format.ts";
+import {
+  aggregateSession,
+  relativeTime,
+  runningLabel,
+  sessionLabel,
+  stateGlyph,
+  tildePath,
+} from "./format.ts";
 import { glyphs, theme } from "./theme.ts";
 
 const NOW = Date.parse("2026-09-02T12:00:00.000Z");
@@ -39,8 +46,15 @@ test("tildePath collapses the home prefix", () => {
 test("stateGlyph maps session state to glyph and colour", () => {
   assert.deepEqual(stateGlyph("attached"), { char: glyphs.attached, fg: theme.green });
   assert.deepEqual(stateGlyph("detached"), { char: glyphs.detached, fg: theme.yellow });
+  assert.deepEqual(stateGlyph("unknown"), { char: "?", fg: theme.dim });
   assert.deepEqual(stateGlyph("none"), { char: glyphs.none, fg: theme.dim });
   assert.deepEqual(stateGlyph(undefined), { char: glyphs.none, fg: theme.dim });
+});
+
+test("sessionLabel renders an unreachable host as offline", () => {
+  assert.equal(sessionLabel("unknown"), "offline");
+  assert.equal(sessionLabel("none"), "none");
+  assert.equal(sessionLabel(undefined), "none");
 });
 
 test("runningLabel joins keep-alive labels", () => {
@@ -63,6 +77,7 @@ test("runningLabel joins keep-alive labels", () => {
 test("aggregateSession prefers the strongest state", () => {
   assert.equal(aggregateSession(["none", "detached", "attached"]), "attached");
   assert.equal(aggregateSession(["none", "detached"]), "detached");
+  assert.equal(aggregateSession(["none", "unknown"]), "unknown");
   assert.equal(aggregateSession([undefined, "none"]), "none");
   assert.equal(aggregateSession([]), "none");
 });

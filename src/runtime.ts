@@ -29,7 +29,11 @@ export interface Runtime {
   logger: Logger;
   state: ReturnType<typeof createStateStore>;
   tmux: ReturnType<typeof createTmux>;
+  contexts: ReturnType<typeof createContextService>;
+  repos: ReturnType<typeof createRepoService>;
+  worktrees: ReturnType<typeof createWorktreeService>;
   sessions: ReturnType<typeof createSessionService>;
+  status: ReturnType<typeof createStatusService>;
   controller: ReturnType<typeof createController>;
   store: ReturnType<typeof createStore>;
 }
@@ -155,5 +159,18 @@ export async function createRuntime(
     enableHotRefreshTimer: true,
   });
 
-  return { home, configValue, logger, state, tmux, sessions, controller, store };
+  return {
+    home,
+    configValue,
+    logger,
+    state,
+    tmux,
+    contexts,
+    repos,
+    worktrees,
+    sessions,
+    status,
+    controller,
+    store,
+  };
 }

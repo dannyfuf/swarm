@@ -5,6 +5,7 @@ import {
   hotCopyPath,
   hotCopyPidPath,
   hotCopyStagingPath,
+  isWorktreeSlug,
   worktreeId as makeWorktreeId,
   sessionName,
   slugify,
@@ -797,7 +798,7 @@ export function createWorktreeService({
   };
 
   const preflightCreate = async (
-    input: { repoId: RepoId; branch: string },
+    input: { repoId: RepoId; branch: string; slug?: string },
     onEvent?: OnEvent,
   ): Promise<{
     repo: Repo;
@@ -809,7 +810,10 @@ export function createWorktreeService({
     return timed("Checking prerequisites", onEvent, async () => {
       const [current, loadedConfig] = await Promise.all([loadState(), loadConfig()]);
       const repo = resolveRepo(current, input.repoId);
-      const slug = slugify(input.branch);
+      const slug = input.slug ?? slugify(input.branch);
+      if (!isWorktreeSlug(slug)) {
+        throw new SwarmError("validation", `Invalid worktree slug: ${slug}`);
+      }
       const id = makeWorktreeId(repo.id, slug);
       const destination = worktreePath(loadedConfig, repo.owner, repo.name, slug);
       assertCreateAvailable(current, repo, slug, destination);

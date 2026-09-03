@@ -23,7 +23,14 @@ import { fuzzyFilter } from "../core/fuzzy.ts";
 import { slugify, worktreeId } from "../core/paths.ts";
 import { prLocalBranch, prState, prStateLabel } from "../core/prs.ts";
 import type { PrState, PrTab, PullRequest, SessionState, Worktree } from "../core/types.ts";
-import { aggregateSession, relativeTime, runningLabel, stateGlyph, tildePath } from "./format.ts";
+import {
+  aggregateSession,
+  relativeTime,
+  runningLabel,
+  sessionLabel,
+  stateGlyph,
+  tildePath,
+} from "./format.ts";
 import {
   type Cell,
   cell,
@@ -237,13 +244,15 @@ function contextTabs(state: AppState): Line {
 function sessionSummary(state: AppState): Line {
   let attached = 0;
   let detached = 0;
+  let unknown = 0;
   for (const worktree of state.worktrees) {
     const session = state.statuses[worktree.id]?.session;
     if (session === "attached") attached += 1;
     else if (session === "detached") detached += 1;
+    else if (session === "unknown") unknown += 1;
   }
   const line: Line = [];
-  if (attached === 0 && detached === 0) {
+  if (attached === 0 && detached === 0 && unknown === 0) {
     line.push(cell("no live sessions", { fg: theme.dim }));
   } else {
     if (attached > 0) {
@@ -254,6 +263,10 @@ function sessionSummary(state: AppState): Line {
     if (detached > 0) {
       line.push(cell(`${glyphs.detached} `, { fg: theme.yellow }));
       line.push(cell(`${detached} sleeping`, { fg: theme.muted }));
+    }
+    if (unknown > 0) {
+      if (attached > 0 || detached > 0) line.push(cell(` ${glyphs.sep} `, { fg: theme.dim }));
+      line.push(cell(`? ${unknown} offline`, { fg: theme.dim }));
     }
   }
 
@@ -639,9 +652,10 @@ function detailLines(state: AppState, layout: ScreenLayout, context: ScreenConte
 
   if (state.pane === "repos" && repo) {
     const repoWorktrees = state.worktrees.filter((item) => item.repoId === repo.id);
-    const live = repoWorktrees.filter(
-      (item) => sessionOf(state, item) !== undefined && sessionOf(state, item) !== "none",
-    );
+    const live = repoWorktrees.filter((item) => {
+      const session = sessionOf(state, item);
+      return session === "attached" || session === "detached";
+    });
     lines.push([
       cell(" ", {}),
       cell(repo.name, { fg: theme.strong, bold: true }),
@@ -732,7 +746,14 @@ function detailLines(state: AppState, layout: ScreenLayout, context: ScreenConte
   const windowLine: Line = [cell(" windows  ", { fg: theme.dim })];
   if (!status || status.windows.length === 0) {
     windowLine.push(
-      cell(status?.session === "none" || !status ? "no session" : "none", { fg: theme.ghost }),
+      cell(
+        status?.session === "unknown"
+          ? "offline"
+          : status?.session === "none" || !status
+            ? "no session"
+            : "none",
+        { fg: theme.ghost },
+      ),
     );
   } else {
     status.windows.forEach((window, index) => {
@@ -1243,7 +1264,9 @@ function prDetailLines(state: AppState, layout: ScreenLayout, context: ScreenCon
       }),
     );
     worktreeLine.push(cell(` ${glyphs.sep} session `, { fg: theme.dim }));
-    worktreeLine.push(cell(state.statuses[worktree.id]?.session ?? "none", { fg: theme.muted }));
+    worktreeLine.push(
+      cell(sessionLabel(state.statuses[worktree.id]?.session), { fg: theme.muted }),
+    );
   } else {
     const slug = slugify(prLocalBranch(pr));
     const destination = `${state.config.worktreesDir}/${pr.repoId}/${slug}`;

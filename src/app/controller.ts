@@ -685,7 +685,7 @@ export function createController(deps: ControllerDeps): Controller {
             title: "Delete worktree?",
             body: [
               `Path: ${worktree.path}`,
-              `Session: ${status?.session ?? "none"}`,
+              `Session: ${status?.session === "unknown" ? "offline" : (status?.session ?? "none")}`,
               `Running agents: ${status?.running.join(", ") || "none"}`,
             ],
             danger: true,
@@ -712,8 +712,10 @@ export function createController(deps: ControllerDeps): Controller {
       }
       const repoWorktrees = state.worktrees.filter((worktree) => worktree.repoId === repo.id);
       const sessions = repoWorktrees
-        .filter((worktree) => state.statuses[worktree.id]?.session !== "none")
-        .filter((worktree) => state.statuses[worktree.id] !== undefined)
+        .filter((worktree) => {
+          const session = state.statuses[worktree.id]?.session;
+          return session === "attached" || session === "detached";
+        })
         .map((worktree) => worktree.session);
       dispatch({
         type: "openDialog",
@@ -803,11 +805,10 @@ export function createController(deps: ControllerDeps): Controller {
         state.repos.filter((repo) => repo.contextId === id).map((repo) => repo.id),
       );
       const contextWorktrees = state.worktrees.filter((worktree) => repoIds.has(worktree.repoId));
-      const sessionCount = contextWorktrees.filter(
-        (worktree) =>
-          state.statuses[worktree.id]?.session !== undefined &&
-          state.statuses[worktree.id]?.session !== "none",
-      ).length;
+      const sessionCount = contextWorktrees.filter((worktree) => {
+        const session = state.statuses[worktree.id]?.session;
+        return session === "attached" || session === "detached";
+      }).length;
       dispatch({
         type: "openDialog",
         dialog: {

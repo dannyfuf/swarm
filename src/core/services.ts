@@ -38,7 +38,12 @@ export interface RepoService {
     query: string,
     opts?: { refresh?: boolean; signal?: AbortSignal },
   ): Promise<RemoteRepo[]>;
-  clone(remote: RemoteRepo, contextId: ContextId, onEvent?: OnEvent): Promise<CloneJob>;
+  clone(
+    remote: RemoteRepo,
+    contextId: ContextId,
+    onEvent?: OnEvent,
+    opts?: { url?: string },
+  ): Promise<CloneJob>;
   reconcileClones(): Promise<CloneJob[]>;
   assign(repoId: RepoId, contextId: ContextId): Promise<Repo>;
   delete(repoId: RepoId, onEvent?: OnEvent): Promise<void>;
@@ -60,6 +65,7 @@ export interface WorktreeService {
     input: {
       repoId: RepoId;
       branch: string;
+      slug?: string;
       baseRef?: string;
       source?: { kind: "pull"; number: number };
     },

@@ -10,6 +10,12 @@ export type RepoId = z.infer<typeof RepoId>;
 export const WorktreeId = z.string().regex(/^[^/\s]+\/[^/\s]+#[^\s#]+$/);
 export type WorktreeId = z.infer<typeof WorktreeId>;
 
+export const HostId = z
+  .string()
+  .regex(/^[a-z0-9-]+$/)
+  .refine((id) => id !== "local", { message: '"local" is reserved for the local machine' });
+export type HostId = z.infer<typeof HostId>;
+
 export const ContextSchema = z.object({
   id: ContextId,
   name: z.string().min(1),
@@ -17,6 +23,12 @@ export const ContextSchema = z.object({
   createdAt: z.string().datetime(),
 });
 export type Context = z.infer<typeof ContextSchema>;
+
+export const RepoHooksSchema = z.object({
+  prepare: z.array(z.string()).default([]),
+  postCreate: z.array(z.string()).default([]),
+});
+export type RepoHooks = z.infer<typeof RepoHooksSchema>;
 
 export const RepoSchema = z.object({
   id: RepoId,
@@ -27,12 +39,7 @@ export const RepoSchema = z.object({
   defaultBranch: z.string(),
   path: z.string(),
   clonedAt: z.string().datetime(),
-  hooks: z
-    .object({
-      prepare: z.array(z.string()).default([]),
-      postCreate: z.array(z.string()).default([]),
-    })
-    .default({ prepare: [], postCreate: [] }),
+  hooks: RepoHooksSchema.default({ prepare: [], postCreate: [] }),
 });
 export type Repo = z.infer<typeof RepoSchema>;
 
@@ -61,10 +68,15 @@ export const WorktreeSchema = z.object({
   baseRef: z.string(),
   path: z.string(),
   session: z.string(),
+  host: z.string().optional(),
   createdAt: z.string().datetime(),
   lastOpenedAt: z.string().datetime().optional(),
 });
 export type Worktree = z.infer<typeof WorktreeSchema>;
+
+export function worktreeHost(worktree: Pick<Worktree, "host">): string {
+  return worktree.host ?? "local";
+}
 
 export const PrTabSchema = z.enum(["mine", "review"]);
 export type PrTab = z.infer<typeof PrTabSchema>;
@@ -196,30 +208,49 @@ export const SleepPolicySchema = z.object({
 });
 export type SleepPolicy = z.infer<typeof SleepPolicySchema>;
 
-export const ConfigSchema = z.object({
-  version: z.literal(1),
-  reposDir: z.string(),
-  worktreesDir: z.string(),
-  hotPoolSize: z.number().int().nonnegative().default(1),
-  hotFreshnessMs: z.number().int().nonnegative().default(60000),
-  hotRefreshIntervalMs: z.number().int().nonnegative().default(300000),
-  agent: AgentNameSchema.default("claude"),
-  agentCommands: AgentCommandsSchema,
-  windows: z.array(WindowSpecSchema),
-  sleep: SleepPolicySchema,
-  github: z
-    .object({
-      cacheTtlSeconds: z.number().int().default(3600),
-      prTtlSeconds: z.number().int().default(90),
-      cloneProtocol: z.enum(["ssh", "https"]).default("ssh"),
-    })
-    .default({ cacheTtlSeconds: 3600, prTtlSeconds: 90, cloneProtocol: "ssh" }),
-  ui: z
-    .object({
-      statusRefreshMs: z.number().int().default(2000),
-    })
-    .default({ statusRefreshMs: 2000 }),
+export const HostSchema = z.object({
+  ssh: z.string().min(1),
+  swarmCommand: z.string().min(1).default("swarm"),
 });
+export type Host = z.infer<typeof HostSchema>;
+
+export const ConfigSchema = z
+  .object({
+    version: z.literal(1),
+    reposDir: z.string(),
+    worktreesDir: z.string(),
+    hosts: z.record(HostId, HostSchema).default({}),
+    defaultHost: z.union([z.literal("local"), HostId]).default("local"),
+    hotPoolSize: z.number().int().nonnegative().default(1),
+    hotFreshnessMs: z.number().int().nonnegative().default(60000),
+    hotRefreshIntervalMs: z.number().int().nonnegative().default(300000),
+    agent: AgentNameSchema.default("claude"),
+    agentCommands: AgentCommandsSchema,
+    windows: z.array(WindowSpecSchema),
+    sleep: SleepPolicySchema,
+    github: z
+      .object({
+        cacheTtlSeconds: z.number().int().default(3600),
+        prTtlSeconds: z.number().int().default(90),
+        cloneProtocol: z.enum(["ssh", "https"]).default("ssh"),
+      })
+      .default({ cacheTtlSeconds: 3600, prTtlSeconds: 90, cloneProtocol: "ssh" }),
+    ui: z
+      .object({
+        statusRefreshMs: z.number().int().default(2000),
+        remoteStatusRefreshMs: z.number().int().default(10000),
+      })
+      .default({ statusRefreshMs: 2000, remoteStatusRefreshMs: 10000 }),
+  })
+  .superRefine((config, context) => {
+    if (config.defaultHost !== "local" && config.hosts[config.defaultHost] === undefined) {
+      context.addIssue({
+        code: "custom",
+        path: ["defaultHost"],
+        message: 'Expected "local" or a configured host id',
+      });
+    }
+  });
 export type Config = z.infer<typeof ConfigSchema>;
 
 export const DEFAULT_WINDOWS: WindowSpec[] = [
@@ -284,6 +315,8 @@ export function defaultConfig(home: string): Config {
     version: 1,
     reposDir: join(home, "repos"),
     worktreesDir: join(home, "worktrees"),
+    hosts: {},
+    defaultHost: "local",
     hotPoolSize: 1,
     hotFreshnessMs: 60000,
     hotRefreshIntervalMs: 300000,
@@ -296,7 +329,7 @@ export function defaultConfig(home: string): Config {
       graceMs: 2000,
     },
     github: { cacheTtlSeconds: 3600, prTtlSeconds: 90, cloneProtocol: "ssh" },
-    ui: { statusRefreshMs: 2000 },
+    ui: { statusRefreshMs: 2000, remoteStatusRefreshMs: 10000 },
   };
 }
 
@@ -310,7 +343,7 @@ export function defaultState(): State {
   };
 }
 
-export type SessionState = "none" | "detached" | "attached";
+export type SessionState = "none" | "detached" | "attached" | "unknown";
 
 export interface WorktreeStatus {
   worktreeId: WorktreeId;

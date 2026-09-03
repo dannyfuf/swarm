@@ -19,6 +19,16 @@ export function slugify(branch: string): string {
     .replace(/^-+|-+$/g, "");
 }
 
+export function isWorktreeSlug(slug: string): boolean {
+  return (
+    slug.length > 0 &&
+    slug !== "." &&
+    slug !== ".." &&
+    slugify(slug) === slug &&
+    /^[a-z0-9]/u.test(slug)
+  );
+}
+
 export function sessionName(repoName: string, slug: string): string {
   return `${repoName.replace(/[.:]/g, "-")}/${slug.replace(/[.:]/g, "-")}`;
 }

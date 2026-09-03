@@ -5,6 +5,7 @@ import { defaultConfig } from "./core/types.ts";
 import {
   exitTuiProcess,
   formatUnmountReport,
+  main,
   parseArgv,
   resolveAgentName,
   runAgentCommand,
@@ -28,11 +29,60 @@ describe("CLI parsing", () => {
       kind: "sleep",
       session: "payroll/main",
     });
+    assert.deepEqual(parseArgv(["sleep", "--json", "payroll/main"]), {
+      kind: "sleep",
+      session: "payroll/main",
+      json: true,
+    });
     assert.deepEqual(parseArgv(["agent"]), { kind: "agent" });
     assert.deepEqual(parseArgv(["agent", "claude"]), { kind: "agent", agent: "claude" });
     assert.deepEqual(parseArgv(["agent", "opencode"]), { kind: "agent", agent: "opencode" });
     assert.equal(resolveAgentName(undefined, "opencode"), "opencode");
     assert.equal(resolveAgentName("claude", "opencode"), "claude");
+  });
+
+  test("parses host protocol commands with --json anywhere after the command", () => {
+    assert.deepEqual(parseArgv(["list", "--json"]), { kind: "list", json: true });
+    assert.deepEqual(parseArgv(["status"]), { kind: "status", json: false });
+    assert.deepEqual(parseArgv(["delete", "--json", "bukhr/payroll#main"]), {
+      kind: "delete",
+      worktreeId: "bukhr/payroll#main",
+      json: true,
+    });
+    assert.deepEqual(parseArgv(["kill", "bukhr/payroll#main", "--json"]), {
+      kind: "kill",
+      worktreeId: "bukhr/payroll#main",
+      json: true,
+    });
+    assert.deepEqual(
+      parseArgv([
+        "create",
+        "--branch",
+        "feat/remote",
+        "bukhr/payroll",
+        "remote",
+        "--json",
+        "--base",
+        "origin/main",
+        "--url",
+        "git@github.com:bukhr/payroll.git",
+        "--default-branch",
+        "main",
+        "--hooks",
+        '{"prepare":["npm ci"],"postCreate":["npm test"]}',
+      ]),
+      {
+        kind: "create",
+        repoId: "bukhr/payroll",
+        slug: "remote",
+        branch: "feat/remote",
+        baseRef: "origin/main",
+        url: "git@github.com:bukhr/payroll.git",
+        defaultBranch: "main",
+        hooks: { prepare: ["npm ci"], postCreate: ["npm test"] },
+        json: true,
+      },
+    );
   });
 
   test("rejects malformed invocations with a validation error", () => {
@@ -44,6 +94,37 @@ describe("CLI parsing", () => {
       () => parseArgv(["agent", "bogus"]),
       (error: unknown) => error instanceof SwarmError && error.code === "validation",
     );
+    assert.throws(
+      () => parseArgv(["create", "bukhr/payroll", "slug", "--branch", "feat/x"]),
+      (error: unknown) => error instanceof SwarmError && error.code === "validation",
+    );
+    assert.throws(
+      () => parseArgv(["delete", "not-a-worktree", "--json"]),
+      (error: unknown) => error instanceof SwarmError && error.code === "validation",
+    );
+  });
+
+  test("returns exit code 1 and writes the JSON error envelope to stdout", async () => {
+    const output: string[] = [];
+    const originalWrite = process.stdout.write;
+    process.stdout.write = ((chunk: string | Uint8Array) => {
+      output.push(String(chunk));
+      return true;
+    }) as typeof process.stdout.write;
+    try {
+      assert.equal(await main(["list", "unexpected", "--json"]), 1);
+    } finally {
+      process.stdout.write = originalWrite;
+    }
+
+    assert.deepEqual(JSON.parse(output.join("")), {
+      protocol: 1,
+      error: {
+        kind: "validation",
+        message:
+          "Usage: swarm [command] Commands: open <owner/name#slug|repo/slug> sleep [session] [--json] agent [claude|opencode] list [--json] create <owner/name> <slug> --branch <name> --base <ref> [--url <url>] [--default-branch <name>] [--hooks <json>] [--json] delete <owner/name#slug> [--json] kill <owner/name#slug> [--json] status [--json] doctor --version",
+      },
+    });
   });
 
   test("prints unmount reports as stable JSON", () => {

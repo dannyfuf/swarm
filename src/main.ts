@@ -1,10 +1,28 @@
 import { spawn } from "node:child_process";
 import { pathToFileURL } from "node:url";
+import {
+  CLI_VERSION,
+  handleProtocolCommand,
+  humanProtocolResponse,
+  isProtocolCommand,
+  type ProtocolCommand,
+  protocolErrorEnvelope,
+} from "./cli/protocol.ts";
 import { SwarmError } from "./core/errors.ts";
+import { isWorktreeSlug } from "./core/paths.ts";
 import type { Shell, ShellResult } from "./core/ports.ts";
+import { validateBranch } from "./core/prs.ts";
 import type { UnmountReport } from "./core/services.ts";
 import { createStartupProfiler } from "./core/startup.ts";
-import { agentCommand, type State, type Worktree } from "./core/types.ts";
+import {
+  agentCommand,
+  type RepoHooks,
+  RepoHooksSchema,
+  RepoId,
+  type State,
+  type Worktree,
+  WorktreeId,
+} from "./core/types.ts";
 import { VERSION } from "./core/version.ts";
 import type { Runtime } from "./runtime.ts";
 import {
@@ -24,11 +42,12 @@ startupProfiler.mark("main.moduleLoaded");
 export type CliCommand =
   | { kind: "tui" }
   | { kind: "open"; target: string }
-  | { kind: "sleep"; session?: string }
+  | { kind: "sleep"; session?: string; json?: true }
   | { kind: "agent"; agent?: AgentName }
   | { kind: "doctor" }
   | { kind: "version" }
-  | { kind: "help" };
+  | { kind: "help" }
+  | ProtocolCommand;
 
 interface DoctorCheck {
   name: string;
@@ -61,8 +80,92 @@ export async function exitTuiProcess(
   deps.exit(code);
 }
 
-const USAGE =
-  "Usage: swarm [open <owner/name#slug|repo/slug> | sleep [session] | agent [claude|opencode] | doctor | --version]";
+export const USAGE = `Usage: swarm [command]
+
+Commands:
+  open <owner/name#slug|repo/slug>
+  sleep [session] [--json]
+  agent [claude|opencode]
+  list [--json]
+  create <owner/name> <slug> --branch <name> --base <ref> [--url <url>] [--default-branch <name>] [--hooks <json>] [--json]
+  delete <owner/name#slug> [--json]
+  kill <owner/name#slug> [--json]
+  status [--json]
+  doctor
+  --version`;
+
+function validation(message: string = USAGE): never {
+  throw new SwarmError("validation", message);
+}
+
+function takeJsonFlag(args: string[]): { args: string[]; json: boolean } {
+  const jsonFlags = args.filter((arg) => arg === "--json").length;
+  if (jsonFlags > 1) validation("--json may only be specified once");
+  return { args: args.filter((arg) => arg !== "--json"), json: jsonFlags === 1 };
+}
+
+function parseId<T>(
+  value: string | undefined,
+  schema: { safeParse(input: unknown): { success: true; data: T } | { success: false } },
+  label: string,
+): T {
+  const parsed = schema.safeParse(value);
+  if (!parsed.success) validation(`Invalid ${label}: ${value ?? "<missing>"}`);
+  return parsed.data;
+}
+
+function parseHooks(value: string | undefined): RepoHooks {
+  if (value === undefined) return { prepare: [], postCreate: [] };
+  try {
+    return RepoHooksSchema.strict().parse(JSON.parse(value));
+  } catch (cause) {
+    throw new SwarmError(
+      "validation",
+      "--hooks must be a JSON object with string-array prepare and postCreate fields",
+      {
+        cause,
+      },
+    );
+  }
+}
+
+function parseCreate(args: string[], json: boolean): ProtocolCommand {
+  const positional: string[] = [];
+  const options = new Map<string, string>();
+  const supported = new Set(["--branch", "--base", "--url", "--default-branch", "--hooks"]);
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (!arg) validation();
+    if (!arg.startsWith("--")) {
+      positional.push(arg);
+      continue;
+    }
+    if (!supported.has(arg) || options.has(arg)) validation(`Invalid or duplicate option: ${arg}`);
+    const value = args[index + 1];
+    if (value === undefined || value.startsWith("--")) validation(`Missing value for ${arg}`);
+    options.set(arg, value);
+    index += 1;
+  }
+  if (positional.length !== 2) validation();
+  const repoId = parseId(positional[0], RepoId, "repository id");
+  const slug = positional[1];
+  const branch = options.get("--branch");
+  const baseRef = options.get("--base");
+  if (!slug || !branch || !baseRef) validation();
+  if (!isWorktreeSlug(slug)) validation(`Invalid worktree slug: ${slug}`);
+  validateBranch(branch);
+  return {
+    kind: "create",
+    repoId,
+    slug,
+    branch,
+    baseRef,
+    url: options.get("--url"),
+    defaultBranch: options.get("--default-branch"),
+    hooks: parseHooks(options.get("--hooks")),
+    json,
+  };
+}
 
 export function parseArgv(argv: string[]): CliCommand {
   const [command, ...args] = argv;
@@ -77,12 +180,41 @@ export function parseArgv(argv: string[]): CliCommand {
   if (command === "open" && args.length === 1 && args[0]) {
     return { kind: "open", target: args[0] };
   }
-  if (command === "sleep" && args.length <= 1) {
-    return args[0] ? { kind: "sleep", session: args[0] } : { kind: "sleep" };
+  if (command === "sleep") {
+    const parsed = takeJsonFlag(args);
+    if (parsed.args.length <= 1) {
+      return parsed.args[0]
+        ? {
+            kind: "sleep",
+            session: parsed.args[0],
+            ...(parsed.json ? { json: true as const } : {}),
+          }
+        : { kind: "sleep", ...(parsed.json ? { json: true as const } : {}) };
+    }
   }
   if (command === "agent" && args.length <= 1) {
     if (args.length === 0) return { kind: "agent" };
     if (isAgentName(args[0])) return { kind: "agent", agent: args[0] };
+  }
+  if (
+    command === "list" ||
+    command === "create" ||
+    command === "delete" ||
+    command === "kill" ||
+    command === "status"
+  ) {
+    const parsed = takeJsonFlag(args);
+    if (command === "create") return parseCreate(parsed.args, parsed.json);
+    if (command === "list" || command === "status") {
+      if (parsed.args.length > 0) validation();
+      return { kind: command, json: parsed.json };
+    }
+    if (parsed.args.length !== 1) validation();
+    return {
+      kind: command,
+      worktreeId: parseId(parsed.args[0], WorktreeId, "worktree id"),
+      json: parsed.json,
+    };
   }
   throw new SwarmError("validation", USAGE);
 }
@@ -282,7 +414,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
   try {
     const command = parseArgv(argv);
     if (command.kind === "version") {
-      process.stdout.write(`swarm ${VERSION}\n`);
+      process.stdout.write(`${CLI_VERSION}\n`);
       return 0;
     }
     if (command.kind === "help") {
@@ -339,6 +471,14 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     );
     startupProfiler.mark("runtime.created");
     runtime = createdRuntime;
+    if (isProtocolCommand(command)) {
+      const response = await handleProtocolCommand(command, createdRuntime);
+      const output = command.json
+        ? JSON.stringify(response)
+        : humanProtocolResponse(command, response);
+      process.stdout.write(`${output}\n`);
+      return 0;
+    }
     if (command.kind === "agent") {
       return await runAgentCommand(
         createdRuntime,
@@ -350,7 +490,11 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     return 0;
   } catch (error) {
     runtime?.logger.error("Fatal error", errorLogData(error));
-    process.stderr.write(`swarm: ${errorMessage(error)}\n`);
+    if (argv.slice(1).includes("--json")) {
+      process.stdout.write(`${JSON.stringify(protocolErrorEnvelope(error))}\n`);
+    } else {
+      process.stderr.write(`swarm: ${errorMessage(error)}\n`);
+    }
     return 1;
   } finally {
     startupProfiler.flush();

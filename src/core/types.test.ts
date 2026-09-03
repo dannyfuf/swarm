@@ -6,8 +6,10 @@ import {
   ConfigSchema,
   DEFAULT_AGENT_COMMANDS,
   defaultConfig,
+  HostId,
   resolveWindowCommand,
   resolveWindows,
+  worktreeHost,
 } from "./types.ts";
 
 describe("ConfigSchema", () => {
@@ -32,6 +34,35 @@ describe("ConfigSchema", () => {
       opencode: "opencode",
     });
   });
+
+  test("defaults remote host configuration and validates the selected host", () => {
+    const defaults = defaultConfig("/home/test/.swarm");
+    assert.deepEqual(defaults.hosts, {});
+    assert.equal(defaults.defaultHost, "local");
+    assert.equal(defaults.ui.remoteStatusRefreshMs, 10000);
+
+    const configured = ConfigSchema.parse({
+      ...defaults,
+      hosts: { devbox: { ssh: "user@devbox" } },
+      defaultHost: "devbox",
+    });
+    assert.deepEqual(configured.hosts.devbox, {
+      ssh: "user@devbox",
+      swarmCommand: "swarm",
+    });
+    assert.throws(() => ConfigSchema.parse({ ...defaults, defaultHost: "missing" }));
+    assert.throws(() =>
+      ConfigSchema.parse({ ...defaults, hosts: { local: { ssh: "localhost" } } }),
+    );
+  });
+});
+
+test("HostId reserves local and worktreeHost defaults absent placement to local", () => {
+  assert.equal(HostId.parse("devbox-2"), "devbox-2");
+  assert.equal(HostId.safeParse("local").success, false);
+  assert.equal(HostId.safeParse("DevBox").success, false);
+  assert.equal(worktreeHost({}), "local");
+  assert.equal(worktreeHost({ host: "devbox" }), "devbox");
 });
 
 describe("agentCommand", () => {

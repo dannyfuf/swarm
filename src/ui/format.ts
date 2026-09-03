@@ -39,7 +39,12 @@ export interface StateGlyph {
 export function stateGlyph(session: SessionState | undefined): StateGlyph {
   if (session === "attached") return { char: glyphs.attached, fg: theme.green };
   if (session === "detached") return { char: glyphs.detached, fg: theme.yellow };
+  if (session === "unknown") return { char: "?", fg: theme.dim };
   return { char: glyphs.none, fg: theme.dim };
+}
+
+export function sessionLabel(session: SessionState | undefined): string {
+  return session === "unknown" ? "offline" : (session ?? "none");
 }
 
 /** "claude · :3000" — what is alive inside the session, in one glance. */
@@ -52,6 +57,7 @@ export function runningLabel(status: WorktreeStatus | undefined): string {
 export function aggregateSession(states: Array<SessionState | undefined>): SessionState {
   if (states.includes("attached")) return "attached";
   if (states.includes("detached")) return "detached";
+  if (states.includes("unknown")) return "unknown";
   return "none";
 }
 

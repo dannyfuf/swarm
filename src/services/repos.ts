@@ -117,7 +117,7 @@ export function createRepoService({
         .map(({ item }) => item);
     },
 
-    async clone(remote: RemoteRepo, contextId, onEvent) {
+    async clone(remote: RemoteRepo, contextId, onEvent, opts) {
       const id = makeRepoId(remote.owner, remote.name);
       let job: CloneJob | undefined;
       try {
@@ -130,9 +130,10 @@ export function createRepoService({
 
         const destination = repoPath(loadedConfig, remote.owner, remote.name);
         const cloneUrl =
-          loadedConfig.github.cloneProtocol === "https"
+          opts?.url ??
+          (loadedConfig.github.cloneProtocol === "https"
             ? `https://github.com/${remote.owner}/${remote.name}.git`
-            : remote.sshUrl;
+            : remote.sshUrl);
         const unique = randomUUID();
         const stagingPath = `${destination}.staging-${globalThis.process.pid}-${unique}`;
         const logsDir = join(home ?? dirname(loadedConfig.reposDir), "logs");

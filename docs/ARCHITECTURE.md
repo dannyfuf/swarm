@@ -66,7 +66,8 @@ PATH binary needs a version-probe process.
 ```
 bin/swarm                 launcher (runs dist or src, restarts in place when the TUI returns 75)
 tmux/tmux.conf            full tmux config (theme, persistence) with swarm and persistent agent popup bindings
-src/main.ts               CLI entry: `swarm` (TUI), `swarm open <repo>/<slug>`, `swarm sleep <session>`, `swarm agent [claude|opencode]`, `swarm doctor`
+src/main.ts               thin CLI entry: TUI/open/sleep/agent/doctor plus JSON list/create/delete/kill/status protocol commands
+src/cli/protocol.ts       host-agnostic protocol handlers shared by local CLI execution and remote transport
 src/core/                 contracts and pure helpers; no I/O
   types.ts                domain zod schemas + inferred types, agent names, window resolution (section 4)
   ports.ts                infrastructure port interfaces (section 5)
@@ -102,6 +103,7 @@ leaving the agent and scrollback alive; reopening the same binding reattaches to
 export const ContextId = z.string().regex(/^[a-z0-9][a-z0-9-]*$/);
 export const RepoId = z.string().regex(/^[^/\s]+\/[^/\s]+$/);        // "owner/name"
 export const WorktreeId = z.string().regex(/^[^/\s]+\/[^/\s]+#[^\s#]+$/); // "owner/name#slug"
+export const HostId = z.string().regex(/^[a-z0-9-]+$/);               // "local" is reserved
 
 export const ContextSchema = z.object({
   id: ContextId,                 // slug of name
@@ -139,6 +141,7 @@ export const WorktreeSchema = z.object({
   baseRef: z.string(),           // e.g. "origin/main"
   path: z.string(),              // absolute
   session: z.string(),           // tmux session name = sessionName(repo.name, slug)
+  host: z.string().optional(),   // placement; absent means local
   createdAt: z.string().datetime(),
   lastOpenedAt: z.string().datetime().optional(),
 });
@@ -167,6 +170,8 @@ export const SleepPolicySchema = z.object({
 export const ConfigSchema = z.object({
   version: z.literal(1),
   reposDir: z.string(), worktreesDir: z.string(),       // absolute; defaults under SWARM_HOME
+  hosts: z.record(HostId, z.object({ ssh: z.string(), swarmCommand: z.string().default("swarm") })).default({}),
+  defaultHost: z.string().default("local"),             // refined to local or a configured host
   hotPoolSize: z.number().int().nonnegative().default(1),
   hotFreshnessMs: z.number().int().nonnegative().default(60000),
   hotRefreshIntervalMs: z.number().int().nonnegative().default(300000),
@@ -181,7 +186,10 @@ export const ConfigSchema = z.object({
     cacheTtlSeconds: z.number().int().default(3600),
     cloneProtocol: z.enum(["ssh", "https"]).default("ssh"),
   }).default({ cacheTtlSeconds: 3600, cloneProtocol: "ssh" }),
-  ui: z.object({ statusRefreshMs: z.number().int().default(2000) }).default({ statusRefreshMs: 2000 }),
+  ui: z.object({
+    statusRefreshMs: z.number().int().default(2000),
+    remoteStatusRefreshMs: z.number().int().default(10000),
+  }).default({ statusRefreshMs: 2000, remoteStatusRefreshMs: 10000 }),
 });
 export function defaultConfig(home: string): Config;   // fills all defaults
 export function defaultState(): State;
@@ -191,7 +199,7 @@ export function resolveWindowCommand(spec: WindowSpec, config: Pick<Config, "age
 export function resolveWindows(config: Pick<Config, "agent" | "agentCommands" | "windows">): WindowSpec[];
 
 // Runtime (computed, never persisted)
-export type SessionState = "none" | "detached" | "attached";
+export type SessionState = "none" | "detached" | "attached" | "unknown";
 export interface WorktreeStatus {
   worktreeId: WorktreeId;
   session: SessionState;
@@ -314,7 +322,7 @@ export interface ContextService {
 export interface RepoService {
   list(contextId?: ContextId): Promise<Repo[]>;
   searchRemote(contextId: ContextId, query: string, opts?: { refresh?: boolean; signal?: AbortSignal }): Promise<RemoteRepo[]>; // fuzzy over cached owners lists, excludes already-cloned
-  clone(remote: RemoteRepo, contextId: ContextId, onEvent?: OnEvent): Promise<CloneJob>; // persists, then launches detached using github.cloneProtocol
+  clone(remote: RemoteRepo, contextId: ContextId, onEvent?: OnEvent, opts?: {url?: string}): Promise<CloneJob>; // persists, then launches detached using github.cloneProtocol unless URL is explicitly overridden
   reconcileClones(): Promise<CloneJob[]>; // running pid stays pending; completed .git is promoted; missing .git becomes failed
   assign(repoId: RepoId, contextId: ContextId): Promise<Repo>;
   delete(repoId: RepoId, onEvent?: OnEvent): Promise<void>;                    // kills sessions, trashes worktrees + base
@@ -327,7 +335,7 @@ export interface WorktreeService {
   prepareHotCopy(repoId: RepoId, onEvent?: OnEvent, opts?: { signal?: AbortSignal }): Promise<void>;
   refreshPreparedCopy(repoId: RepoId, opts?: { signal?: AbortSignal; skipIfFresh?: boolean }): Promise<void>;
   awaitPendingRefresh(repoId: RepoId): Promise<void>;
-  create(input: { repoId: RepoId; branch: string; baseRef?: string; source?: { kind: "pull"; number: number } }, onEvent?: OnEvent): Promise<Worktree>;
+  create(input: { repoId: RepoId; branch: string; slug?: string; baseRef?: string; source?: { kind: "pull"; number: number } }, onEvent?: OnEvent): Promise<Worktree>;
     // fast: rename lowest slot → private attempt → refresh/checkout/hooks → publish+persist
     // fallback: cloneTree(base, private attempt) → refresh/checkout/hooks → publish+persist
   runPostCreateHooks(worktreeId: WorktreeId, onEvent?: OnEvent): Promise<void>;
@@ -622,6 +630,14 @@ applies it only if the same repo and dialog-open generation are still active, so
 reopening the same repository cannot accept an older completion.
 
 ## 10. Integration notes
+
+- 2026-09-03: Remote-host phase 1 adds optional worktree placement (`host`, absent = `local`),
+  validated host configuration, the unreachable `unknown` session state, and protocol version 1
+  JSON handlers for list/create/delete/kill/status. `src/core/protocol.ts` exports
+  `PROTOCOL_VERSION`; `src/cli/protocol.ts` exports typed commands, responses, error envelopes, and
+  `handleProtocolCommand`. CLI create may supply an explicit slug and clone URL while still using
+  the existing repository reconciliation and worktree publication services. SSH transport, mirrors,
+  remote status polling, proxy sessions, and host-aware TUI actions remain phase 2 work.
 
 - 2026-09-03: Merge reconciliation keeps detached hot-copy preparation from #13 while extending it
   to the numbered pool: each worker copies to its slot staging path, runs prepare hooks, writes the
