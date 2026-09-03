@@ -127,13 +127,18 @@ describe("SessionService.mount", () => {
 
   test("starts the selected agent in the stable cc window", async () => {
     const tmux = createFakeTmux();
-    const { service } = serviceOptions(tmux, { config: configured({ agent: "opencode" }) });
+    const { service } = serviceOptions(tmux, {
+      config: configured({
+        agent: "opencode",
+        agentCommands: { claude: "claude", opencode: "opencode --model sonnet" },
+      }),
+    });
 
     await service.mount(target);
 
     assert.deepEqual(tmux.sentKeys[1], {
       target: `=${target.session}:1`,
-      keys: ["opencode"],
+      keys: ["opencode --model sonnet"],
       enter: true,
     });
   });

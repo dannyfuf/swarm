@@ -45,6 +45,7 @@ describe("config adapter", () => {
     assert.equal(config.hotPoolSize, 1);
     assert.equal(config.hotRefreshIntervalMs, 300000);
     assert.equal(config.agent, "claude");
+    assert.deepEqual(config.agentCommands, { claude: "claude", opencode: "opencode" });
     assert.equal(config.sleep.graceMs, 75);
     assert.equal(config.sleep.enabled, true);
     assert.deepEqual(config.sleep.keepAlive, defaultConfig(home).sleep.keepAlive);
@@ -53,6 +54,23 @@ describe("config adapter", () => {
     assert.equal(config.github.prTtlSeconds, 90);
     assert.equal(config.github.cloneProtocol, "ssh");
     assert.equal(config.ui.statusRefreshMs, 5000);
+  });
+
+  test("fills defaults around a partial agent command map", async () => {
+    const files = createFakeFiles({
+      texts: {
+        [configPath]: JSON.stringify({
+          ...defaultConfig(home),
+          agentCommands: { claude: "claude --dangerously-skip-permissions" },
+        }),
+      },
+    });
+    const store = createConfigStore(files, configPath, home, createNullLogger());
+
+    assert.deepEqual((await store.load()).agentCommands, {
+      claude: "claude --dangerously-skip-permissions",
+      opencode: "opencode",
+    });
   });
 
   test("normalizes legacy agent window commands in memory", async () => {
@@ -93,12 +111,20 @@ describe("config adapter", () => {
   test("validates and atomically saves config", async () => {
     const files = createFakeFiles();
     const store = createConfigStore(files, configPath, home, createNullLogger());
-    const config = { ...defaultConfig(home), reposDir: "/repos" };
+    const config = {
+      ...defaultConfig(home),
+      reposDir: "/repos",
+      agentCommands: {
+        claude: "claude --dangerously-skip-permissions",
+        opencode: "opencode --model sonnet",
+      },
+    };
 
     await store.save(config);
 
     assert.deepEqual(JSON.parse(files.texts.get(resolve(configPath)) ?? ""), config);
     assert.equal(files.calls.at(-1)?.method, "writeTextAtomic");
+    assert.deepEqual(await store.load(), config);
   });
 
   test("reports invalid config as a validation error", async () => {

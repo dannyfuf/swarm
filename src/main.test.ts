@@ -1,7 +1,15 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { SwarmError } from "./core/errors.ts";
-import { exitTuiProcess, formatUnmountReport, parseArgv, resolveAgentName } from "./main.ts";
+import { defaultConfig } from "./core/types.ts";
+import {
+  exitTuiProcess,
+  formatUnmountReport,
+  parseArgv,
+  resolveAgentName,
+  runAgentCommand,
+} from "./main.ts";
+import { createFakeTmux } from "./testing/fakeTmux.ts";
 
 describe("CLI parsing", () => {
   test("defaults to the TUI and recognizes simple commands", () => {
@@ -69,4 +77,33 @@ describe("CLI parsing", () => {
     assert.deepEqual(events.slice(0, 2).sort(), ["stderr", "stdout"]);
     assert.equal(events[2], "exit:7");
   });
+});
+
+test("agent popup starts the requested agent with its configured command", async () => {
+  const tmux = createFakeTmux();
+  const configValue = defaultConfig("/home/test/.swarm");
+  configValue.agentCommands.opencode = "opencode --model sonnet";
+  const attached: Array<{ session: string; env: NodeJS.ProcessEnv }> = [];
+
+  const exitCode = await runAgentCommand(
+    { tmux, configValue },
+    "opencode",
+    { TMUX: "/tmp/tmux/default,123,0" },
+    async (session, env) => {
+      attached.push({ session, env });
+      return 7;
+    },
+  );
+
+  assert.equal(exitCode, 7);
+  assert.deepEqual(tmux.sentKeys, [
+    {
+      target: "=swarm-agent-opencode:0",
+      keys: ["opencode --model sonnet"],
+      enter: true,
+    },
+  ]);
+  assert.deepEqual(attached, [
+    { session: "swarm-agent-opencode", env: { TMUX: "/tmp/tmux/default,123,0" } },
+  ]);
 });

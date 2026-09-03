@@ -83,6 +83,10 @@ fields are merged with these defaults:
   "hotFreshnessMs": 60000,
   "hotRefreshIntervalMs": 300000,
   "agent": "claude",
+  "agentCommands": {
+    "claude": "claude",
+    "opencode": "opencode"
+  },
   "windows": [
     { "name": "nvim", "command": "nvim ." },
     { "name": "cc", "command": "{agent}" },
@@ -107,14 +111,16 @@ fields are merged with these defaults:
 the file is loaded. `hotPoolSize` is a non-negative integer (default `1`); `0` disables prepared
 copies. `hotFreshnessMs` controls how long a prepared copy's marker may suppress a fetch, and
 `hotRefreshIntervalMs` controls periodic refreshes (`0` disables the timer). All three are
-non-negative integers. `agent` selects `"claude"` or `"opencode"`; it can also be changed in the
-`,` settings dialog. `windows` defines tmux window order and startup commands, and `{agent}` in
-a command resolves to the selected agent when a worktree session is mounted. Process
+non-negative integers. `agent` selects `"claude"` or `"opencode"`. `agentCommands` maps each agent
+to the full shell command used to start it and defaults to the agent name; missing map entries are
+filled independently. The `,` settings dialog edits both the selected agent and its start command.
+`windows` defines tmux window order and startup commands, and `{agent}` in a command resolves to
+the selected agent's configured command when a worktree session is mounted. Process
 `keepAlive` patterns are case-insensitive regular expressions; `listening-port` preserves any
 window whose process tree owns a listening TCP port. `github.cloneProtocol` accepts `"ssh"`
 (the default) or `"https"` and controls the URL used and stored when cloning GitHub repos.
-Running `swarm agent` without a name also uses the configured agent; an explicit name overrides
-it for that popup.
+Running `swarm agent` without a name uses the configured agent; an explicit name selects the other
+agent while still using that agent's entry from `agentCommands`.
 
 Each repo record has `hooks.prepare` and `hooks.postCreate` string arrays. Prepare hooks run in a
 staging prepared copy before it is published (and in fallback copies after clone). A refresh that

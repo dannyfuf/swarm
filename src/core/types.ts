@@ -158,6 +158,18 @@ export const AGENT_NAMES = ["claude", "opencode"] as const;
 export const AgentNameSchema = z.enum(AGENT_NAMES);
 export type AgentName = z.infer<typeof AgentNameSchema>;
 
+export const DEFAULT_AGENT_COMMANDS = Object.fromEntries(
+  AGENT_NAMES.map((agent) => [agent, agent]),
+) as Record<AgentName, string>;
+
+const agentCommandsShape = Object.fromEntries(
+  AGENT_NAMES.map((agent) => [agent, z.string().min(1).default(agent)]),
+) as Record<AgentName, z.ZodDefault<z.ZodString>>;
+
+export const AgentCommandsSchema = z
+  .object(agentCommandsShape)
+  .default({ ...DEFAULT_AGENT_COMMANDS });
+
 export function isAgentName(value: string | undefined): value is AgentName {
   return AgentNameSchema.safeParse(value).success;
 }
@@ -192,6 +204,7 @@ export const ConfigSchema = z.object({
   hotFreshnessMs: z.number().int().nonnegative().default(60000),
   hotRefreshIntervalMs: z.number().int().nonnegative().default(300000),
   agent: AgentNameSchema.default("claude"),
+  agentCommands: AgentCommandsSchema,
   windows: z.array(WindowSpecSchema),
   sleep: SleepPolicySchema,
   github: z
@@ -215,12 +228,24 @@ export const DEFAULT_WINDOWS: WindowSpec[] = [
   { name: "lg", command: "lazygit" },
 ];
 
-export function resolveWindowCommand(spec: WindowSpec, agent: AgentName): WindowSpec {
-  return { ...spec, command: spec.command.replaceAll("{agent}", agent) };
+export function agentCommand(
+  config: Pick<Config, "agent" | "agentCommands">,
+  agent: AgentName = config.agent,
+): string {
+  return config.agentCommands[agent].trim() || agent;
 }
 
-export function resolveWindows(config: Pick<Config, "agent" | "windows">): WindowSpec[] {
-  return config.windows.map((spec) => resolveWindowCommand(spec, config.agent));
+export function resolveWindowCommand(
+  spec: WindowSpec,
+  config: Pick<Config, "agent" | "agentCommands">,
+): WindowSpec {
+  return { ...spec, command: spec.command.replaceAll("{agent}", agentCommand(config)) };
+}
+
+export function resolveWindows(
+  config: Pick<Config, "agent" | "agentCommands" | "windows">,
+): WindowSpec[] {
+  return config.windows.map((spec) => resolveWindowCommand(spec, config));
 }
 
 export const DEFAULT_KEEP_ALIVE: KeepAliveRule[] = [
@@ -263,6 +288,7 @@ export function defaultConfig(home: string): Config {
     hotFreshnessMs: 60000,
     hotRefreshIntervalMs: 300000,
     agent: "claude",
+    agentCommands: { ...DEFAULT_AGENT_COMMANDS },
     windows: DEFAULT_WINDOWS.map((window) => ({ ...window })),
     sleep: {
       enabled: true,
