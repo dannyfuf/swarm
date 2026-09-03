@@ -45,6 +45,24 @@ describe("shell adapter", () => {
     }
   });
 
+  test("tracks a detached logged command through its exit", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "swarm-detached-hook-"));
+    const logPath = join(cwd, "swarm.log");
+    try {
+      const shell = createShell(createNullLogger());
+      const code = await shell.runDetachedLogged(
+        process.execPath,
+        ["-e", 'process.stdout.write("hook output\\n"); process.exitCode = 7'],
+        { cwd, logPath },
+      );
+
+      assert.equal(code, 7);
+      assert.equal(await readFile(logPath, "utf8"), "hook output\n");
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
   test("collects UTF-8 output, writes input, merges env, and streams stderr lines", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "swarm-shell-"));
     try {

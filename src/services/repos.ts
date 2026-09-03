@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { SwarmError } from "../core/errors.ts";
 import { fuzzyFilter } from "../core/fuzzy.ts";
-import { hotCopyPath, hotCopyStagingPath, repoId as makeRepoId, repoPath } from "../core/paths.ts";
+import { repoId as makeRepoId, repoPath } from "../core/paths.ts";
 import type {
   Clock,
   ConfigPort,
@@ -258,7 +258,7 @@ export function createRepoService({
                 defaultBranch,
                 path: clone.path,
                 clonedAt: clock.now().toISOString(),
-                hooks: { postCreate: [] },
+                hooks: { prepare: [], postCreate: [] },
               };
               next.repos.push(created);
             }
@@ -306,58 +306,54 @@ export function createRepoService({
 
     async delete(repoId, onEvent) {
       let moved: { source: string; trash: string } | undefined;
-      let preparedCopyPaths: string[] = [];
+      let trashPath: string | undefined;
       try {
-        const trashPath = await mutateState(state, async (next) => {
-          const repo = next.repos.find((candidate) => candidate.id === repoId);
-          if (!repo) throw new SwarmError("not-found", `Repository not found: ${repoId}`);
+        const initial = await loadState();
+        if (!initial.repos.some((repo) => repo.id === repoId)) {
+          throw new SwarmError("not-found", `Repository not found: ${repoId}`);
+        }
+        await worktreeService.coordinateRepoDeletion(repoId, async () => {
+          trashPath = await mutateState(state, async (next) => {
+            const repo = next.repos.find((candidate) => candidate.id === repoId);
+            if (!repo) throw new SwarmError("not-found", `Repository not found: ${repoId}`);
 
-          let loadedConfig: Config;
-          try {
-            loadedConfig = await config.load();
-          } catch (error) {
-            throw toSwarmError(error, "fs", "Failed to load swarm configuration");
-          }
-          assertRepoPath(repo, loadedConfig);
-          preparedCopyPaths = [
-            hotCopyPath(loadedConfig.worktreesDir, repo.id),
-            hotCopyStagingPath(loadedConfig.worktreesDir, repo.id),
-          ];
+            let loadedConfig: Config;
+            try {
+              loadedConfig = await config.load();
+            } catch (error) {
+              throw toSwarmError(error, "fs", "Failed to load swarm configuration");
+            }
+            assertRepoPath(repo, loadedConfig);
 
-          const progress = forwardProgress(onEvent);
-          for (const worktree of next.worktrees.filter(
-            (candidate) => candidate.repoId === repoId,
-          )) {
-            await worktreeService.delete(worktree.id, progress);
-          }
+            const progress = forwardProgress(onEvent);
+            for (const worktree of next.worktrees.filter(
+              (candidate) => candidate.repoId === repoId,
+            )) {
+              await worktreeService.delete(worktree.id, progress);
+            }
 
-          const trashPath = join(
-            home ?? dirname(loadedConfig.reposDir),
-            "trash",
-            `${clock.now().getTime()}-${repo.name}`,
-          );
-          try {
-            await files.ensureDir(dirname(trashPath));
-            await files.move(repo.path, trashPath);
-            moved = { source: repo.path, trash: trashPath };
-          } catch (error) {
-            throw toSwarmError(error, "fs", `Failed to trash repository: ${repoId}`);
-          }
+            const nextTrashPath = join(
+              home ?? dirname(loadedConfig.reposDir),
+              "trash",
+              `${clock.now().getTime()}-${repo.name}`,
+            );
+            try {
+              await files.ensureDir(dirname(nextTrashPath));
+              await files.move(repo.path, nextTrashPath);
+              moved = { source: repo.path, trash: nextTrashPath };
+            } catch (error) {
+              throw toSwarmError(error, "fs", `Failed to trash repository: ${repoId}`);
+            }
 
-          next.repos = next.repos.filter((candidate) => candidate.id !== repoId);
-          return trashPath;
+            next.repos = next.repos.filter((candidate) => candidate.id !== repoId);
+            return nextTrashPath;
+          });
         });
         moved = undefined;
+        if (!trashPath) throw new SwarmError("fs", `Failed to trash repository: ${repoId}`);
         await files.removeDetached(trashPath).catch((error: unknown) => {
           logger.error(`Failed to remove trashed repository: ${repoId}`, error);
         });
-        await Promise.all(
-          preparedCopyPaths.map((path) =>
-            files.removeDetached(path).catch((error: unknown) => {
-              logger.error(`Failed to remove prepared copy for: ${repoId}`, error);
-            }),
-          ),
-        );
         onEvent?.({ type: "done" });
       } catch (error) {
         if (moved) {

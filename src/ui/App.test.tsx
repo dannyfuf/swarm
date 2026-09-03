@@ -279,8 +279,11 @@ test("ctrl-c asks the host to quit while a dialog is open", async () => {
   }
 });
 
-test("n opens the create-worktree dialog seeded with known base refs", async () => {
+test("n opens immediately, starts pre-fetch, and updates the branch picker", async () => {
   const harness = await mount();
+  harness.controller.refreshPreparedCopy = (repoId) => {
+    harness.controller.preparedCopyRefreshes.push(repoId);
+  };
   try {
     harness.setup.mockInput.pressKey("n");
     await harness.setup.flush();
@@ -288,8 +291,28 @@ test("n opens the create-worktree dialog seeded with known base refs", async () 
     assert.equal(dialog?.kind, "create-worktree");
     if (dialog?.kind === "create-worktree") {
       assert.ok(dialog.branches.includes("origin/main"));
+      assert.equal(dialog.fetching, true);
     }
+    assert.equal(harness.controller.preparedCopyRefreshes[0], dialog?.repoId);
     assert.ok(harness.frame().includes("New worktree"));
+    assert.ok(harness.frame().includes("fetching…"));
+
+    harness.store.dispatch({
+      type: "updateCreateWorktreeBranches",
+      repoId: dialog?.kind === "create-worktree" ? dialog.repoId : "bukhr/payroll",
+      generation: dialog?.kind === "create-worktree" ? dialog.generation : 0,
+      branches: ["origin/newly-fetched"],
+      fetching: false,
+    });
+    await harness.setup.flush();
+    const updated = harness.store.getState().dialog;
+    assert.equal(updated?.kind, "create-worktree");
+    if (updated?.kind === "create-worktree") {
+      assert.ok(updated.branches.includes("origin/newly-fetched"));
+      assert.equal(updated.fetching, false);
+    }
+    assert.ok(harness.frame().includes("origin/newly-fetched"));
+    assert.ok(!harness.frame().includes("fetching…"));
   } finally {
     harness.stop();
   }

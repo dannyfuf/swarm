@@ -64,6 +64,7 @@ export function App({ store, controller, onExit, home = process.env.HOME ?? "" }
   const repoScroll = useRef(0);
   const worktreeScroll = useRef(0);
   const prScroll = useRef(0);
+  const dialogGeneration = useRef(0);
 
   const worktrees = visibleWorktrees(state);
   repoScroll.current = nextScroll(
@@ -206,17 +207,17 @@ export function App({ store, controller, onExit, home = process.env.HOME ?? "" }
           notify("Select a repo in the left pane first");
           return;
         }
-        guard(async () => {
-          const remoteBranches = await controller.remoteBranches(repo.id);
-          store.dispatch({
-            type: "openDialog",
-            dialog: {
-              kind: "create-worktree",
-              repoId: repo.id,
-              branches: [...new Set([...remoteBranches, ...knownBaseRefs(current, repo)])],
-            },
-          });
+        store.dispatch({
+          type: "openDialog",
+          dialog: {
+            kind: "create-worktree",
+            repoId: repo.id,
+            generation: ++dialogGeneration.current,
+            branches: knownBaseRefs(current, repo),
+            fetching: true,
+          },
         });
+        controller.refreshPreparedCopy(repo.id);
         return;
       }
       case "newContext":

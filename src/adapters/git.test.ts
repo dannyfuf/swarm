@@ -16,6 +16,7 @@ describe("git adapter", () => {
           }
           if (args[0] === "branch") return { stdout: "feature/x\n" };
           if (args[0] === "status") return { stdout: "?? new.txt\n" };
+          if (args[0] === "rev-parse") return { stdout: "0123456789abcdef\n" };
           return {};
         },
       },
@@ -28,11 +29,13 @@ describe("git adapter", () => {
       "/logs/clone.log",
     );
     await git.fetch("/repos/repo", { prune: true });
+    await git.fetchRefs("/repos/repo", "origin", ["main", "feature/x"]);
     await git.resetToRemote("/repos/repo", "main");
     await git.checkoutNewBranch("/work/repo", "feature/new", "origin/main");
     await git.checkoutTracking("/work/repo", "feature/x");
     await git.fetchPullHead("/work/repo", 42, "pr/42");
     assert.deepEqual(await git.remoteBranches("/repos/repo"), ["origin/main", "origin/feature/x"]);
+    assert.equal(await git.revision("/work/repo", "origin/main"), "0123456789abcdef");
     assert.equal(await git.currentBranch("/work/repo"), "feature/x");
     assert.equal(await git.isDirty("/work/repo"), true);
 
@@ -49,6 +52,7 @@ describe("git adapter", () => {
       [
         ["git", ["clone", "--progress", "git@example.test:owner/repo.git", "/repos/repo"]],
         ["git", ["fetch", "--prune", "origin"]],
+        ["git", ["fetch", "origin", "main", "feature/x"]],
         ["git", ["checkout", "-B", "main", "origin/main"]],
         ["git", ["reset", "--hard", "origin/main"]],
         ["git", ["clean", "-fd"]],
@@ -56,6 +60,7 @@ describe("git adapter", () => {
         ["git", ["checkout", "feature/x"]],
         ["git", ["fetch", "origin", "+refs/pull/42/head:refs/heads/pr/42"]],
         ["git", ["for-each-ref", "--format=%(refname:short)", "refs/remotes/origin"]],
+        ["git", ["rev-parse", "--verify", "origin/main"]],
         ["git", ["branch", "--show-current"]],
         ["git", ["status", "--porcelain", "--untracked-files=normal"]],
       ],
@@ -77,6 +82,7 @@ describe("git adapter", () => {
             : { stdout: "refs/remotes/origin/trunk\n" },
       },
       { match: (_cmd, args) => args[0] === "remote", result: {} },
+      { match: (_cmd, args) => args[0] === "show-ref", result: {} },
     ]);
 
     assert.equal(await createGit(shell, createNullLogger()).defaultBranch("/repo"), "trunk");
@@ -86,8 +92,33 @@ describe("git adapter", () => {
         ["symbolic-ref", "refs/remotes/origin/HEAD"],
         ["remote", "set-head", "origin", "--auto"],
         ["symbolic-ref", "refs/remotes/origin/HEAD"],
+        ["show-ref", "--verify", "--quiet", "refs/remotes/origin/trunk"],
       ],
     );
+  });
+
+  test("repairs a dangling origin HEAD before resolving the real default", async () => {
+    let symbolicCalls = 0;
+    const shell = createFakeShell([
+      {
+        match: (_cmd, args) => args[0] === "symbolic-ref",
+        result: () => ({
+          stdout:
+            ++symbolicCalls === 1 ? "refs/remotes/origin/deleted\n" : "refs/remotes/origin/main\n",
+        }),
+      },
+      { match: (_cmd, args) => args[0] === "remote", result: {} },
+    ]);
+
+    const branch = await createGit(shell, createNullLogger()).defaultBranch(
+      "/repo",
+      "deleted",
+      undefined,
+      ["origin/main"],
+    );
+
+    assert.equal(branch, "main");
+    assert.ok(shell.calls.some(({ args }) => args.join(" ") === "remote set-head origin --auto"));
   });
 
   test("prefers a hinted remote branch, then main, then master", async () => {

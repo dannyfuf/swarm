@@ -15,6 +15,8 @@ change a contract without recording it in `INTEGRATION NOTES`.
 - **Worktree**: a copy-on-write copy of the base (`worktreesDir/<owner>/<name>/<slug>`)
   with its own branch, and exactly one tmux session named `<name>/<slug>`.
   Not a `git worktree`: a full independent copy (APFS `cp -c` clonefile / reflink).
+- **Prepared-copy pool**: zero or more pristine-base copies with repo `prepare` hooks already run.
+  Creation claims the lowest slot by rename and immediately replenishes it from the base clone.
 - **Mount** a worktree = ensure its tmux session exists with the configured windows
   (default: `nvim`, `cc` → `claude`, `lg` → `lazygit`) and switch the client to it.
 - **Unmount / sleep** a worktree = apply the sleep policy to its session: keep windows whose
@@ -33,8 +35,13 @@ change a contract without recording it in `INTEGRATION NOTES`.
   state.json                   registry (State schema); atomic writes (tmp + rename)
   repos/<owner>/<name>/        pristine base clones           (config.reposDir)
   worktrees/<owner>/<name>/<slug>/   worktree copies           (config.worktreesDir)
-  worktrees/<owner>/<name>/.hot/     prepared next copy (single-slot pool)
-  worktrees/<owner>/<name>/.hot.staging/  incomplete pool rebuild, never consumed
+  worktrees/<owner>/<name>/<slug>.creating-<uuid>/  private create attempt, never registered
+  worktrees/<owner>/<name>/.hot/     prepared copy slot 0 (backward-compatible name)
+    .git/swarm-hot.json         freshness marker: fetchedAt, defaultBranch, origin SHA, prepare-hook fingerprint
+  worktrees/<owner>/<name>/.hot.staging/  incomplete slot 0 rebuild, never consumed
+  worktrees/<owner>/<name>/.hot.<n>/       prepared copy slot n, n >= 1
+  worktrees/<owner>/<name>/.hot.<n>.staging/ incomplete slot n rebuild, never consumed
+  worktrees/<owner>/<name>/<slug>/.git/swarm-creating.json  publish intent, removed after state commit
   trash/<epochms>-<slug>/      deleted worktrees/repos land here by rename, rm -rf runs detached
   cache/github/<owner>.json    cached `gh repo list` results with fetchedAt
   logs/swarm.log               append-only log (adapters + operations)
@@ -107,7 +114,10 @@ export const RepoSchema = z.object({
   defaultBranch: z.string(),     // detected after clone (origin/HEAD)
   path: z.string(),              // absolute base clone path
   clonedAt: z.string().datetime(),
-  hooks: z.object({ postCreate: z.array(z.string()).default([]) }).default({ postCreate: [] }),
+  hooks: z.object({
+    prepare: z.array(z.string()).default([]),
+    postCreate: z.array(z.string()).default([]),
+  }).default({ prepare: [], postCreate: [] }),
 });
 
 export const CloneJobSchema = z.object({
@@ -153,6 +163,9 @@ export const SleepPolicySchema = z.object({
 export const ConfigSchema = z.object({
   version: z.literal(1),
   reposDir: z.string(), worktreesDir: z.string(),       // absolute; defaults under SWARM_HOME
+  hotPoolSize: z.number().int().nonnegative().default(1),
+  hotFreshnessMs: z.number().int().nonnegative().default(60000),
+  hotRefreshIntervalMs: z.number().int().nonnegative().default(300000),
   windows: z.array(WindowSpecSchema),                     // default nvim/cc/lg
   sleep: SleepPolicySchema,
   github: z.object({
@@ -185,7 +198,7 @@ Pure helpers (`src/core/paths.ts`):
 - `sessionName(repoName, slug)` → `${repoName}/${slug}` with `.` and `:` replaced by `-` (tmux forbids them)
 - `repoId(owner, name)`, `worktreeId(repoId, slug)`, `parseWorktreeId(id)`
 - `repoPath(config, owner, name)`, `worktreePath(config, owner, name, slug)`
-- `hotCopyPath(worktreesDir, repoId)`, `hotCopyStagingPath(worktreesDir, repoId)`
+- `hotCopyPath(worktreesDir, repoId, slot = 0)`, `hotCopyStagingPath(worktreesDir, repoId, slot = 0)`
 
 ## 5. Ports (`src/core/ports.ts`)
 
@@ -196,6 +209,7 @@ export interface ShellResult { code: number; stdout: string; stderr: string }
 export interface RunOptions { cwd?: string; env?: Record<string,string>; input?: string; timeoutMs?: number; signal?: AbortSignal; onStderrLine?: (line: string) => void }
 export interface Shell {
   run(cmd: string, args: string[], opts?: RunOptions): Promise<ShellResult>;           // never throws on non-zero exit
+  runDetachedLogged(cmd: string, args: string[], opts: { cwd: string; logPath: string }): Promise<number>; // detached+unref, file-backed stdout/stderr, resolves on exit
   spawnDetached(cmd: string, args: string[], opts?: { cwd?: string; logPath?: string }): Promise<number>; // new process group, ignored stdin, optional file-backed stdout/stderr, unref
   exec(cmd: string, args: string[]): Promise<never>;                                   // replace current process stdio (tmux attach outside tmux)
 }
@@ -204,11 +218,14 @@ export interface Logger { info(msg: string, data?: unknown): void; warn(...): vo
 export interface GitPort {
   cloneDetached(url: string, dest: string, logPath: string): Promise<number>;
   fetch(repoPath: string, opts?: { prune?: boolean; signal?: AbortSignal }): Promise<void>;
-  defaultBranch(repoPath: string): Promise<string>;                 // from refs/remotes/origin/HEAD, fallback main/master
-  resetToRemote(repoPath: string, branch: string): Promise<void>;   // checkout -B branch origin/branch && reset --hard origin/branch && clean -fd
+  fetchRefs(repoPath: string, remote: string, refs: string[], signal?: AbortSignal): Promise<void>;
+  defaultBranch(repoPath: string, hint?: string, signal?: AbortSignal, knownRemoteBranches?: string[]): Promise<string>; // origin/HEAD, fallback hint/main/master/known refs
+  resetToRemote(repoPath: string, branch: string, signal?: AbortSignal): Promise<void>; // checkout -B + reset --hard + clean -fd
   checkoutNewBranch(path: string, branch: string, from: string): Promise<void>;  // checkout -b branch from
   checkoutTracking(path: string, branch: string): Promise<void>;    // checkout branch (tracks origin/branch)
-  remoteBranches(repoPath: string): Promise<string[]>;             // "origin/x" names, without HEAD
+  fetchPullHead(path: string, number: number, localBranch: string): Promise<void>;
+  remoteBranches(repoPath: string, signal?: AbortSignal): Promise<string[]>; // "origin/x" names, without HEAD
+  revision(path: string, ref: string, signal?: AbortSignal): Promise<string>; // rev-parse --verify
   currentBranch(path: string): Promise<string>;
   isDirty(path: string, opts?: { signal?: AbortSignal }): Promise<boolean>;
 }
@@ -221,7 +238,7 @@ export interface FilesPort {
   removeDetached(p: string): Promise<void>;              // spawnDetached rm -rf
   readText(p: string): Promise<string | null>;
   writeTextAtomic(p: string, text: string): Promise<void>;
-  listDirs(p: string): Promise<string[]>;                // sorted directories, excluding .hot* pool entries
+  listDirs(p: string, opts?: { includeReserved?: boolean }): Promise<string[]>; // sorted directories; .hot* excluded unless requested
 }
 export interface TmuxPane { id: string; pid: number; currentCommand: string; currentPath: string }
 export interface TmuxWindow { session: string; index: number; name: string; active: boolean; panes: TmuxPane[] }
@@ -268,6 +285,7 @@ Long-running operations report progress through `OpEvent` callbacks; they never 
 export type OpEvent =
   | { type: "step"; label: string }              // "Fetching origin", "Copying tree", "Creating branch"
   | { type: "log"; line: string }
+  | { type: "prepared-copy-claimed"; repoId: RepoId }
   | { type: "done" } | { type: "error"; error: SwarmError };
 export type OnEvent = (e: OpEvent) => void;
 
@@ -287,12 +305,17 @@ export interface RepoService {
   delete(repoId: RepoId, onEvent?: OnEvent): Promise<void>;                    // kills sessions, trashes worktrees + base
 }
 export interface WorktreeService {
+  reconcileCreating(): Promise<void>;
+  coordinateRepoDeletion(repoId: RepoId, action: () => Promise<void>): Promise<void>;
   list(repoId?: RepoId): Promise<Worktree[]>;
-  remoteBranches(repoId: RepoId): Promise<string[]>;
-  prepareHotCopy(repoId: RepoId, onEvent?: OnEvent): Promise<void>;
-  create(input: { repoId: RepoId; branch: string; baseRef?: string }, onEvent?: OnEvent): Promise<Worktree>;
-    // fast: move .hot → refresh destination → checkout branch → hooks.postCreate → persist
-    // fallback: fetch base → resetToRemote(default) → cloneTree → checkout branch → hooks.postCreate → persist
+  remoteBranches(repoId: RepoId): Promise<string[]>; // lowest existing slot, else base
+  prepareHotCopy(repoId: RepoId, onEvent?: OnEvent, opts?: { signal?: AbortSignal }): Promise<void>;
+  refreshPreparedCopy(repoId: RepoId, opts?: { signal?: AbortSignal; skipIfFresh?: boolean }): Promise<void>;
+  awaitPendingRefresh(repoId: RepoId): Promise<void>;
+  create(input: { repoId: RepoId; branch: string; baseRef?: string; source?: { kind: "pull"; number: number } }, onEvent?: OnEvent): Promise<Worktree>;
+    // fast: rename lowest slot → private attempt → refresh/checkout/hooks → publish+persist
+    // fallback: cloneTree(base, private attempt) → refresh/checkout/hooks → publish+persist
+  runPostCreateHooks(worktreeId: WorktreeId, onEvent?: OnEvent): Promise<void>;
   delete(worktreeId: WorktreeId, onEvent?: OnEvent): Promise<void>;           // killSession → move to trash → removeDetached → persist
   touch(worktreeId: WorktreeId): Promise<void>;                                // lastOpenedAt = now
 }
@@ -323,25 +346,92 @@ directory is removed. `github.cloneProtocol` selects
 
 ### Hot-copy pool
 
-Each registered repository has a naive, single-slot pool at
-`worktreesDir/<owner>/<repo>/.hot`. Creation consumes the slot with an atomic rename into the
-requested destination, refreshes that independent clone to the latest resolved default branch,
-then performs the normal branch checkout, hooks, and persistence workflow. If no prepared copy
-exists, creation falls back to refreshing and copying the pristine base clone exactly as before.
+Each registered repository has `config.hotPoolSize` prepared-copy slots. Slot 0 is `.hot`; slots
+1 and above are `.hot.<n>`. Every creation owns a unique sibling
+`<slug>.creating-<uuid>` directory. It attempts to rename each pool slot into that private path in
+order; `ENOENT` means another creator won that slot, so it tries the next one. If every slot is
+gone, it clones the possibly stale base into the private path. Git work and `hooks.prepare` happen
+there. Only the final state mutation, after repeating all conflict checks and checking the final
+path, renames the attempt to `<slug>` and registers it. A loser trashes only its private attempt,
+never the canonical destination. Claims emit `prepared-copy-claimed` immediately for refill.
+`hotPoolSize: 0` disables prepared copies. The base is never refreshed on the interactive path.
 
-Pool rebuilds refresh the base clone outside the long-lived state mutation lock, copy it into
-`.hot.staging`, and publish it as `.hot` only after the copy completes. Concurrent rebuilds for
-one repo share an in-memory promise. The controller schedules rebuilds after every creation
-attempt, after clone reconciliation promotes a new repo, and after initial state hydration;
-rebuild failures remain visible background-operation errors and do not block later fallback
-creation. Reserved `.hot*` directory names are excluded from worktree directory listings and are
-removed with their repository.
+Prepared copies carry `.git/swarm-hot.json` with
+`{fetchedAt, defaultBranch, sha, prepareFingerprint}`; the fingerprint is SHA-256 over the current
+ordered `hooks.prepare` command list. A marker
+younger than `config.hotFreshnessMs` suppresses the network fetch only when its branch and SHA
+still match the local remote ref and its hook fingerprint matches; missing, stale, invalid,
+unverifiable, or differently prepared markers refresh. Refresh removes the marker before any
+fetch/reset/clean/hook work and writes it only after preparation completes, so cancellation or
+failure leaves the slot stale. A fingerprint mismatch discards the slot and rebuilds it via its
+`.staging` path from the pristine base, removing ignored artifacts from changed or deleted hooks.
+Other refreshes rerun `hooks.prepare` after a reset before restoring the marker. After
+either choice, creation compares `HEAD` with `origin/<default>` and checks porcelain status,
+skipping checkout/reset/clean only when both revisions match and the tree is clean. Stale paths
+explicitly fetch remote-tracking refspecs. A named branch always attempts a combined default +
+requested-branch fetch, including an explicitly selected non-default `origin/<base>` refspec, then
+relists refs. If the combined fetch fails it fetches every required base ref separately and treats
+only the requested branch as optional; an unavailable selected base fails creation instead of using
+a stale cached ref. Every PR creation, including same-repository PRs, fetches
+`+refs/pull/<n>/head:refs/heads/<local-branch>` before checkout. Every reported operation step
+emits a duration to both the operation log and `logs/swarm.log`.
+
+Default-branch resolution trusts `refs/remotes/origin/HEAD` only when its target exists among known
+remote branches (or passes `show-ref`). A dangling target triggers `git remote set-head origin
+--auto`, a re-read, and then the existing hint/main/master/first-remote fallback chain.
+
+Each replenish fills only the lowest empty slot. It refreshes the base clone outside the state
+mutation lock, copies into the matching staging path, runs `hooks.prepare` there, writes the marker,
+and publishes with a rename only after all preparation finishes. Hook failures are warnings and do
+not prevent publication. Concurrent rebuilds for one repo share an in-memory promise. Startup asks
+for enough replenishments to fill each configured pool while a two-worker semaphore limits active
+repositories; clone promotion and creation also schedule replenishment. Reserved `.hot*` directory
+names are excluded from normal worktree directory listings. Replenishment/startup enumerates the
+repo worktree root and removes numbered slots beyond the configured size; repository deletion uses
+the same discovery rule to remove `.hot`, `.hot.<n>`, and their `.staging` variants regardless of
+the current pool size. Repository deletion first marks the repo as deleting, rejects new
+prepare/refresh requests, aborts and awaits existing work, then discovers and removes every slot
+while holding the repo mutex. Preparation rechecks both the deleting flag and repository
+registration immediately before publishing staging to a slot.
+
+One in-process async mutex per repository serializes slot claims, preparation, each prepared-slot
+refresh, base refresh/reset, and clone-from-base staging. Post-claim Git work in a private attempt
+does not hold it. This mutex intentionally does not coordinate separate swarm OS processes;
+cross-process exclusion is limited to the final state lock and destination conflict checks.
+
+`refreshPreparedCopy(repoId, {signal, skipIfFresh})` full-fetches, resets, and rewrites the marker
+for every existing configured slot, sequentially; when no slot exists it refreshes the base.
+`skipIfFresh` returns without Git I/O only when every existing slot marker is younger than
+`hotFreshnessMs` and fingerprints match. A skip-if-fresh caller joins any active refresh; a forced
+caller arriving behind a skip-mode run queues one forced run immediately after it. Shared work owns
+its AbortController: aborting a caller detaches only that caller and cancels the shared operation
+only after the last interested caller aborts. `awaitPendingRefresh(repoId)` exposes the whole
+in-flight boundary. The controller gives refresh/preparation work a lifecycle signal and aborts it
+from `dispose()`. The production controller runs a sequential periodic refresh every
+`hotRefreshIntervalMs`; `0` disables it and tests opt in.
+
+Creation registers the worktree before post-create work. The controller then starts
+`runPostCreateHooks(worktreeId, onEvent)` as `Post-create hooks · <slug>`, using a distinct operation
+target so the registered worktree remains openable. One detached `sh` runner owns the complete
+ordered sequence with stdin ignored and stdout/stderr appended to `logs/swarm.log`; it is unrefed so
+it cannot keep an exited TUI alive, while a live TUI still tracks its exit. The runner writes
+per-hook start/end/exit/duration records. The live TUI
+parses those records into command, step, duration, and warning lines. The runner continues after a
+hook fails, preserving warning semantics, and failures never undo registration.
 
 All service state changes go through `src/services/stateMutation.ts`. It delegates to the
 state adapter's transactional `mutate` extension when available; that adapter holds an
 exclusive `state.json.lock` across the complete load-modify-save sequence, serializing both
 in-process and cross-process writers, and writes the result atomically. Test ports without
-`mutate` use a per-port in-process promise chain.
+`mutate` use a per-port in-process promise chain. Worktree creation performs preflight, copy,
+git operations, and prepare hooks outside that lock. The final transaction re-runs the shared slug,
+session, and registered-path conflict checks against fresh state, updates the default branch,
+and appends the record. Immediately before attempt-to-destination rename, creation writes
+`.git/swarm-creating.json` containing id, repo, branch, base ref, and timestamp; it removes the marker
+only after the state write commits. Controller startup scans registered repository roots before
+hydration: complete intents whose checked-out branch matches are registered, while invalid or
+mismatched intents move through trash. A destination carrying an unregistered intent is reclaimable
+during create preflight. Normal state-write failures still roll the published path back.
 
 Sleep policy algorithm (`SessionService.unmount`):
 1. `windows = tmux.listWindows(session)`; `procs = process.snapshot()`.
@@ -364,7 +454,7 @@ export type Pane = "repos" | "worktrees";
 export type Mode = "normal" | "filter" | "dialog";
 export type DialogKind =
   | { kind: "confirm"; title: string; body: string[]; danger?: boolean; confirmLabel?: string; onConfirm: () => void }
-  | { kind: "create-worktree"; repoId: RepoId; branches: string[] }
+  | { kind: "create-worktree"; repoId: RepoId; generation: number; branches: string[]; fetching: boolean }
   | { kind: "clone-repo"; contextId: ContextId }
   | { kind: "context-form"; contextId?: ContextId }
   | { kind: "assign-context"; repoId: RepoId }
@@ -397,6 +487,7 @@ export type Action =                                    // pure reducer in src/a
   | { type: "focus"; pane: Pane } | { type: "setMode"; mode: Mode }
   | { type: "setFilter"; filter: string } | { type: "setContext"; contextId: ContextId }
   | { type: "openDialog"; dialog: DialogKind } | { type: "closeDialog" }
+  | { type: "updateCreateWorktreeBranches"; repoId: RepoId; generation: number; branches?: string[]; fetching: boolean }
   | { type: "opStart"; op: Operation } | { type: "opStep"; id: string; step: string; line?: string } | { type: "opEnd"; id: string }
   | { type: "toast"; toast: Toast } | { type: "dismissToast"; id: string }
   | { type: "setError"; error?: string }
@@ -414,6 +505,7 @@ export interface Controller {                           // src/app/controller.ts
   sleepSelected(): Promise<void>; killSelected(): Promise<void>;
   createWorktree(input: { repoId: RepoId; branch: string; baseRef?: string }): Promise<void>;
   remoteBranches(repoId: RepoId): Promise<string[]>;
+  refreshPreparedCopy(repoId: RepoId): void;              // fire-and-forget dialog pre-fetch
   deleteSelected(): Promise<void>;                      // opens confirm dialog with impact summary
   cloneRepo(remote: RemoteRepo): Promise<void>; searchRemote(q: string, signal?: AbortSignal): Promise<RemoteRepo[]>;
   assignRepo(repoId: RepoId, contextId: ContextId): Promise<void>;
@@ -484,12 +576,49 @@ Rows of in-flight operations show a spinner + step text instead of columns. Empt
 the next action ("No repos in buk — press n to clone one"). Colors: a single accent for the
 cursor row, green for attached, yellow for running agents, red only for danger dialogs.
 
+The `new` command opens the worktree dialog immediately with locally known base refs, then calls
+`Controller.refreshPreparedCopy`. While the forced refresh runs, the picker displays `fetching…`.
+Completion re-lists remote branches and dispatches `updateCreateWorktreeBranches`; the reducer
+applies it only if the same repo and dialog-open generation are still active, so closing and
+reopening the same repository cannot accept an older completion.
+
 ## 10. Integration notes
 
+- 2026-09-03: Round-2 hardening added `.git/swarm-creating.json` publish intents plus startup
+  reconciliation; invalidates hot markers before destructive refresh and rebuilds fingerprint
+  changes from the pristine base; coordinates repository deletion with preparation/refresh aborts
+  under the repo mutex; cleans clone-first attempts on partial-copy errors; runs all post-create
+  hooks in one detached record-producing runner; validates `origin/HEAD`; explicitly fetches selected
+  non-default base refs; and keys dialog prefetch completions by open generation. Filesystem-backed
+  cross-instance tests now cover state-lock create races, single-slot claim/fallback, and rollback
+  after a post-publish state-write failure.
+- 2026-09-03: Review hardening moved creation into unique `.creating-<uuid>` attempts and made
+  final publish part of locked registration; added per-repo mutexes and atomic rename-as-claim pool
+  selection; explicit remote-tracking branch and all-PR head fetches; prepare-hook fingerprints and
+  reruns after reset/config changes; lifecycle cancellation plus `Shell.runDetachedLogged`; dynamic
+  `.hot*` discovery/removal; and mode-aware refresh dedupe with per-caller abort detachment.
+  `FilesPort.listDirs` gained `includeReserved`, `WorktreeService.prepareHotCopy` gained a signal,
+  and cross-process mutexing remains explicitly out of scope.
+- 2026-09-03: Phase B added `Config.hotPoolSize` (default 1) and
+  `Config.hotRefreshIntervalMs` (default 300000), numbered `.hot.<n>` slots, lowest-slot
+  consume/replenish ordering, two-repo startup preparation, and sequential freshness-aware
+  periodic refresh. `hotPoolSize: 0` and refresh interval `0` disable their respective features.
+  `hotCopyPath`/`hotCopyStagingPath` gained an optional slot argument;
+  `refreshPreparedCopy` gained `skipIfFresh`; and `OpEvent` gained `prepared-copy-claimed` for
+  immediate controller replenishment.
+- 2026-09-03: Phase B split repo hooks into `hooks.prepare` and `hooks.postCreate`.
+  `WorktreeService.runPostCreateHooks` runs the latter after registration through a separate
+  controller operation, leaving session open available. The create dialog now opens before a
+  forced prepared-copy refresh, shows `fetching…`, and safely merges newly listed remote branches.
+- 2026-09-03: Phase A moved worktree copy/git/hooks off the state lock, changed missing-pool
+  fallback to clone-then-refresh-destination, and added timed operation-log/file-log steps.
+  Prepared copies now store `.git/swarm-hot.json`; `Config.hotFreshnessMs` defaults to 60000.
+  `WorktreeService` gained deduplicated `refreshPreparedCopy` and `awaitPendingRefresh`, while
+  `GitPort` gained narrow `fetchRefs`, abortable refresh methods, and `revision`.
 - 2026-09-03: worktree creation gained a per-repository single-slot hot-copy pool. Complete
   copies are staged under `.hot.staging`, atomically published as `.hot`, consumed by rename,
   refreshed in their destination, and rebuilt by controller-managed background operations.
-  Missing or failed pools retain the original base-refresh and copy fallback.
+  Missing or failed pools use the clone-first fallback described above.
 - 2026-09-03: `swarm agent <claude|opencode>` creates or reuses a persistent tmux session rooted
   at `config.reposDir`; `prefix+a` / `prefix+A` open those sessions in popups and `C-q` detaches
   their nested client so the popup can close without stopping the agent.

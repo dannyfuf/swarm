@@ -148,7 +148,7 @@ export function CreateWorktreeDialog({
         }}
       />
       <Spacer />
-      <SectionLabel text="  BRANCHES" />
+      <SectionLabel text={`  BRANCHES${dialog.fetching ? ` ${glyphs.sep} fetching…` : ""}`} />
       <LinesView lines={list} />
     </DialogFrame>
   );

@@ -174,6 +174,29 @@ describe("reduce", () => {
     assert.equal(current.mode, "normal");
   });
 
+  test("ignores create-dialog branch updates from an older open generation", () => {
+    const current = reduce(state(), {
+      type: "openDialog",
+      dialog: {
+        kind: "create-worktree",
+        repoId: "bukhr/payroll",
+        generation: 2,
+        branches: ["origin/main"],
+        fetching: true,
+      },
+    });
+
+    const unchanged = reduce(current, {
+      type: "updateCreateWorktreeBranches",
+      repoId: "bukhr/payroll",
+      generation: 1,
+      branches: ["origin/stale"],
+      fetching: false,
+    });
+
+    assert.equal(unchanged, current);
+  });
+
   test("starts, advances, logs, and ends operations", () => {
     const operation: Operation = {
       id: "op-1",

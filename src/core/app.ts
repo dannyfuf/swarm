@@ -26,7 +26,13 @@ export type DialogKind =
       confirmLabel?: string;
       onConfirm: () => void;
     }
-  | { kind: "create-worktree"; repoId: RepoId; branches: string[] }
+  | {
+      kind: "create-worktree";
+      repoId: RepoId;
+      generation: number;
+      branches: string[];
+      fetching: boolean;
+    }
   | { kind: "clone-repo"; contextId: ContextId }
   | { kind: "context-form"; contextId?: ContextId }
   | { kind: "assign-context"; repoId: RepoId }
@@ -101,6 +107,13 @@ export type Action =
   | { type: "prSlice"; tab: PrTab; repoId: RepoId; slice: PrRepoSlice }
   | { type: "setContext"; contextId: ContextId }
   | { type: "openDialog"; dialog: DialogKind }
+  | {
+      type: "updateCreateWorktreeBranches";
+      repoId: RepoId;
+      generation: number;
+      branches?: string[];
+      fetching: boolean;
+    }
   | { type: "closeDialog" }
   | { type: "opStart"; op: Operation }
   | { type: "opStep"; id: string; step: string; line?: string }
@@ -135,6 +148,7 @@ export interface Controller {
   killSelected(): Promise<void>;
   createWorktree(input: { repoId: RepoId; branch: string; baseRef?: string }): Promise<void>;
   remoteBranches(repoId: RepoId): Promise<string[]>;
+  refreshPreparedCopy(repoId: RepoId): void;
   deleteSelected(): Promise<void>;
   cloneRepo(remote: RemoteRepo): Promise<void>;
   searchRemote(query: string, signal?: AbortSignal): Promise<RemoteRepo[]>;

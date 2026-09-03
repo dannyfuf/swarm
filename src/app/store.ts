@@ -118,6 +118,23 @@ export function reduce(state: AppState, action: Action): AppState {
       });
     case "openDialog":
       return { ...state, dialog: action.dialog, mode: "dialog" };
+    case "updateCreateWorktreeBranches": {
+      if (state.dialog?.kind !== "create-worktree" || state.dialog.repoId !== action.repoId) {
+        return state;
+      }
+      if (state.dialog.generation !== action.generation) return state;
+      return {
+        ...state,
+        dialog: {
+          ...state.dialog,
+          branches:
+            action.branches === undefined
+              ? state.dialog.branches
+              : [...new Set([...state.dialog.branches, ...action.branches])],
+          fetching: action.fetching,
+        },
+      };
+    }
     case "closeDialog":
       return { ...state, dialog: undefined, mode: "normal" };
     case "opStart":

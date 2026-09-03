@@ -151,6 +151,7 @@ export async function createRuntime(
     lifecycle,
     installRoot,
     startup,
+    enableHotRefreshTimer: true,
   });
 
   return { home, configValue, logger, state, tmux, sessions, controller, store };

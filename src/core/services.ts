@@ -16,6 +16,7 @@ import type {
 export type OpEvent =
   | { type: "step"; label: string }
   | { type: "log"; line: string }
+  | { type: "prepared-copy-claimed"; repoId: RepoId }
   | { type: "done" }
   | { type: "error"; error: SwarmError };
 
@@ -43,9 +44,16 @@ export interface RepoService {
 }
 
 export interface WorktreeService {
+  reconcileCreating(): Promise<void>;
+  coordinateRepoDeletion(repoId: RepoId, action: () => Promise<void>): Promise<void>;
   list(repoId?: RepoId): Promise<Worktree[]>;
   remoteBranches(repoId: RepoId): Promise<string[]>;
-  prepareHotCopy(repoId: RepoId, onEvent?: OnEvent): Promise<void>;
+  prepareHotCopy(repoId: RepoId, onEvent?: OnEvent, opts?: { signal?: AbortSignal }): Promise<void>;
+  refreshPreparedCopy(
+    repoId: RepoId,
+    opts?: { signal?: AbortSignal; skipIfFresh?: boolean },
+  ): Promise<void>;
+  awaitPendingRefresh(repoId: RepoId): Promise<void>;
   create(
     input: {
       repoId: RepoId;
@@ -55,6 +63,7 @@ export interface WorktreeService {
     },
     onEvent?: OnEvent,
   ): Promise<Worktree>;
+  runPostCreateHooks(worktreeId: WorktreeId, onEvent?: OnEvent): Promise<void>;
   delete(worktreeId: WorktreeId, onEvent?: OnEvent): Promise<void>;
   touch(worktreeId: WorktreeId): Promise<void>;
 }

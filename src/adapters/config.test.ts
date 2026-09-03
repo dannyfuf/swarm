@@ -41,6 +41,9 @@ describe("config adapter", () => {
 
     assert.equal(config.reposDir, "/Users/test/source");
     assert.equal(config.worktreesDir, "/Users/test");
+    assert.equal(config.hotFreshnessMs, 60000);
+    assert.equal(config.hotPoolSize, 1);
+    assert.equal(config.hotRefreshIntervalMs, 300000);
     assert.equal(config.sleep.graceMs, 75);
     assert.equal(config.sleep.enabled, true);
     assert.deepEqual(config.sleep.keepAlive, defaultConfig(home).sleep.keepAlive);
@@ -79,5 +82,21 @@ describe("config adapter", () => {
       assert.equal(error.code, "validation");
       return true;
     });
+
+    await assert.rejects(
+      store.save({ ...defaultConfig(home), hotFreshnessMs: -1 }),
+      (error: unknown) => error instanceof SwarmError && error.code === "validation",
+    );
+    for (const patch of [
+      { hotPoolSize: -1 },
+      { hotPoolSize: 1.5 },
+      { hotRefreshIntervalMs: -1 },
+      { hotRefreshIntervalMs: 1.5 },
+    ]) {
+      await assert.rejects(
+        store.save({ ...defaultConfig(home), ...patch }),
+        (error: unknown) => error instanceof SwarmError && error.code === "validation",
+      );
+    }
   });
 });

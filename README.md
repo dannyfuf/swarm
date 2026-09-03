@@ -5,9 +5,12 @@ inside one tmux popup, keeps base clones pristine, and gives each working copy i
 session. Sleeping a session closes idle windows while preserving agents, servers, and editors
 with unsaved work.
 
-For each repository, swarm keeps one prepared copy under the worktree root. Creating a worktree
-normally consumes it with a fast rename and rebuilds the next copy in the background, while a
-missing prepared copy falls back to the normal base-clone copy.
+For each repository, swarm keeps a configurable pool of prepared copies under the worktree root.
+Creating a worktree atomically claims the lowest available slot into a private attempt directory
+and immediately rebuilds that slot in the background. A missing prepared copy falls back by copying
+the base into the private attempt; the final path appears only when registration succeeds. A small
+publish-intent marker lets the next startup recover or safely discard a copy interrupted between
+its final rename and state registration.
 
 ## Requirements
 
@@ -76,6 +79,9 @@ fields are merged with these defaults:
   "version": 1,
   "reposDir": "~/.swarm/repos",
   "worktreesDir": "~/.swarm/worktrees",
+  "hotPoolSize": 1,
+  "hotFreshnessMs": 60000,
+  "hotRefreshIntervalMs": 300000,
   "windows": [
     { "name": "nvim", "command": "nvim" },
     { "name": "cc", "command": "claude" },
@@ -97,10 +103,28 @@ fields are merged with these defaults:
 ```
 
 `reposDir` and `worktreesDir` must resolve to absolute paths; a leading `~/` is expanded when
-the file is loaded. `windows` defines tmux window order and startup commands. Process
+the file is loaded. `hotPoolSize` is a non-negative integer (default `1`); `0` disables prepared
+copies. `hotFreshnessMs` controls how long a prepared copy's marker may suppress a fetch, and
+`hotRefreshIntervalMs` controls periodic refreshes (`0` disables the timer). All three are
+non-negative integers. `windows` defines tmux window order and startup commands. Process
 `keepAlive` patterns are case-insensitive regular expressions; `listening-port` preserves any
 window whose process tree owns a listening TCP port. `github.cloneProtocol` accepts `"ssh"`
 (the default) or `"https"` and controls the URL used and stored when cloning GitHub repos.
+
+Each repo record has `hooks.prepare` and `hooks.postCreate` string arrays. Prepare hooks run in a
+staging prepared copy before it is published (and in fallback copies after clone). A refresh that
+changes or removes prepare hooks rebuilds the slot from the pristine base, removing ignored output
+left by old hooks; failures are logged as warnings. Post-create hooks start only after the worktree
+is registered. One detached runner executes the ordered sequence, appends per-hook status and output
+to `~/.swarm/logs/swarm.log`, and does not keep the TUI alive, so the worktree can be opened or the
+popup closed while the remaining hooks continue.
+
+Opening the new-worktree dialog starts a full prepared-copy refresh without delaying the dialog.
+The base-branch picker shows `fetching…` and receives newly fetched remote branches when the refresh
+finishes. Closing the popup cancels controller-owned preparation/refresh work. Named branches are
+fetched explicitly before checkout; a selected non-default `origin/<base>` is fetched explicitly and
+creation fails clearly if it no longer exists. Worktrees opened from any PR always fetch that PR's
+head.
 
 ## Sleep policy
 

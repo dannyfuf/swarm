@@ -67,6 +67,14 @@ describe("path helpers", () => {
       hotCopyStagingPath(config.worktreesDir, "bukhr/payroll"),
       "/home/test/.swarm/worktrees/bukhr/payroll/.hot.staging",
     );
+    assert.equal(
+      hotCopyPath(config.worktreesDir, "bukhr/payroll", 2),
+      "/home/test/.swarm/worktrees/bukhr/payroll/.hot.2",
+    );
+    assert.equal(
+      hotCopyStagingPath(config.worktreesDir, "bukhr/payroll", 2),
+      "/home/test/.swarm/worktrees/bukhr/payroll/.hot.2.staging",
+    );
   });
 
   test("rejects branch slugs reserved for the hot-copy pool", () => {

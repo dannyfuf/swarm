@@ -193,6 +193,57 @@ export function createShell(logger: Logger, startup: StartupTiming = noStartupTi
       });
     },
 
+    async runDetachedLogged(cmd, args, opts): Promise<number> {
+      return await new Promise<number>((resolve, reject) => {
+        let child: ReturnType<typeof spawn>;
+        let logFd: number | undefined;
+        try {
+          logFd = openSync(opts.logPath, "a", 0o600);
+          child = spawn(cmd, args, {
+            cwd: opts.cwd,
+            detached: true,
+            stdio: ["ignore", logFd, logFd],
+          });
+        } catch (error) {
+          if (logFd !== undefined) closeSync(logFd);
+          log.error("Failed to spawn detached logged command", {
+            cmd,
+            error: errorMessage(error),
+          });
+          reject(
+            new SwarmError("fs", `Failed to spawn ${cmd}: ${errorMessage(error)}`, {
+              cause: error,
+            }),
+          );
+          return;
+        }
+
+        let settled = false;
+        child.once("error", (error) => {
+          if (settled) return;
+          settled = true;
+          if (logFd !== undefined) closeSync(logFd);
+          reject(
+            new SwarmError("fs", `Failed to spawn ${cmd}: ${errorMessage(error)}`, {
+              cause: error,
+            }),
+          );
+        });
+        child.once("spawn", () => {
+          if (logFd !== undefined) {
+            closeSync(logFd);
+            logFd = undefined;
+          }
+          child.unref();
+        });
+        child.once("close", (code) => {
+          if (settled) return;
+          settled = true;
+          resolve(code ?? 1);
+        });
+      });
+    },
+
     async exec(cmd, args): Promise<never> {
       const code = await new Promise<number>((resolve, reject) => {
         let child: ReturnType<typeof spawn>;

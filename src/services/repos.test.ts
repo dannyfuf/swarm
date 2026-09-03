@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { join } from "node:path";
 import { describe, test } from "node:test";
 import { SwarmError } from "../core/errors.ts";
 import { hotCopyPath, hotCopyStagingPath } from "../core/paths.ts";
@@ -26,10 +27,28 @@ import { createNullLogger } from "../testing/nullLogger.ts";
 import { createRepoService } from "./repos.ts";
 import { createWorktreeService } from "./worktrees.ts";
 
+function deferred<T>(): { promise: Promise<T>; resolve(value: T): void } {
+  let resolvePromise: ((value: T) => void) | undefined;
+  const promise = new Promise<T>((resolve) => {
+    resolvePromise = resolve;
+  });
+  return {
+    promise,
+    resolve(value) {
+      assert.ok(resolvePromise);
+      resolvePromise(value);
+    },
+  };
+}
+
 function createWorktreeStub(): WorktreeService & { deleted: string[] } {
   const deleted: string[] = [];
   return {
     deleted,
+    async reconcileCreating() {},
+    async coordinateRepoDeletion(_repoId, action) {
+      await action();
+    },
     async list() {
       return [];
     },
@@ -37,6 +56,9 @@ function createWorktreeStub(): WorktreeService & { deleted: string[] } {
       return [];
     },
     async prepareHotCopy() {},
+    async refreshPreparedCopy() {},
+    async awaitPendingRefresh() {},
+    async runPostCreateHooks() {},
     async create() {
       throw new SwarmError("unsupported", "not used");
     },
@@ -332,7 +354,8 @@ describe("createRepoService", () => {
     assert.deepEqual(files.removed, []);
   });
 
-  test("assigns repos and cascades deletion through every worktree session", async () => {
+  test("assigns repos and deletes every discovered prepared slot after a pool shrink", async () => {
+    const poolConfig = { ...fixtureConfig, hotPoolSize: 1 };
     const payrollWorktrees = worktrees.filter((worktree) => worktree.repoId === repos[0]?.id);
     const state = createMemoryState(
       makeState({
@@ -341,14 +364,15 @@ describe("createRepoService", () => {
         worktrees: payrollWorktrees,
       }),
     );
-    const hot = hotCopyPath(fixtureConfig.worktreesDir, "bukhr/payroll");
-    const staging = hotCopyStagingPath(fixtureConfig.worktreesDir, "bukhr/payroll");
+    const preparedPaths = [0, 4].flatMap((slot) => [
+      hotCopyPath(poolConfig.worktreesDir, "bukhr/payroll", slot),
+      hotCopyStagingPath(poolConfig.worktreesDir, "bukhr/payroll", slot),
+    ]);
     const files = createFakeFiles({
       paths: [
         repos[0]?.path ?? "",
         ...payrollWorktrees.map((worktree) => worktree.path),
-        hot,
-        staging,
+        ...preparedPaths,
       ],
     });
     const sessions: TmuxSession[] = payrollWorktrees.map((worktree) => ({
@@ -360,7 +384,7 @@ describe("createRepoService", () => {
     }));
     const tmux = createFakeTmux({ sessions });
     const clock = createFixedClock("2026-03-03T00:00:00.000Z");
-    const config = createMemoryConfig(fixtureConfig);
+    const config = createMemoryConfig(poolConfig);
     const logger = createNullLogger();
     const worktreeService = createWorktreeService({
       state,
@@ -394,7 +418,68 @@ describe("createRepoService", () => {
     );
     assert.deepEqual(state.state.repos, []);
     assert.deepEqual(state.state.worktrees, []);
-    assert.ok(files.removed.includes(hot));
-    assert.ok(files.removed.includes(staging));
+    for (const path of preparedPaths) assert.ok(files.removed.includes(path));
+  });
+
+  test("deleting a repo aborts an in-flight preparation and leaves no prepared slot", async () => {
+    const fixture = repos[0];
+    assert.ok(fixture);
+    const repo = { ...fixture, hooks: { prepare: ["block preparation"], postCreate: [] } };
+    const state = createMemoryState(makeState({ contexts, repos: [repo], worktrees: [] }));
+    const config = createMemoryConfig(fixtureConfig);
+    const hot = hotCopyPath(fixtureConfig.worktreesDir, repo.id);
+    const staging = hotCopyStagingPath(fixtureConfig.worktreesDir, repo.id);
+    const files = createFakeFiles({ paths: [repo.path, join(repo.path, ".git")] });
+    const hookStarted = deferred<void>();
+    const shell = createFakeShell();
+    shell.run = async (cmd, args, opts) => {
+      shell.calls.push({ cmd, args: [...args], opts });
+      hookStarted.resolve();
+      return await new Promise((_resolveResult, rejectResult) => {
+        opts?.signal?.addEventListener(
+          "abort",
+          () => rejectResult(new SwarmError("cancelled", "preparation cancelled")),
+          { once: true },
+        );
+        if (opts?.signal?.aborted) {
+          rejectResult(new SwarmError("cancelled", "preparation cancelled"));
+        }
+      });
+    };
+    const logger = createNullLogger();
+    const worktreeService = createWorktreeService({
+      state,
+      config,
+      git: createFakeGit({
+        remoteBranches: { [repo.path]: ["origin/main"] },
+        revisions: { [repo.path]: { HEAD: "a".repeat(40), "origin/main": "a".repeat(40) } },
+      }),
+      files,
+      tmux: createFakeTmux(),
+      shell,
+      clock: createFixedClock(),
+      logger,
+    });
+    const repoService = createRepoService({
+      state,
+      config,
+      github: createFakeGithub(),
+      git: createFakeGit(),
+      process: createFakeProcess(),
+      files,
+      worktreeService,
+      clock: createFixedClock(),
+      logger,
+    });
+
+    const preparation = worktreeService.prepareHotCopy(repo.id);
+    await hookStarted.promise;
+    const deletion = repoService.delete(repo.id);
+    await Promise.allSettled([preparation]);
+    await deletion;
+
+    assert.equal(await files.exists(hot), false);
+    assert.equal(await files.exists(staging), false);
+    assert.deepEqual(state.state.repos, []);
   });
 });

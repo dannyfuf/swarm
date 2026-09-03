@@ -17,15 +17,18 @@ export interface FakeShellCall {
 export type FakeShell = Shell & {
   calls: FakeShellCall[];
   detachedCalls: FakeShellCall[];
+  detachedLoggedCalls: FakeShellCall[];
 };
 
 export function createFakeShell(rules: FakeShellRule[] = []): FakeShell {
   const calls: FakeShellCall[] = [];
   const detachedCalls: FakeShellCall[] = [];
+  const detachedLoggedCalls: FakeShellCall[] = [];
 
   return {
     calls,
     detachedCalls,
+    detachedLoggedCalls,
     async run(cmd, args, opts) {
       calls.push({ cmd, args: [...args], opts });
       const rule = rules.find((candidate) => candidate.match(cmd, args));
@@ -39,6 +42,16 @@ export function createFakeShell(rules: FakeShellRule[] = []): FakeShell {
       calls.push(call);
       detachedCalls.push(call);
       return 4242 + detachedCalls.length - 1;
+    },
+    async runDetachedLogged(cmd, args, opts) {
+      const call = { cmd, args: [...args], opts };
+      calls.push(call);
+      detachedLoggedCalls.push(call);
+      const rule = rules.find((candidate) => candidate.match(cmd, args));
+      if (!rule) return 127;
+      const partial =
+        typeof rule.result === "function" ? rule.result(cmd, args, opts) : rule.result;
+      return partial.code ?? 0;
     },
     async exec(cmd, args): Promise<never> {
       calls.push({ cmd, args: [...args] });
