@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { TestRendererSetup } from "@opentui/core/testing";
 import { testRender } from "@opentui/react/test-utils";
+import { act } from "react";
 import { createStore } from "../app/store.ts";
 import type { Store, UiExit } from "../core/app.ts";
 import type { PullRequest } from "../core/types.ts";
@@ -204,6 +205,37 @@ test("settings shows the read-only clone protocol beside the config file note", 
   }
 });
 
+test("settings cycles the agent and saves it together with the sleep policy", async () => {
+  const harness = await mount();
+  try {
+    harness.setup.mockInput.pressKey(",");
+    await harness.setup.flush();
+    assert.ok(harness.frame().includes("coding agent             claude"));
+
+    const press = async (input: () => void): Promise<void> => {
+      act(input);
+      await harness.setup.flush();
+    };
+    await press(() => harness.setup.mockInput.pressKey(" "));
+    await press(() => harness.setup.mockInput.pressArrow("left"));
+    await press(() => harness.setup.mockInput.pressArrow("right"));
+    await press(() => harness.setup.mockInput.pressArrow("down"));
+    await press(() => harness.setup.mockInput.pressKey(" "));
+    await press(() => harness.setup.mockInput.pressEnter());
+
+    assert.deepEqual(harness.controller.savedConfigPatches, [
+      {
+        agent: "opencode",
+        sleep: { ...fixtureConfig.sleep, enabled: false },
+      },
+    ]);
+    assert.equal(harness.controller.getConfig().agent, "opencode");
+    assert.equal(harness.store.getState().dialog, undefined);
+  } finally {
+    harness.stop();
+  }
+});
+
 test("/ enters filter mode and typing narrows the list", async () => {
   const harness = await mount();
   try {
@@ -388,6 +420,20 @@ test("y on the PR screen copies the PR url instead of a worktree path", async ()
   }
 });
 
+test("b opens the selected worktree PR without changing screens", async () => {
+  const harness = await mountWithPrs();
+  try {
+    harness.store.dispatch({ type: "moveTo", pane: "worktrees", index: 2 });
+    harness.setup.mockInput.pressKey("b");
+    await harness.setup.flush();
+
+    assert.equal(harness.store.getState().screen, "main");
+    assert.deepEqual(harness.controller.browsedPrUrls, [linkedPr.url]);
+  } finally {
+    harness.stop();
+  }
+});
+
 test("/ on the PR screen edits the PR filter, not the worktree filter", async () => {
   const harness = await mountWithPrs();
   try {
@@ -459,6 +505,7 @@ test("the help dialog documents the pull request keys", async () => {
     assert.ok(frame.includes("swarm 0.1.0+dev"));
     assert.ok(frame.includes("PULL REQUESTS"));
     assert.ok(frame.includes("Pull requests"), "p is listed in the normal section");
+    assert.ok(frame.includes("Open PR in browser"));
     assert.ok(frame.includes("Back to worktrees"));
   } finally {
     harness.stop();

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { join } from "node:path";
 import { describe, test } from "node:test";
 import { SwarmError } from "../core/errors.ts";
-import { hotCopyPath, hotCopyStagingPath } from "../core/paths.ts";
+import { hotCopyPath, hotCopyPidPath, hotCopyStagingPath } from "../core/paths.ts";
 import type { GithubPort, TmuxSession } from "../core/ports.ts";
 import type { WorktreeService } from "../core/services.ts";
 import type { RemoteRepo } from "../core/types.ts";
@@ -137,6 +137,9 @@ describe("createRepoService", () => {
       async listRepos(owner) {
         if (owner === "bad" || failGood) throw new Error(`${owner} failed`);
         return [remote("good", "one")];
+      },
+      async findPullRequest() {
+        return undefined;
       },
       async readCachedPullRequests() {
         return undefined;
@@ -367,6 +370,7 @@ describe("createRepoService", () => {
     const preparedPaths = [0, 4].flatMap((slot) => [
       hotCopyPath(poolConfig.worktreesDir, "bukhr/payroll", slot),
       hotCopyStagingPath(poolConfig.worktreesDir, "bukhr/payroll", slot),
+      hotCopyPidPath(poolConfig.worktreesDir, "bukhr/payroll", slot),
     ]);
     const files = createFakeFiles({
       paths: [
@@ -393,6 +397,7 @@ describe("createRepoService", () => {
       files,
       tmux,
       shell: createFakeShell(),
+      process: createFakeProcess(),
       clock,
       logger,
     });
@@ -421,31 +426,26 @@ describe("createRepoService", () => {
     for (const path of preparedPaths) assert.ok(files.removed.includes(path));
   });
 
-  test("deleting a repo aborts an in-flight preparation and leaves no prepared slot", async () => {
+  test("deleting a repo waits for a detached preparation and leaves no prepared slot", async () => {
     const fixture = repos[0];
     assert.ok(fixture);
-    const repo = { ...fixture, hooks: { prepare: ["block preparation"], postCreate: [] } };
+    const repo = { ...fixture, hooks: { prepare: ["prepare command"], postCreate: [] } };
     const state = createMemoryState(makeState({ contexts, repos: [repo], worktrees: [] }));
     const config = createMemoryConfig(fixtureConfig);
     const hot = hotCopyPath(fixtureConfig.worktreesDir, repo.id);
     const staging = hotCopyStagingPath(fixtureConfig.worktreesDir, repo.id);
     const files = createFakeFiles({ paths: [repo.path, join(repo.path, ".git")] });
-    const hookStarted = deferred<void>();
+    const workerStarted = deferred<void>();
     const shell = createFakeShell();
-    shell.run = async (cmd, args, opts) => {
-      shell.calls.push({ cmd, args: [...args], opts });
-      hookStarted.resolve();
-      return await new Promise((_resolveResult, rejectResult) => {
-        opts?.signal?.addEventListener(
-          "abort",
-          () => rejectResult(new SwarmError("cancelled", "preparation cancelled")),
-          { once: true },
-        );
-        if (opts?.signal?.aborted) {
-          rejectResult(new SwarmError("cancelled", "preparation cancelled"));
-        }
-      });
+    files.cloneTreeDetached = async (_src, workerStaging, _dest, workerPidPath) => {
+      await files.ensureDir(workerStaging);
+      await files.writeTextAtomic(workerPidPath, "4242\n");
+      workerStarted.resolve();
+      return 4242;
     };
+    const process = createFakeProcess([
+      { pid: 4242, ppid: 1, command: `sh swarm-hot-copy ${staging}` },
+    ]);
     const logger = createNullLogger();
     const worktreeService = createWorktreeService({
       state,
@@ -457,6 +457,7 @@ describe("createRepoService", () => {
       files,
       tmux: createFakeTmux(),
       shell,
+      process,
       clock: createFixedClock(),
       logger,
     });
@@ -473,8 +474,12 @@ describe("createRepoService", () => {
     });
 
     const preparation = worktreeService.prepareHotCopy(repo.id);
-    await hookStarted.promise;
+    await workerStarted.promise;
     const deletion = repoService.delete(repo.id);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await files.move(staging, hot);
+    await files.removeTree(hotCopyPidPath(fixtureConfig.worktreesDir, repo.id));
+    process.alive.delete(4242);
     await Promise.allSettled([preparation]);
     await deletion;
 

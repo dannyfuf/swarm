@@ -163,6 +163,7 @@ export interface Controller {
   update(): Promise<void>;
   openSelectedPr(opts: { keepPrevious: boolean }): Promise<void>;
   browseSelectedPr(): Promise<void>;
+  browseSelectedWorktreePr(): Promise<void>;
   yankSelectedPr(): Promise<void>;
   backToMain(): void;
   setPrTab(tab: PrTab): void;

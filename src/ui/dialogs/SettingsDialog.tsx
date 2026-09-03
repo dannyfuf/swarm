@@ -1,7 +1,7 @@
 import { useKeyboard } from "@opentui/react";
 import { useRef, useState } from "react";
 import type { Controller, Store } from "../../core/app.ts";
-import type { SleepPolicy } from "../../core/types.ts";
+import { AGENT_NAMES, type AgentName, type SleepPolicy } from "../../core/types.ts";
 import { LinesView } from "../components/LineView.tsx";
 import { isEnter, isEscape, isListDown, isListUp, isSpace, toKeyEvent } from "../keys.ts";
 import { cell, fitLine, type Line, pad, truncate } from "../text.ts";
@@ -18,6 +18,7 @@ function checkbox(checked: boolean, selected: boolean): Line {
 }
 
 export function SettingsDialog({ store, controller }: { store: Store; controller: Controller }) {
+  const [agent, setAgent] = useState<AgentName>(() => controller.getConfig().agent);
   const [policy, setPolicy] = useState<SleepPolicy>(() => {
     const current = controller.getConfig().sleep;
     return { ...current, keepAlive: current.keepAlive.map((rule) => ({ ...rule })) };
@@ -25,16 +26,27 @@ export function SettingsDialog({ store, controller }: { store: Store; controller
   const [cursor, setCursor] = useState(0);
   const config = controller.getConfig();
   const inner = useDialogInnerWidth(78);
-  const rowCount = 1 + policy.keepAlive.length;
+  const rowCount = 2 + policy.keepAlive.length;
   const clamped = Math.min(cursor, rowCount - 1);
   const submitted = useRef(false);
 
+  const cycleAgent = (delta: number) => {
+    setAgent((current) => {
+      const index = AGENT_NAMES.indexOf(current);
+      return AGENT_NAMES[(index + delta + AGENT_NAMES.length) % AGENT_NAMES.length] ?? current;
+    });
+  };
+
   const toggle = () => {
     if (clamped === 0) {
+      cycleAgent(1);
+      return;
+    }
+    if (clamped === 1) {
       setPolicy((current) => ({ ...current, enabled: !current.enabled }));
       return;
     }
-    const index = clamped - 1;
+    const index = clamped - 2;
     setPolicy((current) => ({
       ...current,
       keepAlive: current.keepAlive.map((rule, position) =>
@@ -55,6 +67,11 @@ export function SettingsDialog({ store, controller }: { store: Store; controller
       toggle();
       return;
     }
+    if (clamped === 0 && (event.name === "left" || event.name === "right")) {
+      raw.preventDefault();
+      cycleAgent(event.name === "left" ? -1 : 1);
+      return;
+    }
     if (isListDown(event, false)) {
       raw.preventDefault();
       setCursor((value) => Math.min(value + 1, rowCount - 1));
@@ -70,17 +87,27 @@ export function SettingsDialog({ store, controller }: { store: Store; controller
       if (!submitted.current) {
         submitted.current = true;
         store.dispatch({ type: "closeDialog" });
-        void controller.saveConfig({ sleep: policy });
+        void controller.saveConfig({ agent, sleep: policy });
       }
     }
   });
 
+  const agentRow: Line = [
+    cell(clamped === 0 ? ` ${glyphs.cursor} ` : "   ", { fg: theme.accent }),
+    cell(pad("coding agent", 25), {
+      fg: clamped === 0 ? theme.strong : theme.text,
+      bold: clamped === 0,
+    }),
+    cell(agent, { fg: theme.magenta, bold: true }),
+    cell("  ←/→ to change", { fg: theme.dim }),
+  ];
+
   const sleepRows: Line[] = [
     [
-      ...checkbox(policy.enabled, clamped === 0),
+      ...checkbox(policy.enabled, clamped === 1),
       cell(pad("sleep on switch", 22), {
-        fg: clamped === 0 ? theme.strong : theme.text,
-        bold: clamped === 0,
+        fg: clamped === 1 ? theme.strong : theme.text,
+        bold: clamped === 1,
       }),
       cell("close windows when leaving a worktree", { fg: theme.dim }),
     ],
@@ -92,7 +119,7 @@ export function SettingsDialog({ store, controller }: { store: Store; controller
   ];
 
   const ruleRows: Line[] = policy.keepAlive.map((rule, index) => {
-    const selected = clamped === index + 1;
+    const selected = clamped === index + 2;
     return [
       ...checkbox(rule.enabled, selected),
       cell(pad(truncate(rule.label, 14), 16), {
@@ -116,12 +143,15 @@ export function SettingsDialog({ store, controller }: { store: Store; controller
       title="Settings"
       width={78}
       hints={[
-        { key: "space", label: "toggle" },
+        { key: "space/←→", label: "change" },
         { key: glyphs.enter, label: "save" },
         { key: "↑↓", label: "select" },
         { key: "Esc", label: "cancel" },
       ]}
     >
+      <Spacer />
+      <SectionLabel text="  AGENT" />
+      <LinesView lines={[fitLine(agentRow, inner)]} />
       <Spacer />
       <SectionLabel text="  SLEEP POLICY" />
       <LinesView lines={sleepRows.map((line) => fitLine(line, inner))} />

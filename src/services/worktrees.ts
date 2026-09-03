@@ -3,6 +3,7 @@ import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { SwarmError } from "../core/errors.ts";
 import {
   hotCopyPath,
+  hotCopyPidPath,
   hotCopyStagingPath,
   worktreeId as makeWorktreeId,
   sessionName,
@@ -15,6 +16,7 @@ import type {
   FilesPort,
   GitPort,
   Logger,
+  ProcessPort,
   Shell,
   StatePort,
   TmuxPort,
@@ -31,6 +33,7 @@ export interface WorktreeServiceDependencies {
   files: FilesPort;
   tmux: TmuxPort;
   shell: Shell;
+  process?: Pick<ProcessPort, "isAlive" | "snapshot">;
   clock: Clock;
   logger: Logger;
   home?: string;
@@ -66,6 +69,14 @@ function assertWorktreePath(
   }
 }
 
+const HOT_COPY_POLL_MS = 100;
+
+function parsePid(value: string | null): number | undefined {
+  if (!value || !/^\d+\s*$/u.test(value)) return undefined;
+  const pid = Number.parseInt(value, 10);
+  return Number.isSafeInteger(pid) && pid > 0 ? pid : undefined;
+}
+
 export function createWorktreeService({
   state,
   config,
@@ -73,10 +84,19 @@ export function createWorktreeService({
   files,
   tmux,
   shell,
+  process,
   clock,
   logger,
   home,
 }: WorktreeServiceDependencies): WorktreeService {
+  const processPort = process ?? {
+    async isAlive() {
+      return false;
+    },
+    async snapshot() {
+      return [];
+    },
+  };
   interface Preparation {
     controller: AbortController;
     promise: Promise<void>;
@@ -85,6 +105,8 @@ export function createWorktreeService({
   const preparations = new Map<RepoId, Preparation>();
   const repoMutexes = new Map<RepoId, Promise<void>>();
   const deletingRepos = new Set<RepoId>();
+  const cancelPolls = new Set<() => void>();
+  let disposed = false;
 
   interface HotCopyMarker {
     fetchedAt: string;
@@ -178,6 +200,26 @@ export function createWorktreeService({
       onEvent?.({ type: "log", line });
       logger.info(line, { durationMs });
     }
+  };
+
+  const waitForPoll = async (): Promise<void> => {
+    if (disposed) return;
+    await new Promise<void>((resolveWait) => {
+      let settled = false;
+      const finish = (): void => {
+        if (settled) return;
+        settled = true;
+        cancelPolls.delete(cancel);
+        resolveWait();
+      };
+      const timer = setTimeout(finish, HOT_COPY_POLL_MS);
+      timer.unref();
+      const cancel = (): void => {
+        clearTimeout(timer);
+        finish();
+      };
+      cancelPolls.add(cancel);
+    });
   };
 
   const loadState = async (): Promise<State> => {
@@ -745,6 +787,74 @@ export function createWorktreeService({
     return { slot: match[1] === undefined ? 0 : Number(match[1]), staging: match[2] !== undefined };
   };
 
+  const hotSlotPaths = (loadedConfig: Config, repoId: RepoId, slot: number) => {
+    const hot = hotCopyPath(loadedConfig.worktreesDir, repoId, slot);
+    const staging = hotCopyStagingPath(loadedConfig.worktreesDir, repoId, slot);
+    const pidPath = hotCopyPidPath(loadedConfig.worktreesDir, repoId, slot);
+    const logsDir = join(home ?? dirname(loadedConfig.reposDir), "logs");
+    const slotSuffix = slot === 0 ? "" : `-${slot}`;
+    const logPath = join(logsDir, `hot-copy-${repoId.replaceAll("/", "-")}${slotSuffix}.log`);
+    return { hot, staging, pidPath, logsDir, logPath };
+  };
+
+  const cleanupDetachedSlot = async (staging: string, pidPath: string): Promise<void> => {
+    await files.removeTree(staging);
+    await files.removeTree(pidPath);
+  };
+
+  const liveDetachedPid = async (
+    staging: string,
+    pidPath: string,
+    expectedPid?: number,
+  ): Promise<number | undefined> => {
+    const recordedPid = parsePid(await files.readText(pidPath));
+    const pid = recordedPid ?? expectedPid;
+    if (pid === undefined || !(await processPort.isAlive(pid))) return undefined;
+    if (expectedPid === pid) return pid;
+    const snapshot = await processPort.snapshot();
+    return snapshot.some(
+      (candidate) => candidate.pid === pid && candidate.command.includes(staging),
+    )
+      ? pid
+      : undefined;
+  };
+
+  const waitForDetachedSlot = async (
+    loadedConfig: Config,
+    repoId: RepoId,
+    slot: number,
+    opts?: { expectedPid?: number; signal?: AbortSignal; onEvent?: OnEvent },
+  ): Promise<boolean> => {
+    const { hot, staging, pidPath, logPath } = hotSlotPaths(loadedConfig, repoId, slot);
+    const pid = await liveDetachedPid(staging, pidPath, opts?.expectedPid);
+    if (pid !== undefined) {
+      opts?.onEvent?.({ type: "step", label: `Waiting for prepared copy slot ${slot}` });
+      while (await processPort.isAlive(pid)) {
+        if (disposed) return false;
+        throwIfAborted(opts?.signal);
+        await waitForPoll();
+      }
+    }
+
+    if (await files.exists(hot)) {
+      await files.removeTree(pidPath);
+      return true;
+    }
+
+    const [stagingExists, pidText] = await Promise.all([
+      files.exists(staging),
+      files.readText(pidPath),
+    ]);
+    if (stagingExists || pidText !== null) await cleanupDetachedSlot(staging, pidPath);
+    if (pid !== undefined || opts?.expectedPid !== undefined) {
+      throw new SwarmError(
+        "fs",
+        `Prepared copy process exited before publishing slot ${slot}: ${repoId}; see ${logPath}`,
+      );
+    }
+    return false;
+  };
+
   const listHotSlotEntries = async (
     worktreesDir: string,
     repoId: RepoId,
@@ -764,9 +874,32 @@ export function createWorktreeService({
     signal?: AbortSignal,
   ): Promise<void> => {
     const entries = await listHotSlotEntries(loadedConfig.worktreesDir, repoId);
-    for (const entry of entries) {
+    const excessSlots = [...new Set(entries.map(({ slot }) => slot))].filter(
+      (slot) => slot >= loadedConfig.hotPoolSize,
+    );
+    for (const slot of excessSlots) {
       throwIfAborted(signal);
-      if (entry.slot >= loadedConfig.hotPoolSize) await files.removeTree(entry.path);
+      await waitForDetachedSlot(loadedConfig, repoId, slot, { signal });
+      const { hot, staging, pidPath } = hotSlotPaths(loadedConfig, repoId, slot);
+      await Promise.all([
+        files.removeTree(hot),
+        files.removeTree(staging),
+        files.removeTree(pidPath),
+      ]);
+    }
+  };
+
+  const awaitDetachedPreparations = async (
+    loadedConfig: Config,
+    repoId: RepoId,
+    opts?: { signal?: AbortSignal; onEvent?: OnEvent },
+  ): Promise<void> => {
+    const entries = await listHotSlotEntries(loadedConfig.worktreesDir, repoId);
+    const slots = new Set(entries.map(({ slot }) => slot));
+    for (let slot = 0; slot < loadedConfig.hotPoolSize; slot += 1) slots.add(slot);
+    for (const slot of [...slots].sort((left, right) => left - right)) {
+      throwIfAborted(opts?.signal);
+      await waitForDetachedSlot(loadedConfig, repoId, slot, opts);
     }
   };
 
@@ -784,6 +917,9 @@ export function createWorktreeService({
 
     const [loadedConfig, current] = await Promise.all([loadConfig(), loadState()]);
     const repo = resolveRepo(current, repoId);
+    await awaitDetachedPreparations(loadedConfig, repoId, { signal });
+    assertRepoActive(repoId);
+    throwIfAborted(signal);
     const fingerprint = prepareFingerprint(repo.hooks.prepare);
     const hotCopies: Array<{ path: string; slot: number }> = [];
     try {
@@ -1041,10 +1177,14 @@ export function createWorktreeService({
           ...(refresh ? [refresh.active.promise] : []),
           ...(refresh?.forced ? [refresh.forced.promise] : []),
         ]);
+        const loadedConfig = await loadConfig();
+        await awaitDetachedPreparations(loadedConfig, repoId);
         await withRepoMutex(repoId, async () => {
-          const loadedConfig = await loadConfig();
           const entries = await listHotSlotEntries(loadedConfig.worktreesDir, repoId);
-          for (const entry of entries) await files.removeTree(entry.path);
+          for (const entry of entries) {
+            await files.removeTree(entry.path);
+            await files.removeTree(hotCopyPidPath(loadedConfig.worktreesDir, repoId, entry.slot));
+          }
           await action();
         });
       } finally {
@@ -1090,11 +1230,14 @@ export function createWorktreeService({
         : controller.signal;
 
       const promise = (async (): Promise<void> => {
-        let staging: string | undefined;
         try {
           const loadedConfig = await loadConfig();
           assertRepoActive(repoId);
           throwIfAborted(signal);
+          await awaitDetachedPreparations(loadedConfig, repoId, { signal, onEvent });
+          if (disposed) return;
+
+          let launched: { slot: number; pid: number } | undefined;
           await withRepoMutex(repoId, async () => {
             assertRepoActive(repoId);
             throwIfAborted(signal);
@@ -1106,14 +1249,14 @@ export function createWorktreeService({
               await timed("Inspecting prepared copy pool", onEvent, async () => {
                 for (let slot = 0; slot < loadedConfig.hotPoolSize; slot += 1) {
                   throwIfAborted(signal);
-                  const hot = hotCopyPath(loadedConfig.worktreesDir, repoId, slot);
-                  const slotStaging = hotCopyStagingPath(loadedConfig.worktreesDir, repoId, slot);
-                  const [hasHotCopy, hasStagingCopy] = await Promise.all([
-                    files.exists(hot),
-                    files.exists(slotStaging),
-                  ]);
-                  if (hasStagingCopy) await files.removeTree(slotStaging);
-                  if (hasHotCopy) continue;
+                  if (
+                    await waitForDetachedSlot(loadedConfig, repoId, slot, {
+                      signal,
+                      onEvent,
+                    })
+                  ) {
+                    continue;
+                  }
                   missingSlot = slot;
                   return;
                 }
@@ -1131,38 +1274,39 @@ export function createWorktreeService({
             const repo = resolveRepo(current, repoId);
             const { defaultBranch } = await refreshRepository(repo, repo.path, onEvent, signal);
             throwIfAborted(signal);
-
-            const hot = hotCopyPath(loadedConfig.worktreesDir, repoId, missingSlot);
-            staging = hotCopyStagingPath(loadedConfig.worktreesDir, repoId, missingSlot);
+            const sha = await git.revision(repo.path, `origin/${defaultBranch}`, signal);
+            const marker: HotCopyMarker = {
+              fetchedAt: clock.now().toISOString(),
+              defaultBranch,
+              sha,
+              prepareFingerprint: prepareFingerprint(repo.hooks.prepare),
+            };
+            const { hot, staging, pidPath, logsDir, logPath } = hotSlotPaths(
+              loadedConfig,
+              repoId,
+              missingSlot,
+            );
             try {
-              await timed(`Copying repository for slot ${missingSlot}`, onEvent, async () => {
-                throwIfAborted(signal);
-                await files.ensureDir(dirname(hot));
-                await files.cloneTree(repo.path, staging as string);
+              await Promise.all([files.ensureDir(dirname(hot)), files.ensureDir(logsDir)]);
+              const pid = await files.cloneTreeDetached(repo.path, staging, hot, pidPath, logPath, {
+                markerText: `${JSON.stringify(marker, null, 2)}\n`,
+                prepareCommands: repo.hooks.prepare,
               });
-              await runHooks("prepare", repo.hooks.prepare, staging, onEvent, {
-                signal,
-              });
-              throwIfAborted(signal);
-              await timed(`Writing freshness marker for slot ${missingSlot}`, onEvent, () =>
-                writeHotMarker(
-                  staging as string,
-                  defaultBranch,
-                  prepareFingerprint(repo.hooks.prepare),
-                  signal,
-                ),
-              );
-              throwIfAborted(signal);
-              assertRepoActive(repoId);
-              resolveRepo(await loadState(), repoId);
-              await timed(`Finalizing prepared copy slot ${missingSlot}`, onEvent, () =>
-                files.move(staging as string, hot),
-              );
-              staging = undefined;
+              launched = { slot: missingSlot, pid };
             } catch (error) {
               throw toSwarmError(error, "fs", `Failed to prepare worktree copy for: ${repo.id}`);
             }
           });
+          if (launched !== undefined) {
+            const { slot, pid } = launched;
+            await timed(`Copying and publishing prepared copy slot ${slot}`, onEvent, () =>
+              waitForDetachedSlot(loadedConfig, repoId, slot, {
+                expectedPid: pid,
+                signal,
+                onEvent,
+              }).then(() => undefined),
+            );
+          }
           onEvent?.({ type: "done" });
         } catch (error) {
           const failure =
@@ -1171,11 +1315,6 @@ export function createWorktreeService({
               : new SwarmError("fs", `Failed to prepare worktree copy for: ${repoId}`, {
                   cause: error,
                 });
-          if (staging) {
-            await files.removeTree(staging).catch((cleanupError: unknown) => {
-              logger.error(`Failed to clean up prepared copy staging for: ${repoId}`, cleanupError);
-            });
-          }
           onEvent?.({ type: "error", error: failure });
           throw failure;
         }
@@ -1232,6 +1371,11 @@ export function createWorktreeService({
       }
 
       const { repo, loadedConfig, slug, id, destination } = preflight;
+      await awaitDetachedPreparations(loadedConfig, repo.id, { onEvent }).catch(
+        (error: unknown) => {
+          logger.warn(`Detached prepared copy failed; falling back for: ${input.repoId}`, error);
+        },
+      );
       assertRepoActive(repo.id);
       const attemptPath = `${destination}.creating-${randomUUID()}`;
       let attemptExists = false;
@@ -1433,6 +1577,11 @@ export function createWorktreeService({
         onEvent?.({ type: "error", error: failure });
         throw failure;
       }
+    },
+
+    dispose() {
+      disposed = true;
+      for (const cancel of [...cancelPolls]) cancel();
     },
 
     async delete(worktreeId, onEvent) {

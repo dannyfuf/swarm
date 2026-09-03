@@ -3,11 +3,12 @@ import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
 import { describe, test } from "node:test";
 import { SwarmError } from "../core/errors.ts";
-import { hotCopyPath, hotCopyStagingPath } from "../core/paths.ts";
+import { hotCopyPath, hotCopyPidPath, hotCopyStagingPath } from "../core/paths.ts";
 import type { TmuxSession } from "../core/ports.ts";
 import { defaultConfig } from "../core/types.ts";
 import { createFakeFiles } from "../testing/fakeFiles.ts";
 import { createFakeGit } from "../testing/fakeGit.ts";
+import { createFakeProcess } from "../testing/fakeProcess.ts";
 import { createFakeShell } from "../testing/fakeShell.ts";
 import { createFakeTmux } from "../testing/fakeTmux.ts";
 import { createFixedClock } from "../testing/fixedClock.ts";
@@ -46,7 +47,6 @@ function deferred(): { promise: Promise<void>; resolve(): void } {
     },
   };
 }
-
 async function flush(): Promise<void> {
   await new Promise<void>((resolve) => setImmediate(resolve));
 }
@@ -80,6 +80,7 @@ describe("createWorktreeService", () => {
       files,
       tmux: createFakeTmux(),
       shell,
+      process: createFakeProcess(),
       clock: createFixedClock("2026-03-04T00:00:00.000Z"),
       logger,
     });
@@ -153,6 +154,7 @@ describe("createWorktreeService", () => {
       files,
       tmux: createFakeTmux(),
       shell,
+      process: createFakeProcess(),
       clock: createFixedClock("2026-03-04T00:00:00.000Z"),
       logger: createNullLogger(),
     });
@@ -228,6 +230,7 @@ describe("createWorktreeService", () => {
       files,
       tmux: createFakeTmux(),
       shell: createFakeShell(),
+      process: createFakeProcess(),
       clock: createFixedClock(),
       logger: createNullLogger(),
     });
@@ -242,11 +245,12 @@ describe("createWorktreeService", () => {
     assert.equal(files.paths.has(hot), true);
   });
 
-  test("prepareHotCopy removes stale staging, stages the copy, and atomically publishes it", async () => {
+  test("prepareHotCopy removes stale staging and launches an atomic detached copy", async () => {
     const repo = repos[0];
     assert.ok(repo);
     const hot = hotCopyPath("/home/test/.swarm/worktrees", repo.id);
     const staging = hotCopyStagingPath("/home/test/.swarm/worktrees", repo.id);
+    const pidPath = hotCopyPidPath("/home/test/.swarm/worktrees", repo.id);
     const files = createFakeFiles({ paths: [repo.path, staging] });
     const git = createFakeGit({ remoteBranches: { [repo.path]: ["origin/main"] } });
     const logger = createNullLogger();
@@ -259,6 +263,7 @@ describe("createWorktreeService", () => {
       files,
       tmux: createFakeTmux(),
       shell: createFakeShell(),
+      process: createFakeProcess(),
       clock: createFixedClock(),
       logger,
     });
@@ -276,13 +281,18 @@ describe("createWorktreeService", () => {
     assert.ok(
       files.calls.some(
         ({ method, args }) =>
-          method === "cloneTree" && args[0] === repo.path && args[1] === staging,
+          method === "cloneTreeDetached" &&
+          args[0] === repo.path &&
+          args[1] === staging &&
+          args[2] === hot &&
+          args[3] === pidPath &&
+          typeof args[4] === "string" &&
+          args[4].endsWith("/logs/hot-copy-bukhr-payroll.log"),
       ),
     );
-    assert.ok(
-      files.calls.some(
-        ({ method, args }) => method === "move" && args[0] === staging && args[1] === hot,
-      ),
+    assert.equal(
+      files.calls.some(({ method }) => method === "move"),
+      false,
     );
     assert.equal(files.paths.has(hot), true);
     assert.equal(files.paths.has(staging), false);
@@ -304,29 +314,13 @@ describe("createWorktreeService", () => {
     );
   });
 
-  test("prepare hooks run in staging before publish and failures remain warnings", async () => {
+  test("prepare hooks and their fingerprint are handed to the detached publisher", async () => {
     const fixture = repos[0];
     assert.ok(fixture);
     const repo = { ...fixture, hooks: { prepare: ["npm ci"], postCreate: [] } };
     const hot = hotCopyPath("/home/test/.swarm/worktrees", repo.id);
     const staging = hotCopyStagingPath("/home/test/.swarm/worktrees", repo.id);
-    const events: string[] = [];
     const files = createFakeFiles({ paths: [repo.path] });
-    const move = files.move.bind(files);
-    files.move = async (source, destination) => {
-      events.push(`move:${source}`);
-      await move(source, destination);
-    };
-    const shell = createFakeShell([
-      {
-        match: (_cmd, args) => args[1] === "npm ci",
-        result: (_cmd, _args, opts) => {
-          events.push(`hook:${opts?.cwd}`);
-          return { code: 9, stderr: "optional install failed" };
-        },
-      },
-    ]);
-    const logger = createNullLogger();
     const service = createWorktreeService({
       state: createMemoryState(
         makeState({ contexts: [contexts[0]], repos: [repo], worktrees: [] }),
@@ -335,18 +329,27 @@ describe("createWorktreeService", () => {
       git: createFakeGit({ remoteBranches: { [repo.path]: ["origin/main"] } }),
       files,
       tmux: createFakeTmux(),
-      shell,
+      shell: createFakeShell(),
       clock: createFixedClock(),
-      logger,
+      logger: createNullLogger(),
     });
 
     await service.prepareHotCopy(repo.id);
 
-    assert.deepEqual(events, [`hook:${staging}`, `move:${staging}`]);
-    assert.equal(files.paths.has(hot), true);
-    assert.ok(
-      logger.entries.some(({ level, message }) => level === "warn" && /npm ci/u.test(message)),
+    const detached = files.calls.find(({ method }) => method === "cloneTreeDetached");
+    assert.equal(detached?.args[1], staging);
+    assert.equal(detached?.args[2], hot);
+    const options = detached?.args[5] as
+      | { markerText: string; prepareCommands: string[] }
+      | undefined;
+    assert.deepEqual(options?.prepareCommands, ["npm ci"]);
+    assert.equal(
+      JSON.parse(options?.markerText ?? "{}").prepareFingerprint,
+      createHash("sha256")
+        .update(JSON.stringify(["npm ci"]))
+        .digest("hex"),
     );
+    assert.equal(files.paths.has(hot), true);
   });
 
   test("replenishment fills only the lowest empty pool slot", async () => {
@@ -374,12 +377,13 @@ describe("createWorktreeService", () => {
     await service.prepareHotCopy(repo.id);
 
     assert.deepEqual(
-      files.calls.filter(({ method }) => method === "cloneTree").map(({ args }) => args[1]),
+      files.calls.filter(({ method }) => method === "cloneTreeDetached").map(({ args }) => args[1]),
       [staging1],
     );
     assert.ok(
       files.calls.some(
-        ({ method, args }) => method === "move" && args[0] === staging1 && args[1] === hot1,
+        ({ method, args }) =>
+          method === "cloneTreeDetached" && args[1] === staging1 && args[2] === hot1,
       ),
     );
     assert.equal(files.paths.has(hot0), true);
@@ -465,11 +469,16 @@ describe("createWorktreeService", () => {
     const repo = repos[0];
     assert.ok(repo);
     const staging = hotCopyStagingPath("/home/test/.swarm/worktrees", repo.id);
+    const pidPath = hotCopyPidPath("/home/test/.swarm/worktrees", repo.id);
     const files = createFakeFiles({ paths: [repo.path] });
-    const cloneTree = files.cloneTree.bind(files);
-    files.cloneTree = async (source, destination) => {
-      await cloneTree(source, destination);
-      throw new Error("copy failed");
+    files.cloneTreeDetached = async (source, destination, _hot, jobPidPath, logPath) => {
+      files.calls.push({
+        method: "cloneTreeDetached",
+        args: [source, destination, _hot, jobPidPath, logPath],
+      });
+      files.paths.add(destination);
+      files.paths.add(jobPidPath);
+      return 4242;
     };
     const service = createWorktreeService({
       state: createMemoryState(
@@ -480,13 +489,15 @@ describe("createWorktreeService", () => {
       files,
       tmux: createFakeTmux(),
       shell: createFakeShell(),
+      process: createFakeProcess(),
       clock: createFixedClock(),
       logger: createNullLogger(),
     });
 
-    await assert.rejects(service.prepareHotCopy(repo.id), /Failed to prepare worktree copy/u);
+    await assert.rejects(service.prepareHotCopy(repo.id), /exited before publishing/u);
 
     assert.equal(files.paths.has(staging), false);
+    assert.equal(files.paths.has(pidPath), false);
     assert.ok(
       files.calls.some(({ method, args }) => method === "removeTree" && args[0] === staging),
     );
@@ -495,13 +506,20 @@ describe("createWorktreeService", () => {
   test("concurrent prepareHotCopy calls share one in-flight promise", async () => {
     const repo = repos[0];
     assert.ok(repo);
-    const gate = deferred();
+    const hot = hotCopyPath("/home/test/.swarm/worktrees", repo.id);
+    const staging = hotCopyStagingPath("/home/test/.swarm/worktrees", repo.id);
     const files = createFakeFiles({ paths: [repo.path] });
-    files.cloneTree = async (source, destination) => {
-      files.calls.push({ method: "cloneTree", args: [source, destination] });
-      await gate.promise;
+    files.cloneTreeDetached = async (source, destination, target, pidPath, logPath) => {
+      files.calls.push({
+        method: "cloneTreeDetached",
+        args: [source, destination, target, pidPath, logPath],
+      });
       files.paths.add(destination);
+      return 4242;
     };
+    const process = createFakeProcess([
+      { pid: 4242, ppid: 1, command: `sh -c hot-copy ${staging}` },
+    ]);
     const service = createWorktreeService({
       state: createMemoryState(
         makeState({ contexts: [contexts[0]], repos: [repo], worktrees: [] }),
@@ -511,6 +529,7 @@ describe("createWorktreeService", () => {
       files,
       tmux: createFakeTmux(),
       shell: createFakeShell(),
+      process,
       clock: createFixedClock(),
       logger: createNullLogger(),
     });
@@ -519,23 +538,31 @@ describe("createWorktreeService", () => {
     const second = service.prepareHotCopy(repo.id);
     assert.equal(first, second);
     await flush();
-    assert.equal(files.calls.filter(({ method }) => method === "cloneTree").length, 1);
-    gate.resolve();
+    assert.equal(files.calls.filter(({ method }) => method === "cloneTreeDetached").length, 1);
+    files.paths.delete(staging);
+    files.paths.add(hot);
+    process.alive.delete(4242);
     await first;
   });
 
-  test("create awaits an in-flight preparation and then consumes the completed hot copy", async () => {
+  test("create waits for an in-flight preparation, then consumes hot without a second copy", async () => {
     const repo = repos[0];
     assert.ok(repo);
     const destination = "/home/test/.swarm/worktrees/bukhr/payroll/feat-wait";
     const hot = hotCopyPath("/home/test/.swarm/worktrees", repo.id);
-    const gate = deferred();
+    const staging = hotCopyStagingPath("/home/test/.swarm/worktrees", repo.id);
     const files = createFakeFiles({ paths: [repo.path] });
-    const cloneTree = files.cloneTree.bind(files);
-    files.cloneTree = async (source, target) => {
-      await gate.promise;
-      await cloneTree(source, target);
+    files.cloneTreeDetached = async (source, target, destinationPath, pidPath, logPath) => {
+      files.calls.push({
+        method: "cloneTreeDetached",
+        args: [source, target, destinationPath, pidPath, logPath],
+      });
+      files.paths.add(target);
+      return 4242;
     };
+    const process = createFakeProcess([
+      { pid: 4242, ppid: 1, command: `sh -c hot-copy ${staging}` },
+    ]);
     const git = createFakeGit({
       remoteBranches: {
         [repo.path]: ["origin/main"],
@@ -551,34 +578,104 @@ describe("createWorktreeService", () => {
       files,
       tmux: createFakeTmux(),
       shell: createFakeShell(),
+      process,
       clock: createFixedClock(),
       logger: createNullLogger(),
     });
 
     const preparation = service.prepareHotCopy(repo.id);
     await flush();
-    const creation = service.create({ repoId: repo.id, branch: "feat/wait" });
+    const steps: string[] = [];
+    const creation = service.create({ repoId: repo.id, branch: "feat/wait" }, (event) => {
+      if (event.type === "step") steps.push(event.label);
+    });
     await flush();
+
+    assert.equal(files.paths.has(staging), true);
     assert.equal(
-      git.calls.some(({ method, args }) => method === "fetch" && args[0] === destination),
+      files.calls.some(({ method }) => method === "cloneTree"),
       false,
     );
+    assert.ok(steps.indexOf("Waiting for prepared copy") > steps.indexOf("Checking prerequisites"));
 
-    gate.resolve();
+    files.paths.delete(staging);
+    files.paths.add(hot);
+    process.alive.delete(4242);
     await preparation;
-    await creation;
+    const created = await creation;
 
-    assert.equal(files.paths.has(hot), false);
+    assert.equal(created.path, destination);
+    assert.ok(steps.indexOf("Claiming prepared copy") > steps.indexOf("Waiting for prepared copy"));
+    assert.equal(files.calls.filter(({ method }) => method === "cloneTreeDetached").length, 1);
+    assert.equal(files.calls.filter(({ method }) => method === "cloneTree").length, 0);
     assert.ok(
       files.calls.some(
         ({ method, args }) =>
           method === "move" && args[0] === hot && isAttemptPath(args[1], destination),
       ),
     );
-    assert.equal(
-      files.calls.filter(({ method, args }) => method === "cloneTree" && args[0] === repo.path)
-        .length,
-      1,
+  });
+
+  test("create waits for a failed preparation, then falls back to the slow copy", async () => {
+    const repo = repos[0];
+    assert.ok(repo);
+    const destination = "/home/test/.swarm/worktrees/bukhr/payroll/feat-fallback";
+    const staging = hotCopyStagingPath("/home/test/.swarm/worktrees", repo.id);
+    const files = createFakeFiles({ paths: [repo.path] });
+    files.cloneTreeDetached = async (source, target, hot, pidPath, logPath) => {
+      files.calls.push({
+        method: "cloneTreeDetached",
+        args: [source, target, hot, pidPath, logPath],
+      });
+      files.paths.add(target);
+      files.paths.add(pidPath);
+      return 4242;
+    };
+    const process = createFakeProcess([
+      { pid: 4242, ppid: 1, command: `sh -c hot-copy ${staging}` },
+    ]);
+    const logger = createNullLogger();
+    const service = createWorktreeService({
+      state: createMemoryState(
+        makeState({ contexts: [contexts[0]], repos: [repo], worktrees: [] }),
+      ),
+      config: createMemoryConfig(),
+      git: createFakeGit({
+        remoteBranches: {
+          [repo.path]: ["origin/main"],
+          [destination]: ["origin/main"],
+        },
+      }),
+      files,
+      tmux: createFakeTmux(),
+      shell: createFakeShell(),
+      process,
+      clock: createFixedClock(),
+      logger,
+    });
+
+    const preparation = service.prepareHotCopy(repo.id);
+    await flush();
+    const steps: string[] = [];
+    const creation = service.create({ repoId: repo.id, branch: "feat/fallback" }, (event) => {
+      if (event.type === "step") steps.push(event.label);
+    });
+    await flush();
+    process.alive.delete(4242);
+
+    await assert.rejects(preparation, /exited before publishing/u);
+    const created = await creation;
+
+    assert.equal(created.path, destination);
+    assert.ok(steps.indexOf("Waiting for prepared copy") > steps.indexOf("Checking prerequisites"));
+    assert.ok(steps.indexOf("Fetching origin") > steps.indexOf("Waiting for prepared copy"));
+    assert.equal(files.calls.filter(({ method }) => method === "cloneTreeDetached").length, 1);
+    assert.equal(files.calls.filter(({ method }) => method === "cloneTree").length, 1);
+    assert.ok(
+      logger.entries.some(
+        ({ level, message }) =>
+          level === "warn" && message === `Prepared copy failed; falling back for: ${repo.id}`,
+      ),
     );
   });
 
@@ -1191,6 +1288,111 @@ describe("createWorktreeService", () => {
     assert.equal(state.state.worktrees.length, 1);
   });
 
+  test("reattaches to a live detached preparation after restart instead of deleting it", async () => {
+    const repo = repos[0];
+    assert.ok(repo);
+    const hot = hotCopyPath("/home/test/.swarm/worktrees", repo.id);
+    const staging = hotCopyStagingPath("/home/test/.swarm/worktrees", repo.id);
+    const pidPath = hotCopyPidPath("/home/test/.swarm/worktrees", repo.id);
+    const files = createFakeFiles({
+      paths: [repo.path, staging],
+      texts: { [pidPath]: "4242\n" },
+    });
+    const process = createFakeProcess([
+      { pid: 4242, ppid: 1, command: `sh -c hot-copy ${staging}` },
+    ]);
+    const git = createFakeGit();
+    const service = createWorktreeService({
+      state: createMemoryState(
+        makeState({ contexts: [contexts[0]], repos: [repo], worktrees: [] }),
+      ),
+      config: createMemoryConfig(),
+      git,
+      files,
+      tmux: createFakeTmux(),
+      shell: createFakeShell(),
+      process,
+      clock: createFixedClock(),
+      logger: createNullLogger(),
+    });
+
+    const preparation = service.prepareHotCopy(repo.id);
+    await flush();
+
+    assert.deepEqual(git.calls, []);
+    assert.equal(
+      files.calls.some(({ method, args }) => method === "removeTree" && args[0] === staging),
+      false,
+    );
+    assert.equal(
+      files.calls.some(({ method }) => method === "cloneTreeDetached"),
+      false,
+    );
+
+    files.paths.delete(resolve(staging));
+    files.paths.add(resolve(hot));
+    process.alive.delete(4242);
+    await preparation;
+  });
+
+  test("dispose releases an in-flight completion poll without stopping the worker", async () => {
+    const repo = repos[0];
+    assert.ok(repo);
+    const destination = "/home/test/.swarm/worktrees/bukhr/payroll/feat-after-dispose";
+    const staging = hotCopyStagingPath("/home/test/.swarm/worktrees", repo.id);
+    const files = createFakeFiles({ paths: [repo.path] });
+    const workerStarted = deferred();
+    files.cloneTreeDetached = async (source, target, hot, pidPath, logPath, opts) => {
+      files.calls.push({
+        method: "cloneTreeDetached",
+        args: [source, target, hot, pidPath, logPath, opts],
+      });
+      files.paths.add(resolve(target));
+      await files.writeTextAtomic(pidPath, "4242\n");
+      workerStarted.resolve();
+      return 4242;
+    };
+    const process = createFakeProcess([
+      { pid: 4242, ppid: 1, command: `sh -c hot-copy ${staging}` },
+    ]);
+    const service = createWorktreeService({
+      state: createMemoryState(
+        makeState({ contexts: [contexts[0]], repos: [repo], worktrees: [] }),
+      ),
+      config: createMemoryConfig(),
+      git: createFakeGit({
+        remoteBranches: {
+          [repo.path]: ["origin/main"],
+          [destination]: ["origin/main"],
+        },
+      }),
+      files,
+      tmux: createFakeTmux(),
+      shell: createFakeShell(),
+      process,
+      clock: createFixedClock(),
+      logger: createNullLogger(),
+    });
+
+    const preparation = service.prepareHotCopy(repo.id);
+    await workerStarted.promise;
+    const creation = service.create({ repoId: repo.id, branch: "feat/after-dispose" });
+    await flush();
+    assert.equal(
+      files.calls.some(({ method }) => method === "cloneTree"),
+      false,
+    );
+
+    service.dispose?.();
+    await preparation;
+    const created = await creation;
+
+    assert.equal(created.path, destination);
+    assert.equal(process.alive.has(4242), true);
+    assert.equal(files.paths.has(resolve(staging)), true);
+    assert.equal(files.calls.filter(({ method }) => method === "cloneTree").length, 1);
+  });
+
   test("self-heals a stale default branch and persists the resolved branch", async () => {
     const currentRepo = repos[0];
     assert.ok(currentRepo);
@@ -1212,6 +1414,7 @@ describe("createWorktreeService", () => {
       files: createFakeFiles({ paths: [repo.path] }),
       tmux: createFakeTmux(),
       shell: createFakeShell(),
+      process: createFakeProcess(),
       clock: createFixedClock(),
       logger: createNullLogger(),
     });
@@ -1248,6 +1451,7 @@ describe("createWorktreeService", () => {
       files,
       tmux: createFakeTmux(),
       shell: createFakeShell(),
+      process: createFakeProcess(),
       clock: createFixedClock(),
       logger: createNullLogger(),
     });
@@ -1289,6 +1493,7 @@ describe("createWorktreeService", () => {
       files: createFakeFiles({ paths: [repo.path] }),
       tmux: createFakeTmux(),
       shell: createFakeShell(),
+      process: createFakeProcess(),
       clock: createFixedClock(),
       logger: createNullLogger(),
     });
@@ -1316,6 +1521,7 @@ describe("createWorktreeService", () => {
       files: createFakeFiles({ paths: [repo.path] }),
       tmux: createFakeTmux(),
       shell: createFakeShell(),
+      process: createFakeProcess(),
       clock: createFixedClock(),
       logger: createNullLogger(),
     });
@@ -2012,6 +2218,7 @@ describe("createWorktreeService", () => {
       files: createFakeFiles(),
       tmux: createFakeTmux(),
       shell: createFakeShell(),
+      process: createFakeProcess(),
       clock: createFixedClock(),
       logger: createNullLogger(),
     });
@@ -2075,6 +2282,7 @@ describe("createWorktreeService", () => {
       files: createFakeFiles(),
       tmux: createFakeTmux(),
       shell: createFakeShell(),
+      process: createFakeProcess(),
       clock: createFixedClock(),
       logger: createNullLogger(),
     });
@@ -2093,6 +2301,7 @@ describe("createWorktreeService", () => {
       files: createFakeFiles({ paths: [destination] }),
       tmux: createFakeTmux(),
       shell: createFakeShell(),
+      process: createFakeProcess(),
       clock: createFixedClock(),
       logger: createNullLogger(),
     });
@@ -2116,6 +2325,7 @@ describe("createWorktreeService", () => {
       files: createFakeFiles({ paths: [repo.path] }),
       tmux: createFakeTmux(),
       shell: createFakeShell(),
+      process: createFakeProcess(),
       clock: createFixedClock(),
       logger: createNullLogger(),
     });
@@ -2141,6 +2351,7 @@ describe("createWorktreeService", () => {
       files,
       tmux: createFakeTmux(),
       shell: createFakeShell(),
+      process: createFakeProcess(),
       clock: createFixedClock(),
       logger: createNullLogger(),
     });
@@ -2175,6 +2386,7 @@ describe("createWorktreeService", () => {
       files,
       tmux: createFakeTmux(),
       shell: createFakeShell(),
+      process: createFakeProcess(),
       clock: createFixedClock(),
       logger: createNullLogger(),
     });
@@ -2344,6 +2556,7 @@ describe("createWorktreeService", () => {
       files,
       tmux,
       shell: createFakeShell(),
+      process: createFakeProcess(),
       clock,
       logger: createNullLogger(),
     });

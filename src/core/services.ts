@@ -5,6 +5,7 @@ import type {
   ContextId,
   PrRepoSlice,
   PrTab,
+  PullRequest,
   RemoteRepo,
   Repo,
   RepoId,
@@ -54,6 +55,7 @@ export interface WorktreeService {
     opts?: { signal?: AbortSignal; skipIfFresh?: boolean },
   ): Promise<void>;
   awaitPendingRefresh(repoId: RepoId): Promise<void>;
+  dispose?(): void;
   create(
     input: {
       repoId: RepoId;
@@ -69,6 +71,7 @@ export interface WorktreeService {
 }
 
 export interface PrService {
+  findByBranch(repoId: RepoId, branch: string): Promise<PullRequest | undefined>;
   load(
     repoIds: RepoId[],
     tab: PrTab,

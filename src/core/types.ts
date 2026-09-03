@@ -154,6 +154,14 @@ export const StateSchema = z.object({
 });
 export type State = z.infer<typeof StateSchema>;
 
+export const AGENT_NAMES = ["claude", "opencode"] as const;
+export const AgentNameSchema = z.enum(AGENT_NAMES);
+export type AgentName = z.infer<typeof AgentNameSchema>;
+
+export function isAgentName(value: string | undefined): value is AgentName {
+  return AgentNameSchema.safeParse(value).success;
+}
+
 export const WindowSpecSchema = z.object({
   name: z.string().min(1),
   command: z.string().min(1),
@@ -183,6 +191,7 @@ export const ConfigSchema = z.object({
   hotPoolSize: z.number().int().nonnegative().default(1),
   hotFreshnessMs: z.number().int().nonnegative().default(60000),
   hotRefreshIntervalMs: z.number().int().nonnegative().default(300000),
+  agent: AgentNameSchema.default("claude"),
   windows: z.array(WindowSpecSchema),
   sleep: SleepPolicySchema,
   github: z
@@ -202,9 +211,17 @@ export type Config = z.infer<typeof ConfigSchema>;
 
 export const DEFAULT_WINDOWS: WindowSpec[] = [
   { name: "nvim", command: "nvim ." },
-  { name: "cc", command: "cc" },
+  { name: "cc", command: "{agent}" },
   { name: "lg", command: "lazygit" },
 ];
+
+export function resolveWindowCommand(spec: WindowSpec, agent: AgentName): WindowSpec {
+  return { ...spec, command: spec.command.replaceAll("{agent}", agent) };
+}
+
+export function resolveWindows(config: Pick<Config, "agent" | "windows">): WindowSpec[] {
+  return config.windows.map((spec) => resolveWindowCommand(spec, config.agent));
+}
 
 export const DEFAULT_KEEP_ALIVE: KeepAliveRule[] = [
   {
@@ -245,6 +262,7 @@ export function defaultConfig(home: string): Config {
     hotPoolSize: 1,
     hotFreshnessMs: 60000,
     hotRefreshIntervalMs: 300000,
+    agent: "claude",
     windows: DEFAULT_WINDOWS.map((window) => ({ ...window })),
     sleep: {
       enabled: true,

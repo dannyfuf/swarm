@@ -24,6 +24,7 @@
 | `,` | Open settings |
 | `gt` / `gT` | Select the next / previous context |
 | `1`–`9` | Select the nth context |
+| `b` | Open the selected worktree branch's pull request in the browser, if one exists |
 | `y` | Copy the worktree path |
 | `?` | Open help |
 | `q`, `Esc`, `ctrl-c` | Quit the popup |
@@ -48,3 +49,5 @@
 | `Enter` | Confirm or select |
 | `Tab` / `S-Tab` | Focus the next / previous field |
 | `ctrl-n` / `ctrl-p`, `↓` / `↑` | Select the next / previous list item |
+| `Space` | Toggle the selected settings row, or cycle the coding agent |
+| `←` / `→` | Cycle the selected coding agent |

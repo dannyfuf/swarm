@@ -233,6 +233,44 @@ describe("GitHub adapter", () => {
     assert.deepEqual(shell.calls[1]?.args, [...base, "--search", "user-review-requested:@me"]);
   });
 
+  test("finds one open pull request by head branch", async () => {
+    const shell = createFakeShell([
+      {
+        match: (cmd) => cmd === "gh",
+        result: { stdout: JSON.stringify([ghPr({ number: 77, headRefName: "feat/exports" })]) },
+      },
+    ]);
+    const { github } = createAdapter(createFakeFiles(), shell);
+
+    const pr = await github.findPullRequest({ owner: "acme", name: "app" }, "feat/exports");
+
+    assert.equal(pr?.number, 77);
+    assert.deepEqual(shell.calls[0]?.args, [
+      "pr",
+      "list",
+      "--repo",
+      "acme/app",
+      "--state",
+      "open",
+      "--head",
+      "feat/exports",
+      "--limit",
+      "1",
+      "--json",
+      "number,title,url,author,headRefName,baseRefName,isDraft,isCrossRepository,headRepository,headRepositoryOwner,reviewDecision,statusCheckRollup,additions,deletions,labels,updatedAt",
+    ]);
+  });
+
+  test("returns undefined when a head branch has no open pull request", async () => {
+    const shell = createFakeShell([{ match: (cmd) => cmd === "gh", result: { stdout: "[]" } }]);
+    const { github } = createAdapter(createFakeFiles(), shell);
+
+    assert.equal(
+      await github.findPullRequest({ owner: "acme", name: "app" }, "feat/without-pr"),
+      undefined,
+    );
+  });
+
   test("maps review decisions, fork metadata, labels, and check rollups", async () => {
     const shell = createFakeShell([
       {

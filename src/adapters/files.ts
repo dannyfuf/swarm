@@ -64,6 +64,53 @@ async function cloneDirectoryWithNodeFfi(
   }
 }
 
+function cloneArgs(platform: NodeJS.Platform, src: string, dest: string): string[] {
+  return platform === "darwin"
+    ? ["-Rc", src, dest]
+    : platform === "linux"
+      ? ["-R", "--reflink=auto", src, dest]
+      : ["-R", src, dest];
+}
+
+function detachedCloneScript(platform: NodeJS.Platform): string {
+  const copy =
+    platform === "darwin" ? "cp -Rc" : platform === "linux" ? "cp -R --reflink=auto" : "cp -R";
+  return `source_path=$1
+staging_path=$2
+hot_path=$3
+pid_path=$4
+marker_text=$5
+shift 5
+cleanup() {
+  status=$?
+  trap - EXIT HUP INT TERM
+  if [ "$status" -ne 0 ]; then rm -rf "$staging_path"; fi
+  rm -f "$pid_path"
+  exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+printf '%s\\n' "$$" > "$pid_path"
+${copy} "$source_path" "$staging_path" || exit $?
+cd "$staging_path" || exit $?
+hook_index=0
+for command do
+  hook_index=$((hook_index + 1))
+  started=$(date +%s)
+  printf '[prepare hook %s] start: %s\\n' "$hook_index" "$command"
+  sh -c "$command"
+  hook_status=$?
+  ended=$(date +%s)
+  duration=$(((ended - started) * 1000))
+  printf '[prepare hook %s] end: exit=%s duration=%sms\\n' "$hook_index" "$hook_status" "$duration"
+done
+marker_tmp="$staging_path/.git/swarm-hot.json.tmp-$$"
+printf '%s' "$marker_text" > "$marker_tmp" || exit $?
+mv "$marker_tmp" "$staging_path/.git/swarm-hot.json" || exit $?
+[ ! -e "$hot_path" ] || exit 1
+mv "$staging_path" "$hot_path"`;
+}
+
 export function createFiles(
   shell: Shell,
   logger: Logger,
@@ -166,12 +213,7 @@ export function createFiles(
         }
       }
 
-      const args =
-        platform === "darwin"
-          ? ["-Rc", src, dest]
-          : platform === "linux"
-            ? ["-R", "--reflink=auto", src, dest]
-            : ["-R", src, dest];
+      const args = cloneArgs(platform, src, dest);
       const result = await shell
         .run("cp", args)
         .catch((error: unknown) => fail(`Could not clone ${src} to ${dest}`, error));
@@ -185,6 +227,28 @@ export function createFiles(
         await access(dest);
       } catch (error) {
         fail(`Clone destination was not created at ${dest}`, error);
+      }
+    },
+
+    async cloneTreeDetached(src, staging, dest, pidPath, logPath, opts): Promise<number> {
+      try {
+        return await shell.spawnDetached(
+          "sh",
+          [
+            "-c",
+            detachedCloneScript(platform),
+            "swarm-hot-copy",
+            src,
+            staging,
+            dest,
+            pidPath,
+            opts.markerText,
+            ...opts.prepareCommands,
+          ],
+          { logPath },
+        );
+      } catch (error) {
+        return fail(`Could not start detached clone ${src} to ${dest}`, error);
       }
     },
 

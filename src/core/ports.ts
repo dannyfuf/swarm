@@ -45,6 +45,7 @@ export interface Logger {
   warn(msg: string, data?: unknown): void;
   error(msg: string, data?: unknown): void;
   child(scope: string): Logger;
+  flush(): Promise<void>;
 }
 
 export interface GitPort {
@@ -71,6 +72,14 @@ export interface FilesPort {
   exists(p: string): Promise<boolean>;
   ensureDir(p: string): Promise<void>;
   cloneTree(src: string, dest: string): Promise<void>;
+  cloneTreeDetached(
+    src: string,
+    staging: string,
+    dest: string,
+    pidPath: string,
+    logPath: string,
+    opts: { markerText: string; prepareCommands: string[] },
+  ): Promise<number>;
   move(src: string, dest: string): Promise<void>;
   removeTree(p: string): Promise<void>;
   removeDetached(p: string): Promise<void>;
@@ -137,6 +146,10 @@ export interface ProcessPort {
 export interface GithubPort {
   viewer(): Promise<{ login: string }>;
   listRepos(owner: string, opts?: { signal?: AbortSignal; force?: boolean }): Promise<RemoteRepo[]>;
+  findPullRequest(
+    repo: { owner: string; name: string },
+    branch: string,
+  ): Promise<PullRequest | undefined>;
   readCachedPullRequests(
     repo: { owner: string; name: string },
     tab: PrTab,

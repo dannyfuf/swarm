@@ -2,7 +2,9 @@ import { join } from "node:path";
 import { z } from "zod";
 import { SwarmError } from "../core/errors.ts";
 import type { ConfigPort, FilesPort, Logger } from "../core/ports.ts";
-import { type Config, ConfigSchema, defaultConfig } from "../core/types.ts";
+import { AGENT_NAMES, type Config, ConfigSchema, defaultConfig } from "../core/types.ts";
+
+const LEGACY_AGENT_COMMANDS = new Set<string>(["cc", ...AGENT_NAMES]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -42,6 +44,18 @@ function validateConfig(value: unknown, action: string): Config {
   }
 }
 
+function normalizeLegacyAgentWindow(config: Config): Config {
+  if (config.windows.some(({ command }) => command.includes("{agent}"))) return config;
+  const legacyIndex = config.windows.findIndex(({ command }) => LEGACY_AGENT_COMMANDS.has(command));
+  if (legacyIndex === -1) return config;
+  return {
+    ...config,
+    windows: config.windows.map((window, index) =>
+      index === legacyIndex ? { ...window, command: "{agent}" } : window,
+    ),
+  };
+}
+
 export function createConfigStore(
   files: FilesPort,
   path: string,
@@ -70,9 +84,8 @@ export function createConfigStore(
         );
       }
 
-      const config = validateConfig(
-        deepMerge(defaultConfig(home), parsed),
-        `Invalid config file ${path}`,
+      const config = normalizeLegacyAgentWindow(
+        validateConfig(deepMerge(defaultConfig(home), parsed), `Invalid config file ${path}`),
       );
       return {
         ...config,

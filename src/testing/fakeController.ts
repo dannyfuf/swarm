@@ -1,4 +1,4 @@
-import { selectedPr, selectedRepo, selectedWorktree } from "../app/selectors.ts";
+import { selectedPr, selectedRepo, selectedWorktree, worktreePr } from "../app/selectors.ts";
 import type { AppState, Controller, Operation, Store } from "../core/app.ts";
 import { SwarmError } from "../core/errors.ts";
 import { slugify, worktreeId } from "../core/paths.ts";
@@ -18,6 +18,7 @@ export interface FakeControllerFixtures {
 
 export type FakeController = Controller & {
   readonly remoteRepos: RemoteRepo[];
+  readonly savedConfigPatches: Partial<Config>[];
   readonly yankedPaths: string[];
   readonly disposed: boolean;
   readonly yankedPrUrls: string[];
@@ -38,6 +39,7 @@ export function createFakeController(
   const remotes = structuredClone(fixtures.remoteRepos ?? defaultRemoteRepos);
   const delayMs = fixtures.operationDelayMs ?? 300;
   const yankedPaths: string[] = [];
+  const savedConfigPatches: Partial<Config>[] = [];
   const yankedPrUrls: string[] = [];
   const browsedPrUrls: string[] = [];
   const preparedCopyRefreshes: string[] = [];
@@ -86,6 +88,7 @@ export function createFakeController(
     get remoteRepos() {
       return remotes;
     },
+    savedConfigPatches,
     yankedPaths,
     yankedPrUrls,
     browsedPrUrls,
@@ -352,6 +355,7 @@ export function createFakeController(
       });
     },
     async saveConfig(patch) {
+      savedConfigPatches.push(structuredClone(patch));
       config = { ...config, ...patch };
       store.dispatch({ type: "setConfig", config });
       store.dispatch({ type: "closeDialog" });
@@ -383,6 +387,14 @@ export function createFakeController(
       const pr = selectedPr(store.getState());
       if (!pr) throw new SwarmError("not-found", "No pull request is selected");
       browsedPrUrls.push(pr.url);
+    },
+    async browseSelectedWorktreePr() {
+      const state = store.getState();
+      if (state.pane !== "worktrees") return;
+      const worktree = selectedWorktree(state);
+      if (!worktree) return;
+      const pr = worktreePr(state, worktree);
+      if (pr) browsedPrUrls.push(pr.url);
     },
     async yankSelectedPr() {
       const pr = selectedPr(store.getState());

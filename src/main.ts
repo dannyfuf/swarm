@@ -25,7 +25,7 @@ export type CliCommand =
   | { kind: "tui" }
   | { kind: "open"; target: string }
   | { kind: "sleep"; session?: string }
-  | { kind: "agent"; agent: AgentName }
+  | { kind: "agent"; agent?: AgentName }
   | { kind: "doctor" }
   | { kind: "version" }
   | { kind: "help" };
@@ -37,8 +37,32 @@ interface DoctorCheck {
   hint: string;
 }
 
+export interface TuiExitDependencies {
+  flushStdout(): Promise<void>;
+  flushStderr(): Promise<void>;
+  exit(code: number): void;
+}
+
+function flushWritable(stream: NodeJS.WriteStream): Promise<void> {
+  return new Promise<void>((resolve) => {
+    stream.write("", () => resolve());
+  });
+}
+
+export async function exitTuiProcess(
+  code: number,
+  deps: TuiExitDependencies = {
+    flushStdout: () => flushWritable(process.stdout),
+    flushStderr: () => flushWritable(process.stderr),
+    exit: (exitCode) => process.exit(exitCode),
+  },
+): Promise<void> {
+  await Promise.all([deps.flushStdout(), deps.flushStderr()]);
+  deps.exit(code);
+}
+
 const USAGE =
-  "Usage: swarm [open <owner/name#slug|repo/slug> | sleep [session] | agent <claude|opencode> | doctor | --version]";
+  "Usage: swarm [open <owner/name#slug|repo/slug> | sleep [session] | agent [claude|opencode] | doctor | --version]";
 
 export function parseArgv(argv: string[]): CliCommand {
   const [command, ...args] = argv;
@@ -56,10 +80,18 @@ export function parseArgv(argv: string[]): CliCommand {
   if (command === "sleep" && args.length <= 1) {
     return args[0] ? { kind: "sleep", session: args[0] } : { kind: "sleep" };
   }
-  if (command === "agent" && args.length === 1 && isAgentName(args[0])) {
-    return { kind: "agent", agent: args[0] };
+  if (command === "agent" && args.length <= 1) {
+    if (args.length === 0) return { kind: "agent" };
+    if (isAgentName(args[0])) return { kind: "agent", agent: args[0] };
   }
   throw new SwarmError("validation", USAGE);
+}
+
+export function resolveAgentName(
+  override: AgentName | undefined,
+  configured: AgentName,
+): AgentName {
+  return override ?? configured;
 }
 
 function errorMessage(error: unknown): string {
@@ -305,7 +337,11 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     startupProfiler.mark("runtime.created");
     runtime = createdRuntime;
     if (command.kind === "agent") {
-      return await runAgentCommand(createdRuntime, command.agent, process.env);
+      return await runAgentCommand(
+        createdRuntime,
+        resolveAgentName(command.agent, createdRuntime.configValue.agent),
+        process.env,
+      );
     }
     await runRuntimeCommand(createdRuntime, command);
     return 0;
@@ -315,10 +351,14 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     return 1;
   } finally {
     startupProfiler.flush();
+    await runtime?.logger.flush();
   }
 }
 
 const entryPath = process.argv[1];
 if (entryPath && import.meta.url === pathToFileURL(entryPath).href) {
-  process.exitCode = await main();
+  const argv = process.argv.slice(2);
+  const exitCode = await main(argv);
+  if (argv.length === 0) await exitTuiProcess(exitCode);
+  else process.exitCode = exitCode;
 }

@@ -54,3 +54,7 @@ export function hotCopyPath(worktreesDir: string, id: RepoId, slot = 0): string 
 export function hotCopyStagingPath(worktreesDir: string, id: RepoId, slot = 0): string {
   return join(worktreesDir, id, slot === 0 ? ".hot.staging" : `.hot.${slot}.staging`);
 }
+
+export function hotCopyPidPath(worktreesDir: string, id: RepoId, slot = 0): string {
+  return `${hotCopyStagingPath(worktreesDir, id, slot)}.pid`;
+}

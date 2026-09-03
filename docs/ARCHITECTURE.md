@@ -17,8 +17,9 @@ change a contract without recording it in `INTEGRATION NOTES`.
   Not a `git worktree`: a full independent copy (APFS `cp -c` clonefile / reflink).
 - **Prepared-copy pool**: zero or more pristine-base copies with repo `prepare` hooks already run.
   Creation claims the lowest slot by rename and immediately replenishes it from the base clone.
-- **Mount** a worktree = ensure its tmux session exists with the configured windows
-  (default: `nvim`, `cc` → `claude`, `lg` → `lazygit`) and switch the client to it.
+- **Mount** a worktree = ensure its tmux session exists with the configured windows, resolving
+  `{agent}` to the configured coding agent (default: `nvim`, `cc` → `claude`, `lg` → `lazygit`),
+  and switch the client to it.
 - **Unmount / sleep** a worktree = apply the sleep policy to its session: keep windows whose
   process tree matches a keep-alive rule (default: `claude`, `opencode`, `codex`, and any
   process listening on a TCP port); gracefully close the rest (nvim gets `:qa`; if it refuses
@@ -39,8 +40,10 @@ change a contract without recording it in `INTEGRATION NOTES`.
   worktrees/<owner>/<name>/.hot/     prepared copy slot 0 (backward-compatible name)
     .git/swarm-hot.json         freshness marker: fetchedAt, defaultBranch, origin SHA, prepare-hook fingerprint
   worktrees/<owner>/<name>/.hot.staging/  incomplete slot 0 rebuild, never consumed
+  worktrees/<owner>/<name>/.hot.staging.pid detached slot 0 worker pid
   worktrees/<owner>/<name>/.hot.<n>/       prepared copy slot n, n >= 1
   worktrees/<owner>/<name>/.hot.<n>.staging/ incomplete slot n rebuild, never consumed
+  worktrees/<owner>/<name>/.hot.<n>.staging.pid detached slot n worker pid
   worktrees/<owner>/<name>/<slug>/.git/swarm-creating.json  publish intent, removed after state commit
   trash/<epochms>-<slug>/      deleted worktrees/repos land here by rename, rm -rf runs detached
   cache/github/<owner>.json    cached `gh repo list` results with fetchedAt
@@ -63,9 +66,9 @@ PATH binary needs a version-probe process.
 ```
 bin/swarm                 launcher (runs dist or src, restarts in place when the TUI returns 75)
 tmux/tmux.conf            full tmux config (theme, persistence) with swarm and persistent agent popup bindings
-src/main.ts               CLI entry: `swarm` (TUI), `swarm open <repo>/<slug>`, `swarm sleep <session>`, `swarm agent <claude|opencode>`, `swarm doctor`
+src/main.ts               CLI entry: `swarm` (TUI), `swarm open <repo>/<slug>`, `swarm sleep <session>`, `swarm agent [claude|opencode]`, `swarm doctor`
 src/core/                 contracts and pure helpers; no I/O
-  types.ts                domain zod schemas + inferred types (section 4)
+  types.ts                domain zod schemas + inferred types, agent names, window resolution (section 4)
   ports.ts                infrastructure port interfaces (section 5)
   services.ts             service interfaces + operation events (section 6)
   app.ts                  AppState, Action, Store, Keymap contracts (section 7)
@@ -74,7 +77,7 @@ src/core/                 contracts and pure helpers; no I/O
   errors.ts               SwarmError with `code` union
 src/adapters/             one file per port, shell-based; each has *.test.ts using FakeShell
 src/services/             one file per service interface; tests use fakes from src/testing
-  agentPopup.ts           pure agent names/commands, tmux attach argv/socket parsing, and env stripping
+  agentPopup.ts           agent-name re-exports, commands, tmux attach argv/socket parsing, and env stripping
 src/app/                  store.ts (createStore), keymap.ts, controller.ts (wires services→store)
 src/ui/                   OpenTUI React components; depends only on src/core
 src/testing/              fakes for every port (FakeShell, FakeGit, FakeFiles, FakeTmux, FakeProcess, FakeGithub, MemoryState, MemoryConfig) and fixtures
@@ -166,7 +169,8 @@ export const ConfigSchema = z.object({
   hotPoolSize: z.number().int().nonnegative().default(1),
   hotFreshnessMs: z.number().int().nonnegative().default(60000),
   hotRefreshIntervalMs: z.number().int().nonnegative().default(300000),
-  windows: z.array(WindowSpecSchema),                     // default nvim/cc/lg
+  agent: z.enum(["claude", "opencode"]).default("claude"),
+  windows: z.array(WindowSpecSchema),                     // default nvim/{agent}/lazygit
   sleep: SleepPolicySchema,
   github: z.object({
     cacheTtlSeconds: z.number().int().default(3600),
@@ -176,6 +180,9 @@ export const ConfigSchema = z.object({
 });
 export function defaultConfig(home: string): Config;   // fills all defaults
 export function defaultState(): State;
+export const AGENT_NAMES = ["claude", "opencode"] as const;
+export function resolveWindowCommand(spec: WindowSpec, agent: AgentName): WindowSpec;
+export function resolveWindows(config: Pick<Config, "agent" | "windows">): WindowSpec[];
 
 // Runtime (computed, never persisted)
 export type SessionState = "none" | "detached" | "attached";
@@ -198,7 +205,7 @@ Pure helpers (`src/core/paths.ts`):
 - `sessionName(repoName, slug)` → `${repoName}/${slug}` with `.` and `:` replaced by `-` (tmux forbids them)
 - `repoId(owner, name)`, `worktreeId(repoId, slug)`, `parseWorktreeId(id)`
 - `repoPath(config, owner, name)`, `worktreePath(config, owner, name, slug)`
-- `hotCopyPath(worktreesDir, repoId, slot = 0)`, `hotCopyStagingPath(worktreesDir, repoId, slot = 0)`
+- `hotCopyPath(worktreesDir, repoId, slot = 0)`, `hotCopyStagingPath(worktreesDir, repoId, slot = 0)`, `hotCopyPidPath(worktreesDir, repoId, slot = 0)`
 
 ## 5. Ports (`src/core/ports.ts`)
 
@@ -213,7 +220,7 @@ export interface Shell {
   spawnDetached(cmd: string, args: string[], opts?: { cwd?: string; logPath?: string }): Promise<number>; // new process group, ignored stdin, optional file-backed stdout/stderr, unref
   exec(cmd: string, args: string[]): Promise<never>;                                   // replace current process stdio (tmux attach outside tmux)
 }
-export interface Logger { info(msg: string, data?: unknown): void; warn(...): void; error(...): void; child(scope: string): Logger }
+export interface Logger { info(msg: string, data?: unknown): void; warn(...): void; error(...): void; child(scope: string): Logger; flush(): Promise<void> }
 
 export interface GitPort {
   cloneDetached(url: string, dest: string, logPath: string): Promise<number>;
@@ -232,7 +239,8 @@ export interface GitPort {
 export interface FilesPort {
   exists(p: string): Promise<boolean>;
   ensureDir(p: string): Promise<void>;
-  cloneTree(src: string, dest: string): Promise<void>;   // darwin: cp -Rc ; linux: cp -R --reflink=auto ; fallback cp -R
+  cloneTree(src: string, dest: string): Promise<void>;   // darwin: node:ffi clonefile, then cp -Rc fallback; linux: cp -R --reflink=auto
+  cloneTreeDetached(src: string, staging: string, dest: string, pidPath: string, logPath: string, opts: { markerText: string; prepareCommands: string[] }): Promise<number>; // detached copy + prepare + marker + atomic publish; cleans staging on failure
   move(src: string, dest: string): Promise<void>;        // rename
   removeTree(p: string): Promise<void>;                  // guarded, blocking rm for staging cleanup
   removeDetached(p: string): Promise<void>;              // spawnDetached rm -rf
@@ -270,6 +278,7 @@ export interface ProcessPort {
 export interface GithubPort {
   viewer(): Promise<{ login: string }>;
   listRepos(owner: string, opts?: { signal?: AbortSignal; force?: boolean }): Promise<RemoteRepo[]>;  // force bypasses the cache
+  findPullRequest(repo: { owner: string; name: string }, branch: string): Promise<PullRequest | undefined>; // targeted open-PR lookup by head branch
 }
 export interface StatePort  { load(): Promise<State>;  save(state: State): Promise<void> }   // validated, atomic
 export interface ConfigPort { load(): Promise<Config>; save(config: Config): Promise<void> }
@@ -316,8 +325,13 @@ export interface WorktreeService {
     // fast: rename lowest slot → private attempt → refresh/checkout/hooks → publish+persist
     // fallback: cloneTree(base, private attempt) → refresh/checkout/hooks → publish+persist
   runPostCreateHooks(worktreeId: WorktreeId, onEvent?: OnEvent): Promise<void>;
+  dispose?(): void; // cancels only local, unref'd completion pollers; detached workers continue
   delete(worktreeId: WorktreeId, onEvent?: OnEvent): Promise<void>;           // killSession → move to trash → removeDetached → persist
   touch(worktreeId: WorktreeId): Promise<void>;                                // lastOpenedAt = now
+}
+export interface PrService {
+  findByBranch(repoId: RepoId, branch: string): Promise<PullRequest | undefined>;
+  // load(...) streams cached and refreshed PR slices for a repo scope and tab
 }
 export interface SessionService {
   mount(worktree: Worktree): Promise<void>;        // ensure session + windows in configured order (append missing, swap into place, select first)
@@ -380,24 +394,35 @@ Default-branch resolution trusts `refs/remotes/origin/HEAD` only when its target
 remote branches (or passes `show-ref`). A dangling target triggers `git remote set-head origin
 --auto`, a re-read, and then the existing hint/main/master/first-remote fallback chain.
 
-Each replenish fills only the lowest empty slot. It refreshes the base clone outside the state
-mutation lock, copies into the matching staging path, runs `hooks.prepare` there, writes the marker,
-and publishes with a rename only after all preparation finishes. Hook failures are warnings and do
-not prevent publication. Concurrent rebuilds for one repo share an in-memory promise. Startup asks
-for enough replenishments to fill each configured pool while a two-worker semaphore limits active
-repositories; clone promotion and creation also schedule replenishment. Reserved `.hot*` directory
-names are excluded from normal worktree directory listings. Replenishment/startup enumerates the
-repo worktree root and removes numbered slots beyond the configured size; repository deletion uses
-the same discovery rule to remove `.hot`, `.hot.<n>`, and their `.staging` variants regardless of
-the current pool size. Repository deletion first marks the repo as deleting, rejects new
-prepare/refresh requests, aborts and awaits existing work, then discovers and removes every slot
-while holding the repo mutex. Preparation rechecks both the deleting flag and repository
-registration immediately before publishing staging to a slot.
+Each replenish fills only the lowest empty slot. Under the per-repo in-process mutex it discovers
+or joins any live detached worker, refreshes the base clone, computes the origin SHA and prepare
+fingerprint, and launches one detached `sh` worker. The worker copies into the numbered `.staging`
+path (`cp -Rc` on macOS, reflink-capable `cp` on Linux), runs the ordered `hooks.prepare` commands
+with warning-only exit semantics, writes `.git/swarm-hot.json`, verifies the destination slot is
+still absent, and only then publishes staging to the slot by rename. It writes its pid to the
+matching `.staging.pid`, appends output under `SWARM_HOME/logs`, removes that pid on exit, and
+removes staging on any copy/marker/publish failure.
 
-One in-process async mutex per repository serializes slot claims, preparation, each prepared-slot
-refresh, base refresh/reset, and clone-from-base staging. Post-claim Git work in a private attempt
-does not hold it. This mutex intentionally does not coordinate separate swarm OS processes;
-cross-process exclusion is limited to the final state lock and destination conflict checks.
+The worker continues after the launching process releases its mutex, so the pid marker plus staging
+path are the cross-process preparation contract. Before preparation, refresh, creation, or repository
+deletion touches a repo pool, the service validates a recorded live pid by checking that its process
+command targets that exact staging path and waits for it with unref'd polls. Dead or invalid metadata
+and staging are cleaned before retry. Consumers rename only complete `.hot`/`.hot.<n>` slots and
+never staging. Controller disposal aborts in-process refresh work and cancels local polls, but never
+stops a detached worker; a later process reattaches through the same marker. Repository deletion
+first rejects new work, releases abortable callers, waits for detached workers to finish, then
+discovers and removes every configured or historical hot/staging slot and pid while holding the
+repo mutex.
+
+Concurrent rebuild requests for one repo share an in-memory promise. Startup asks for enough
+replenishments to fill each configured pool while a two-worker semaphore limits active repositories;
+clone promotion and creation also schedule replenishment. Reserved `.hot*` directory names are
+excluded from normal worktree directory listings. Replenishment/startup enumerates the repo worktree
+root and removes numbered slots beyond the configured size.
+
+One in-process async mutex per repository serializes slot claims, preparation launch, each
+prepared-slot refresh, base refresh/reset, and clone-from-base staging. Post-claim Git work in a
+private attempt and detached worker execution do not hold it.
 
 `refreshPreparedCopy(repoId, {signal, skipIfFresh})` full-fetches, resets, and rewrites the marker
 for every existing configured slot, sequentially; when no slot exists it refreshes the base.
@@ -407,8 +432,9 @@ caller arriving behind a skip-mode run queues one forced run immediately after i
 its AbortController: aborting a caller detaches only that caller and cancels the shared operation
 only after the last interested caller aborts. `awaitPendingRefresh(repoId)` exposes the whole
 in-flight boundary. The controller gives refresh/preparation work a lifecycle signal and aborts it
-from `dispose()`. The production controller runs a sequential periodic refresh every
-`hotRefreshIntervalMs`; `0` disables it and tests opt in.
+from `dispose()`; detached preparation polls are separately released there. The production
+controller runs a sequential periodic refresh every `hotRefreshIntervalMs`; `0` disables it and
+tests opt in.
 
 Creation registers the worktree before post-create work. The controller then starts
 `runPostCreateHooks(worktreeId, onEvent)` as `Post-create hooks · <slug>`, using a distinct operation
@@ -512,6 +538,7 @@ export interface Controller {                           // src/app/controller.ts
   saveContext(input: { id?: ContextId; name: string; owners: string[] }): Promise<void>; deleteContext(id: ContextId): Promise<void>;
   saveConfig(patch: Partial<Config>): Promise<void>; getConfig(): Config;
   yankPath(): Promise<void>;
+  browseSelectedWorktreePr(): Promise<void>;            // cached association, then targeted branch lookup; no PR is a silent no-op
   update(): Promise<void>;                              // clean main → pull, install, build → request exit 75
   dispose(): void;
 }
@@ -543,8 +570,9 @@ export type UiExit = "quit" | "opened";
 | `U` | update swarm from a clean `main`, rebuild, and restart |
 | `/` | filter (Enter opens selected match; Esc exits input, keeps filter; Esc again clears) |
 | `:` | command palette (fuzzy list of all commands + contexts) |
-| `,` | settings (sleep policy; windows and clone protocol are read-only) |
+| `,` | settings (coding agent and sleep policy; windows and clone protocol are read-only) |
 | `gt` / `gT`, `1`-`9` | next / prev / nth context |
+| `b` | open the selected worktree branch's PR in the browser, if one exists |
 | `y` | yank worktree path |
 | `?` | help overlay |
 | `q`, `Esc`, `ctrl-c` | quit popup |
@@ -584,6 +612,12 @@ reopening the same repository cannot accept an older completion.
 
 ## 10. Integration notes
 
+- 2026-09-03: Merge reconciliation keeps detached hot-copy preparation from #13 while extending it
+  to the numbered pool: each worker copies to its slot staging path, runs prepare hooks, writes the
+  SHA/fingerprint freshness marker, and atomically publishes before removing its per-slot pid file.
+  Create, refresh, replenish, startup, and deletion validate and await live staging workers because
+  the in-process repo mutex covers worker launch but cannot cover execution after detach. Disposal
+  releases only unref'd local polls, allowing the worker to finish after the popup closes.
 - 2026-09-03: Round-2 hardening added `.git/swarm-creating.json` publish intents plus startup
   reconciliation; invalidates hot markers before destructive refresh and rebuilds fingerprint
   changes from the pristine base; coordinates repository deletion with preparation/refresh aborts
@@ -598,7 +632,8 @@ reopening the same repository cannot accept an older completion.
   reruns after reset/config changes; lifecycle cancellation plus `Shell.runDetachedLogged`; dynamic
   `.hot*` discovery/removal; and mode-aware refresh dedupe with per-caller abort detachment.
   `FilesPort.listDirs` gained `includeReserved`, `WorktreeService.prepareHotCopy` gained a signal,
-  and cross-process mutexing remains explicitly out of scope.
+  and detached workers now coordinate through per-slot staging/pid publication rather than the
+  in-process mutex.
 - 2026-09-03: Phase B added `Config.hotPoolSize` (default 1) and
   `Config.hotRefreshIntervalMs` (default 300000), numbered `.hot.<n>` slots, lowest-slot
   consume/replenish ordering, two-repo startup preparation, and sequential freshness-aware
@@ -615,6 +650,21 @@ reopening the same repository cannot accept an older completion.
   Prepared copies now store `.git/swarm-hot.json`; `Config.hotFreshnessMs` defaults to 60000.
   `WorktreeService` gained deduplicated `refreshPreparedCopy` and `awaitPendingRefresh`, while
   `GitPort` gained narrow `fetchRefs`, abortable refresh methods, and `revision`.
+- 2026-09-03: `Config.agent` now selects `claude` or `opencode` (default `claude`) for worktree
+  sessions. The default `cc` window retains its name but stores `{agent}` as its command; core
+  resolves placeholders at mount time, and config loading normalizes one legacy exact
+  `cc`/`claude`/`opencode` window when no placeholder exists. Settings edits the agent alongside
+  sleep policy, while argument-less `swarm agent` uses the same configured default.
+- 2026-09-03: hot-copy rebuilds now run as detached `cp && mv` workers with per-repo pid files,
+  log output, failure cleanup, restart-safe live-worker detection, and unref'd/cancellable
+  completion polling. The numbered-pool extension and marker/hook publication details are recorded
+  in the merge reconciliation note above. The TUI entrypoint flushes profiling, logging, stdout,
+  and stderr before explicitly exiting after renderer/controller teardown so unrelated in-flight
+  handles cannot hold the tmux popup open.
+- 2026-09-03: the worktree screen now reuses `b` from the PR screen to open the selected
+  worktree branch's open PR without leaving the screen. Resolution first uses the existing
+  in-memory worktree/PR association, then performs a targeted repo-and-head-branch GitHub lookup
+  so PRs outside the authored/review-requested caches are still found; no match is a silent no-op.
 - 2026-09-03: worktree creation gained a per-repository single-slot hot-copy pool. Complete
   copies are staged under `.hot.staging`, atomically published as `.hot`, consumed by rename,
   refreshed in their destination, and rebuilt by controller-managed background operations.

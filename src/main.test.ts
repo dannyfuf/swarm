@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { SwarmError } from "./core/errors.ts";
-import { formatUnmountReport, parseArgv } from "./main.ts";
+import { exitTuiProcess, formatUnmountReport, parseArgv, resolveAgentName } from "./main.ts";
 
 describe("CLI parsing", () => {
   test("defaults to the TUI and recognizes simple commands", () => {
@@ -20,8 +20,11 @@ describe("CLI parsing", () => {
       kind: "sleep",
       session: "payroll/main",
     });
+    assert.deepEqual(parseArgv(["agent"]), { kind: "agent" });
     assert.deepEqual(parseArgv(["agent", "claude"]), { kind: "agent", agent: "claude" });
     assert.deepEqual(parseArgv(["agent", "opencode"]), { kind: "agent", agent: "opencode" });
+    assert.equal(resolveAgentName(undefined, "opencode"), "opencode");
+    assert.equal(resolveAgentName("claude", "opencode"), "claude");
   });
 
   test("rejects malformed invocations with a validation error", () => {
@@ -46,5 +49,24 @@ describe("CLI parsing", () => {
       closed: ["nvim"],
       sessionKilled: false,
     });
+  });
+
+  test("flushes stdout and stderr before explicitly exiting the TUI process", async () => {
+    const events: string[] = [];
+
+    await exitTuiProcess(7, {
+      async flushStdout() {
+        events.push("stdout");
+      },
+      async flushStderr() {
+        events.push("stderr");
+      },
+      exit(code) {
+        events.push(`exit:${code}`);
+      },
+    });
+
+    assert.deepEqual(events.slice(0, 2).sort(), ["stderr", "stdout"]);
+    assert.equal(events[2], "exit:7");
   });
 });

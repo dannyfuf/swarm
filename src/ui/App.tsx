@@ -167,7 +167,9 @@ export function App({ store, controller, onExit, home = process.env.HOME ?? "" }
         controller.setPrTab(current.prTab === "mine" ? "review" : "mine");
         return;
       case "browse":
-        guard(() => controller.browseSelectedPr());
+        guard(() =>
+          onPrs ? controller.browseSelectedPr() : controller.browseSelectedWorktreePr(),
+        );
         return;
       case "open":
       case "openKeep": {

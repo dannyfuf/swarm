@@ -86,6 +86,24 @@ export function createFakeFiles(initial: FakeFilesInitial = {}): FakeFiles {
         if (isWithin(path, source)) texts.set(resolve(destination, relative(source, path)), text);
       }
     },
+    async cloneTreeDetached(src, staging, dest, pidPath, logPath, opts) {
+      calls.push({
+        method: "cloneTreeDetached",
+        args: [src, staging, dest, pidPath, logPath, opts],
+      });
+      const source = resolve(src);
+      const stagingPath = resolve(staging);
+      for (const path of [...paths]) {
+        if (isWithin(path, source)) paths.add(resolve(stagingPath, relative(source, path)));
+      }
+      for (const [path, text] of [...texts]) {
+        if (isWithin(path, source)) texts.set(resolve(stagingPath, relative(source, path)), text);
+      }
+      texts.set(resolve(stagingPath, ".git/swarm-hot.json"), opts.markerText);
+      paths.add(resolve(stagingPath, ".git/swarm-hot.json"));
+      movePrefix(stagingPath, resolve(dest));
+      return 4242;
+    },
     async move(src, dest) {
       calls.push({ method: "move", args: [src, dest] });
       const source = resolve(src);
