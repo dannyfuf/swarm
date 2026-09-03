@@ -74,6 +74,7 @@ const DIALOG_COLUMN: Line[] = [
   entry("⏎", "Confirm"),
   entry("Tab", "Next field"),
   entry("ctrl-n/p", "Next / previous item"),
+  entry("Space / ←→", "Change setting"),
 ];
 
 const TMUX_LEFT_COLUMN: Line[] = [

@@ -41,6 +41,7 @@ describe("config adapter", () => {
 
     assert.equal(config.reposDir, "/Users/test/source");
     assert.equal(config.worktreesDir, "/Users/test");
+    assert.equal(config.agent, "claude");
     assert.equal(config.sleep.graceMs, 75);
     assert.equal(config.sleep.enabled, true);
     assert.deepEqual(config.sleep.keepAlive, defaultConfig(home).sleep.keepAlive);
@@ -49,6 +50,41 @@ describe("config adapter", () => {
     assert.equal(config.github.prTtlSeconds, 90);
     assert.equal(config.github.cloneProtocol, "ssh");
     assert.equal(config.ui.statusRefreshMs, 5000);
+  });
+
+  test("normalizes legacy agent window commands in memory", async () => {
+    for (const command of ["cc", "claude", "opencode"]) {
+      const files = createFakeFiles({
+        texts: {
+          [configPath]: JSON.stringify({
+            ...defaultConfig(home),
+            windows: [
+              { name: "nvim", command: "nvim ." },
+              { name: "cc", command },
+              { name: "lg", command: "lazygit" },
+            ],
+          }),
+        },
+      });
+      const store = createConfigStore(files, configPath, home, createNullLogger());
+
+      const config = await store.load();
+
+      assert.equal(config.windows[1]?.command, "{agent}", command);
+    }
+  });
+
+  test("leaves legacy-looking commands alone when a placeholder already exists", async () => {
+    const windows = [
+      { name: "cc", command: "{agent}" },
+      { name: "legacy", command: "claude" },
+    ];
+    const files = createFakeFiles({
+      texts: { [configPath]: JSON.stringify({ ...defaultConfig(home), windows }) },
+    });
+    const store = createConfigStore(files, configPath, home, createNullLogger());
+
+    assert.deepEqual((await store.load()).windows, windows);
   });
 
   test("validates and atomically saves config", async () => {

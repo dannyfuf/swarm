@@ -18,6 +18,7 @@ export interface FakeControllerFixtures {
 
 export type FakeController = Controller & {
   readonly remoteRepos: RemoteRepo[];
+  readonly savedConfigPatches: Partial<Config>[];
   readonly yankedPaths: string[];
   readonly disposed: boolean;
   readonly yankedPrUrls: string[];
@@ -37,6 +38,7 @@ export function createFakeController(
   const remotes = structuredClone(fixtures.remoteRepos ?? defaultRemoteRepos);
   const delayMs = fixtures.operationDelayMs ?? 300;
   const yankedPaths: string[] = [];
+  const savedConfigPatches: Partial<Config>[] = [];
   const yankedPrUrls: string[] = [];
   const browsedPrUrls: string[] = [];
   let disposed = false;
@@ -84,6 +86,7 @@ export function createFakeController(
     get remoteRepos() {
       return remotes;
     },
+    savedConfigPatches,
     yankedPaths,
     yankedPrUrls,
     browsedPrUrls,
@@ -326,6 +329,7 @@ export function createFakeController(
       });
     },
     async saveConfig(patch) {
+      savedConfigPatches.push(structuredClone(patch));
       config = { ...config, ...patch };
       store.dispatch({ type: "setConfig", config });
       store.dispatch({ type: "closeDialog" });

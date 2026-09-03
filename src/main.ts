@@ -25,7 +25,7 @@ export type CliCommand =
   | { kind: "tui" }
   | { kind: "open"; target: string }
   | { kind: "sleep"; session?: string }
-  | { kind: "agent"; agent: AgentName }
+  | { kind: "agent"; agent?: AgentName }
   | { kind: "doctor" }
   | { kind: "version" }
   | { kind: "help" };
@@ -62,7 +62,7 @@ export async function exitTuiProcess(
 }
 
 const USAGE =
-  "Usage: swarm [open <owner/name#slug|repo/slug> | sleep [session] | agent <claude|opencode> | doctor | --version]";
+  "Usage: swarm [open <owner/name#slug|repo/slug> | sleep [session] | agent [claude|opencode] | doctor | --version]";
 
 export function parseArgv(argv: string[]): CliCommand {
   const [command, ...args] = argv;
@@ -80,10 +80,18 @@ export function parseArgv(argv: string[]): CliCommand {
   if (command === "sleep" && args.length <= 1) {
     return args[0] ? { kind: "sleep", session: args[0] } : { kind: "sleep" };
   }
-  if (command === "agent" && args.length === 1 && isAgentName(args[0])) {
-    return { kind: "agent", agent: args[0] };
+  if (command === "agent" && args.length <= 1) {
+    if (args.length === 0) return { kind: "agent" };
+    if (isAgentName(args[0])) return { kind: "agent", agent: args[0] };
   }
   throw new SwarmError("validation", USAGE);
+}
+
+export function resolveAgentName(
+  override: AgentName | undefined,
+  configured: AgentName,
+): AgentName {
+  return override ?? configured;
 }
 
 function errorMessage(error: unknown): string {
@@ -329,7 +337,11 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     startupProfiler.mark("runtime.created");
     runtime = createdRuntime;
     if (command.kind === "agent") {
-      return await runAgentCommand(createdRuntime, command.agent, process.env);
+      return await runAgentCommand(
+        createdRuntime,
+        resolveAgentName(command.agent, createdRuntime.configValue.agent),
+        process.env,
+      );
     }
     await runRuntimeCommand(createdRuntime, command);
     return 0;

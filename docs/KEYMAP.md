@@ -49,3 +49,5 @@
 | `Enter` | Confirm or select |
 | `Tab` / `S-Tab` | Focus the next / previous field |
 | `ctrl-n` / `ctrl-p`, `↓` / `↑` | Select the next / previous list item |
+| `Space` | Toggle the selected settings row, or cycle the coding agent |
+| `←` / `→` | Cycle the selected coding agent |

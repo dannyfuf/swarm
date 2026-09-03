@@ -10,7 +10,7 @@ import type {
   TmuxWindow,
 } from "../core/ports.ts";
 import type { SessionService, UnmountReport, WorktreeService } from "../core/services.ts";
-import type { KeepAliveRule, Worktree } from "../core/types.ts";
+import { type KeepAliveRule, resolveWindows, type Worktree } from "../core/types.ts";
 
 export interface SessionServiceDependencies {
   tmux: TmuxPort;
@@ -148,7 +148,8 @@ export function createSessionService({
 
   const mount = async (worktree: Worktree): Promise<void> => {
     const cfg = await attempt(() => config.load(), "fs", "Failed to load session config");
-    const firstSpec = cfg.windows[0];
+    const windowSpecs = resolveWindows(cfg);
+    const firstSpec = windowSpecs[0];
     if (!firstSpec) {
       throw new SwarmError("validation", "At least one configured window is required");
     }
@@ -195,8 +196,8 @@ export function createSessionService({
 
     const existingNames = new Set(windows.map(({ name }) => name));
     const specsToCreate = exists
-      ? cfg.windows.filter(({ name }) => !existingNames.has(name))
-      : cfg.windows.slice(1);
+      ? windowSpecs.filter(({ name }) => !existingNames.has(name))
+      : windowSpecs.slice(1);
 
     for (const spec of specsToCreate) {
       const index = await attempt(
@@ -221,7 +222,7 @@ export function createSessionService({
     }
 
     const baseIndex = Math.min(...windows.map(({ index }) => index));
-    for (const [position, spec] of cfg.windows.entries()) {
+    for (const [position, spec] of windowSpecs.entries()) {
       const ordered = [...windows].sort((left, right) => left.index - right.index);
       const window = windows.find(({ name }) => name === spec.name);
       const target = ordered[position];
