@@ -61,6 +61,10 @@ export function createPrService({ github, ttlSeconds }: PrServiceDependencies): 
   const controllers = new Map<string, AbortController>();
 
   return {
+    async findByBranch(repoId, branch) {
+      return github.findPullRequest(repoParts(repoId), branch);
+    },
+
     async load(repoIds, tab, opts) {
       const requests = [...new Set(repoIds)].map(async (repoId) => {
         const key = `${repoId}:${tab}`;

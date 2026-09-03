@@ -5,6 +5,7 @@ import type {
   ContextId,
   PrRepoSlice,
   PrTab,
+  PullRequest,
   RemoteRepo,
   Repo,
   RepoId,
@@ -61,6 +62,7 @@ export interface WorktreeService {
 }
 
 export interface PrService {
+  findByBranch(repoId: RepoId, branch: string): Promise<PullRequest | undefined>;
   load(
     repoIds: RepoId[],
     tab: PrTab,

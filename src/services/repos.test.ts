@@ -116,6 +116,9 @@ describe("createRepoService", () => {
         if (owner === "bad" || failGood) throw new Error(`${owner} failed`);
         return [remote("good", "one")];
       },
+      async findPullRequest() {
+        return undefined;
+      },
       async readCachedPullRequests() {
         return undefined;
       },

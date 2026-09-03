@@ -1,4 +1,4 @@
-import { selectedPr, selectedRepo, selectedWorktree } from "../app/selectors.ts";
+import { selectedPr, selectedRepo, selectedWorktree, worktreePr } from "../app/selectors.ts";
 import type { AppState, Controller, Operation, Store } from "../core/app.ts";
 import { SwarmError } from "../core/errors.ts";
 import { slugify, worktreeId } from "../core/paths.ts";
@@ -357,6 +357,14 @@ export function createFakeController(
       const pr = selectedPr(store.getState());
       if (!pr) throw new SwarmError("not-found", "No pull request is selected");
       browsedPrUrls.push(pr.url);
+    },
+    async browseSelectedWorktreePr() {
+      const state = store.getState();
+      if (state.pane !== "worktrees") return;
+      const worktree = selectedWorktree(state);
+      if (!worktree) return;
+      const pr = worktreePr(state, worktree);
+      if (pr) browsedPrUrls.push(pr.url);
     },
     async yankSelectedPr() {
       const pr = selectedPr(store.getState());

@@ -60,6 +60,7 @@ interface Harness {
     deleteWorktree: WorktreeService["delete"];
     open: SessionService["open"];
     setContext: ContextService["setActive"];
+    findPr: PrService["findByBranch"];
     loadPr: PrService["load"];
     loadState: StatePort["load"];
     currentSession: TmuxPort["currentSession"];
@@ -76,6 +77,7 @@ interface Harness {
     clearedIntervals: unknown[];
     reconciliations: number;
     prLoads: Array<{ repoIds: RepoId[]; tab: PrTab; force?: boolean }>;
+    prFinds: Array<{ repoId: RepoId; branch: string }>;
     clipboardCopies: string[];
     openedUrls: string[];
     updateRoots: string[];
@@ -131,6 +133,7 @@ function createHarness(initial: State = makeState()): Harness {
     clearedIntervals: [],
     reconciliations: 0,
     prLoads: [],
+    prFinds: [],
     clipboardCopies: [],
     openedUrls: [],
     updateRoots: [],
@@ -170,6 +173,9 @@ function createHarness(initial: State = makeState()): Harness {
     async deleteWorktree() {},
     async open() {},
     async setContext() {},
+    async findPr() {
+      return undefined;
+    },
     async loadPr() {},
     async loadState() {
       return structuredClone(persisted);
@@ -283,6 +289,10 @@ function createHarness(initial: State = makeState()): Harness {
     },
   };
   const prService: PrService = {
+    async findByBranch(repoId, branch) {
+      calls.prFinds.push({ repoId, branch });
+      return behavior.findPr(repoId, branch);
+    },
     async load(repoIds, tab, opts) {
       calls.prLoads.push({ repoIds: [...repoIds], tab, force: opts.force });
       return behavior.loadPr(repoIds, tab, opts);
@@ -1126,5 +1136,54 @@ describe("createController", () => {
     assert.deepEqual(harness.calls.openedUrls, [pr.url]);
     assert.deepEqual(harness.calls.clipboardCopies, [pr.url]);
     assert.equal(harness.store.getState().toasts.at(-1)?.text, "Copied PR URL");
+  });
+
+  test("browses the selected worktree PR found by its repo and branch", async () => {
+    const selected = worktrees[1];
+    const repo = repos[0];
+    assert.ok(selected && repo);
+    const harness = createHarness(
+      makeState({ repos: [repo], worktrees: [selected], activeContextId: "buk" }),
+    );
+    const pr = pullRequest({ repoId: selected.repoId, headRefName: selected.branch });
+    harness.behavior.findPr = async () => pr;
+
+    await harness.controller.browseSelectedWorktreePr();
+
+    assert.deepEqual(harness.calls.prFinds, [{ repoId: selected.repoId, branch: selected.branch }]);
+    assert.deepEqual(harness.calls.openedUrls, [pr.url]);
+  });
+
+  test("does nothing when the selected worktree branch has no PR", async () => {
+    const selected = worktrees[1];
+    const repo = repos[0];
+    assert.ok(selected && repo);
+    const harness = createHarness(
+      makeState({ repos: [repo], worktrees: [selected], activeContextId: "buk" }),
+    );
+
+    await harness.controller.browseSelectedWorktreePr();
+
+    assert.deepEqual(harness.calls.prFinds, [{ repoId: selected.repoId, branch: selected.branch }]);
+    assert.deepEqual(harness.calls.openedUrls, []);
+    assert.deepEqual(harness.store.getState().toasts, []);
+    assert.equal(harness.store.getState().dialog, undefined);
+    assert.deepEqual(harness.logger.entries, []);
+  });
+
+  test("reuses the cached worktree PR without a targeted lookup", async () => {
+    const selected = worktrees[1];
+    const repo = repos[0];
+    assert.ok(selected && repo);
+    const harness = createHarness(
+      makeState({ repos: [repo], worktrees: [selected], activeContextId: "buk" }),
+    );
+    const pr = pullRequest({ repoId: selected.repoId, headRefName: selected.branch });
+    seedPrs(harness, "mine", pr.repoId, [pr]);
+
+    await harness.controller.browseSelectedWorktreePr();
+
+    assert.deepEqual(harness.calls.prFinds, []);
+    assert.deepEqual(harness.calls.openedUrls, [pr.url]);
   });
 });

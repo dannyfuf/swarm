@@ -48,6 +48,7 @@ describe("resolveKey normal mode", () => {
     [":", key(":"), "palette"],
     [",", key(","), "settings"],
     ["y", key("y"), "yank"],
+    ["b", key("b"), "browse"],
     ["?", key("?"), "help"],
     ["q", key("q"), "quit"],
     ["Escape", key("escape"), "quit"],
@@ -200,9 +201,19 @@ test("footer hints exist for both panes and palette commands are unique", () => 
   assert.ok(KEY_HINTS.worktrees.length > 0);
   assert.ok(KEY_HINTS.repos.some(({ key: hint }) => hint === "U"));
   assert.ok(KEY_HINTS.worktrees.some(({ key: hint }) => hint === "U"));
+  assert.ok(KEY_HINTS.worktrees.some(({ key: hint }) => hint === "b"));
   assert.deepEqual(
     COMMANDS.find(({ command }) => command === "update"),
     { command: "update", label: "Update swarm", keys: "U", screens: ["main", "prs"] },
+  );
+  assert.deepEqual(
+    COMMANDS.find(({ command }) => command === "browse"),
+    {
+      command: "browse",
+      label: "Open in browser",
+      keys: "b",
+      screens: ["main", "prs"],
+    },
   );
   assert.equal(new Set(COMMANDS.map(({ command }) => command)).size, COMMANDS.length);
   assert.ok(COMMANDS.every(({ screens }) => screens.length > 0));

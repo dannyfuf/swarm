@@ -24,6 +24,7 @@
 | `,` | Open settings |
 | `gt` / `gT` | Select the next / previous context |
 | `1`–`9` | Select the nth context |
+| `b` | Open the selected worktree branch's pull request in the browser, if one exists |
 | `y` | Copy the worktree path |
 | `?` | Open help |
 | `q`, `Esc`, `ctrl-c` | Quit the popup |

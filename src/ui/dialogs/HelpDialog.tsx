@@ -26,6 +26,7 @@ const LEFT_COLUMN: Line[] = [
   entry("Tab", "Switch pane"),
   entry("⏎ / o", "Open worktree"),
   entry("O", "Open, keep previous"),
+  entry("b", "Open PR in browser"),
   entry("y", "Copy worktree path"),
   entry("r", "Refresh"),
   entry("U", "Update swarm"),
