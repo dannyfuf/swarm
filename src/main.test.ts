@@ -10,7 +10,7 @@ describe("CLI parsing", () => {
     assert.deepEqual(parseArgv(["doctor"]), { kind: "doctor" });
   });
 
-  test("parses open and optional sleep targets", () => {
+  test("parses open, optional sleep, and agent targets", () => {
     assert.deepEqual(parseArgv(["open", "bukhr/payroll#main"]), {
       kind: "open",
       target: "bukhr/payroll#main",
@@ -20,11 +20,17 @@ describe("CLI parsing", () => {
       kind: "sleep",
       session: "payroll/main",
     });
+    assert.deepEqual(parseArgv(["agent", "claude"]), { kind: "agent", agent: "claude" });
+    assert.deepEqual(parseArgv(["agent", "opencode"]), { kind: "agent", agent: "opencode" });
   });
 
   test("rejects malformed invocations with a validation error", () => {
     assert.throws(
       () => parseArgv(["open"]),
+      (error: unknown) => error instanceof SwarmError && error.code === "validation",
+    );
+    assert.throws(
+      () => parseArgv(["agent", "bogus"]),
       (error: unknown) => error instanceof SwarmError && error.code === "validation",
     );
   });
