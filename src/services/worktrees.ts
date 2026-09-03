@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
-import { SwarmError } from "../core/errors.ts";
+import { errnoCode, SwarmError } from "../core/errors.ts";
 import {
   hotCopyPath,
   hotCopyPidPath,
@@ -70,6 +70,18 @@ function assertWorktreePath(
 }
 
 const HOT_COPY_POLL_MS = 100;
+
+/**
+ * Errno names that mean "there is no marker here" when reading `.git/swarm-*.json`.
+ * `ENOTDIR` happens on linked git worktrees, whose `.git` is a gitdir pointer file
+ * rather than a directory; `EISDIR` covers a marker path taken over by a directory.
+ */
+const ABSENT_MARKER_CODES = new Set(["ENOENT", "ENOTDIR", "EISDIR"]);
+
+function isAbsentMarkerError(error: unknown): boolean {
+  const code = errnoCode(error);
+  return code !== undefined && ABSENT_MARKER_CODES.has(code);
+}
 
 function parsePid(value: string | null): number | undefined {
   if (!value || !/^\d+\s*$/u.test(value)) return undefined;
@@ -414,13 +426,31 @@ export function createWorktreeService({
     }
   };
 
-  const readHotMarker = async (repoPath: string): Promise<HotCopyMarker | null> => {
+  /**
+   * Reads a swarm marker, treating a missing `.git` directory (or a `.git`
+   * gitdir pointer file, as used by linked git worktrees) as "no marker".
+   */
+  const readMarkerText = async (path: string): Promise<string | null> => {
     try {
-      return parseHotMarker(await files.readText(hotMarkerPath(repoPath)));
+      return await files.readText(path);
+    } catch (error) {
+      if (isAbsentMarkerError(error)) return null;
+      throw error;
+    }
+  };
+
+  const readHotMarker = async (repoPath: string): Promise<HotCopyMarker | null> => {
+    let text: string | null;
+    try {
+      text = await readMarkerText(hotMarkerPath(repoPath));
     } catch (error) {
       logger.warn(`Failed to read prepared copy marker: ${repoPath}`, error);
       return null;
     }
+    if (text === null) return null;
+    const marker = parseHotMarker(text);
+    if (marker === null) logger.info(`Ignoring unreadable prepared copy marker: ${repoPath}`);
+    return marker;
   };
 
   const writeHotMarker = async (
@@ -435,7 +465,14 @@ export function createWorktreeService({
       sha: await git.revision(repoPath, `origin/${defaultBranch}`, signal),
       prepareFingerprint: fingerprint,
     };
-    await files.writeTextAtomic(hotMarkerPath(repoPath), `${JSON.stringify(marker, null, 2)}\n`);
+    try {
+      await files.writeTextAtomic(hotMarkerPath(repoPath), `${JSON.stringify(marker, null, 2)}\n`);
+    } catch (error) {
+      // A linked git worktree has a `.git` pointer file, so there is nowhere to
+      // put the freshness marker; it is not a swarm-created copy either.
+      if (errnoCode(error) !== "ENOTDIR") throw error;
+      logger.info(`Skipping freshness marker for a non-copy worktree: ${repoPath}`);
+    }
   };
 
   const parseCreatingMarker = (text: string | null): CreatingMarker | null => {
@@ -468,7 +505,7 @@ export function createWorktreeService({
   };
 
   const readCreatingMarkerText = (repoPath: string): Promise<string | null> =>
-    files.readText(creatingMarkerPath(repoPath));
+    readMarkerText(creatingMarkerPath(repoPath));
 
   const writeCreatingMarker = (repoPath: string, marker: CreatingMarker): Promise<void> =>
     files.writeTextAtomic(creatingMarkerPath(repoPath), `${JSON.stringify(marker, null, 2)}\n`);
@@ -1103,6 +1140,9 @@ export function createWorktreeService({
         if (!(await files.exists(root))) continue;
         for (const name of await files.listDirs(root, { includeReserved: true })) {
           const candidatePath = join(root, name);
+          // Skips anything that is not an interrupted swarm copy: directories
+          // with no `.git` directory at all (a linked git worktree's gitdir
+          // pointer file, or no `.git`) never carry an intent marker.
           const markerText = await readCreatingMarkerText(candidatePath);
           if (markerText === null) continue;
 
@@ -1115,6 +1155,9 @@ export function createWorktreeService({
           }
 
           const marker = parseCreatingMarker(markerText);
+          if (marker === null) {
+            logger.info(`Ignoring unreadable worktree intent marker: ${candidatePath}`);
+          }
           const expectedId = makeWorktreeId(repo.id, name);
           let branchMatches = false;
           if (

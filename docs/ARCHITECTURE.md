@@ -456,7 +456,12 @@ and appends the record. Immediately before attempt-to-destination rename, creati
 `.git/swarm-creating.json` containing id, repo, branch, base ref, and timestamp; it removes the marker
 only after the state write commits. Controller startup scans registered repository roots before
 hydration: complete intents whose checked-out branch matches are registered, while invalid or
-mismatched intents move through trash. A destination carrying an unregistered intent is reclaimable
+mismatched intents move through trash. Marker reads treat `ENOENT`, `ENOTDIR`, and `EISDIR` as
+"no marker", so directories that are not swarm copies — a linked `git worktree` whose `.git` is a
+gitdir pointer file, or a directory with no `.git` — are skipped silently instead of surfacing a
+read failure; only a marker that exists but does not parse is logged, and it keeps its stale/absent
+handling. Freshness-marker writes into such a directory are likewise skipped with a log line.
+A destination carrying an unregistered intent is reclaimable
 during create preflight. Normal state-write failures still roll the published path back.
 
 Sleep policy algorithm (`SessionService.unmount`):
