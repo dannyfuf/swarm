@@ -8,27 +8,29 @@ import type {
   UpdateEvent,
   UpdaterPort,
 } from "../core/ports.ts";
+import { createNodeRuntime, outputTail } from "./nodeRuntime.ts";
 
 interface UpdaterDependencies {
   shell: Shell;
   files: FilesPort;
   logger: Logger;
-}
-
-function outputTail(result: ShellResult): string {
-  const output = (result.stderr.trim() || result.stdout.trim() || `exit code ${result.code}`)
-    .split(/\r?\n/u)
-    .slice(-8)
-    .join(" | ");
-  return output.slice(-800);
+  env?: NodeJS.ProcessEnv;
+  execPath?: string;
 }
 
 function commandLabel(cmd: string, args: string[]): string {
   return [cmd, ...args].join(" ");
 }
 
-export function createUpdater({ shell, files, logger }: UpdaterDependencies): UpdaterPort {
+export function createUpdater({
+  shell,
+  files,
+  logger,
+  env = process.env,
+  execPath = process.execPath,
+}: UpdaterDependencies): UpdaterPort {
   const log = logger.child("updater");
+  const nodeRuntime = createNodeRuntime({ shell, files, logger, env, execPath });
 
   const run = async (
     installRoot: string,
@@ -36,11 +38,13 @@ export function createUpdater({ shell, files, logger }: UpdaterDependencies): Up
     cmd: string,
     args: string[],
     onEvent?: (event: UpdateEvent) => void,
+    commandEnv?: Record<string, string>,
   ): Promise<ShellResult> => {
     let result: ShellResult;
     try {
       result = await shell.run(cmd, args, {
         cwd: installRoot,
+        ...(commandEnv ? { env: commandEnv } : {}),
         onStderrLine: (line) => onEvent?.({ type: "log", line }),
       });
     } catch (error) {
@@ -118,14 +122,21 @@ export function createUpdater({ shell, files, logger }: UpdaterDependencies): Up
         onEvent,
       );
 
+      // Resolved after the pull because the pull can change the pinned .nvmrc version.
+      const { binDir } = await nodeRuntime.resolveNodeBinDir(installRoot, onEvent);
+      const npm = join(binDir, "npm");
+      const npmEnv = nodeRuntime.commandEnv(binDir);
+
       onEvent?.({ type: "step", label: "installing dependencies…" });
       const installArgs = (await files.exists(join(installRoot, "package-lock.json")))
         ? ["ci"]
         : ["install"];
-      await run(installRoot, "installing dependencies", "npm", installArgs, onEvent);
+      await run(installRoot, "installing dependencies", npm, installArgs, onEvent, npmEnv);
 
       onEvent?.({ type: "step", label: "building…" });
-      await run(installRoot, "building", "npm", ["run", "build"], onEvent);
+      await run(installRoot, "building", npm, ["run", "build"], onEvent, npmEnv);
+
+      await nodeRuntime.cacheNodeBin(binDir);
     },
   };
 }
