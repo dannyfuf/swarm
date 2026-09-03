@@ -345,7 +345,8 @@ export function createGithub(
     async listPullRequests(repo, tab, opts = {}) {
       const repoId = `${repo.owner}/${repo.name}`;
       const cachePath = join(options.cacheDir, "prs", repo.owner, repo.name, `${tab}.json`);
-      const qualifier = tab === "mine" ? ["--author", "@me"] : ["--search", "review-requested:@me"];
+      const qualifier =
+        tab === "mine" ? ["--author", "@me"] : ["--search", "user-review-requested:@me"];
       let result: ShellResult;
       try {
         result = await shell.run(
