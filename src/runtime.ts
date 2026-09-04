@@ -141,6 +141,7 @@ export async function createRuntime(
     worktrees,
     clock,
     logger,
+    home,
     remoteHosts,
   });
   const status = createStatusService({

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import type { TmuxPane, TmuxSession, TmuxWindow } from "../core/ports.ts";
+import { sshInteractiveCommand, sshPaneCommand } from "../core/remote.ts";
 import type { RemoteHostService, WorktreeService } from "../core/services.ts";
 import type { Config, Worktree } from "../core/types.ts";
 import { createFakeProcess } from "../testing/fakeProcess.ts";
@@ -93,6 +94,7 @@ function serviceOptions(
       worktrees: worktreeService,
       clock: createFixedClock(),
       logger,
+      home: "/home/test/.swarm",
       sleep: options.sleep,
       remoteHosts: options.remoteHosts,
     }),
@@ -284,6 +286,50 @@ describe("SessionService.mount", () => {
   });
 });
 
+describe("SessionService.mount cleanup", () => {
+  test("kills a freshly created session when a later step fails", async () => {
+    const tmux = createFakeTmux();
+    tmux.newWindow = async (opts) => {
+      tmux.calls.push({ method: "newWindow", args: [opts] });
+      throw new Error("new-window exploded");
+    };
+    const { service } = serviceOptions(tmux);
+
+    await assert.rejects(service.mount(target), /Failed to create tmux window cc/u);
+
+    assert.equal(tmux.sessions.has(target.session), false);
+    assert.deepEqual(
+      tmux.calls
+        .filter(({ method }) => method === "newSession" || method === "killSessionIfPresent")
+        .map(({ method, args }) => [method, (args[0] as { name?: string }).name ?? args[0]]),
+      [
+        ["newSession", target.session],
+        ["killSessionIfPresent", target.session],
+      ],
+    );
+  });
+
+  test("leaves an existing session alone when a later step fails", async () => {
+    const tmux = createFakeTmux({
+      sessions: [session(target.session, false, 1)],
+      windows: [window(target.session, 0, "nvim", [], true)],
+    });
+    tmux.newWindow = async (opts) => {
+      tmux.calls.push({ method: "newWindow", args: [opts] });
+      throw new Error("new-window exploded");
+    };
+    const { service } = serviceOptions(tmux);
+
+    await assert.rejects(service.mount(target), /Failed to create tmux window cc/u);
+
+    assert.equal(tmux.sessions.has(target.session), true);
+    assert.equal(
+      tmux.calls.some(({ method }) => method === "killSessionIfPresent"),
+      false,
+    );
+  });
+});
+
 describe("SessionService.open", () => {
   test("switches first, then sleeps the previous registered worktree", async () => {
     const tmux = createFakeTmux({
@@ -306,6 +352,38 @@ describe("SessionService.open", () => {
     const methods = tmux.calls.map(({ method }) => method);
     assert.ok(methods.indexOf("switchClient") < methods.indexOf("killSession"));
     assert.equal(tmux.sessions.has(previous.session), false);
+  });
+
+  test("keeps the previous session when the opened session is gone after the switch", async () => {
+    const tmux = createFakeTmux({
+      insideTmux: true,
+      currentSession: previous.session,
+      sessions: [session(target.session, false, 3), session(previous.session, true, 1)],
+      windows: [
+        window(target.session, 0, "nvim", [], true),
+        window(target.session, 1, "cc", [], false),
+        window(target.session, 2, "lg", [], false),
+        window(previous.session, 0, "lg", [], true),
+      ],
+    });
+    const originalSwitchClient = tmux.switchClient;
+    tmux.switchClient = async (sessionName) => {
+      await originalSwitchClient(sessionName);
+      // The target dies right after the switch, as a proxy whose ssh leg failed would.
+      tmux.sessions.delete(sessionName);
+      tmux.windows.delete(sessionName);
+    };
+    const { service, logger } = serviceOptions(tmux);
+
+    await service.open(target);
+
+    assert.deepEqual(tmux.switched, [target.session]);
+    assert.equal(tmux.sessions.has(previous.session), true);
+    assert.equal(
+      tmux.calls.some(({ method }) => method === "killSession" || method === "killWindow"),
+      false,
+    );
+    assert.equal(logger.entries.filter(({ level }) => level === "warn").length, 1);
   });
 
   test("logs a sleep failure without failing the open", async () => {
@@ -583,24 +661,84 @@ describe("SessionService remote routing", () => {
     await service.mount(remote);
     await service.open(remote);
 
+    const command = sshPaneCommand(
+      sshInteractiveCommand(
+        { id: "devbox", ssh: "user@devbox", swarmCommand: "/opt/swarm" },
+        remote.id,
+        "/home/test/.swarm",
+      ),
+    );
+    assert.match(command, /^sh -c 'ssh -t -o /u);
+    assert.match(command, /ControlPath=\/home\/test\/\.swarm\/cache\/ssh\/%C/u);
+    assert.match(command, /-- user@devbox \/opt\/swarm open /u);
     assert.deepEqual(
       tmux.calls.filter(({ method }) => method === "newSession"),
       [
         {
           method: "newSession",
-          args: [
-            {
-              name: "devbox/payroll/main",
-              windowName: "ssh",
-              command: "ssh -t -- user@devbox /opt/swarm open 'bukhr/payroll#main'",
-            },
-          ],
+          args: [{ name: "devbox/payroll/main", windowName: "ssh", command }],
         },
       ],
     );
     assert.deepEqual(tmux.switched, ["devbox/payroll/main"]);
     assert.deepEqual(worktreeService.touches, [remote.id]);
     assert.equal(tmux.sentKeys.length, 0);
+  });
+
+  test("mount keeps the proxy pane and client alive when the ssh leg exits", async () => {
+    const tmux = createFakeTmux();
+    const { service } = serviceOptions(tmux, {
+      config: configured({ hosts: { devbox: { ssh: "devbox", swarmCommand: "swarm" } } }),
+      remoteHosts: fakeRemoteHostService(),
+    });
+
+    await service.mount(remote);
+
+    const proxy = "devbox/payroll/main";
+    assert.deepEqual(
+      tmux.calls
+        .filter(({ method }) => method === "newSession" || method === "setOption")
+        .map(({ method, args }) => (method === "newSession" ? method : [method, ...args])),
+      [
+        "newSession",
+        ["setOption", proxy, "remain-on-exit", "on"],
+        ["setOption", proxy, "detach-on-destroy", "off"],
+      ],
+    );
+    assert.deepEqual(
+      [...(tmux.options.get(proxy) ?? [])],
+      [
+        ["remain-on-exit", "on"],
+        ["detach-on-destroy", "off"],
+      ],
+    );
+    // The wrapper does not change what tmux reports as the pane's command.
+    assert.equal(tmux.windows.get(proxy)?.[0]?.panes[0]?.currentCommand, "ssh");
+  });
+
+  test("mount removes the proxy session when configuring it fails", async () => {
+    const tmux = createFakeTmux();
+    tmux.setOption = async (target, name, value) => {
+      tmux.calls.push({ method: "setOption", args: [target, name, value] });
+      throw new Error("set-option exploded");
+    };
+    const { service } = serviceOptions(tmux, {
+      config: configured({ hosts: { devbox: { ssh: "devbox", swarmCommand: "swarm" } } }),
+      remoteHosts: fakeRemoteHostService(),
+    });
+
+    await assert.rejects(
+      service.mount(remote),
+      /Failed to configure tmux session devbox\/payroll\/main/u,
+    );
+
+    assert.equal(tmux.sessions.has("devbox/payroll/main"), false);
+    assert.deepEqual(
+      tmux.calls
+        .filter(({ method }) => method === "newSession" || method === "killSessionIfPresent")
+        .map(({ method }) => method),
+      ["newSession", "killSessionIfPresent"],
+    );
   });
 
   test("mount reuses an existing proxy whose only pane is ssh", async () => {

@@ -10,14 +10,20 @@ import type {
   TmuxPort,
   TmuxWindow,
 } from "../core/ports.ts";
-import { sshInteractiveCommand } from "../core/remote.ts";
+import { sshInteractiveCommand, sshPaneCommand } from "../core/remote.ts";
 import type {
   RemoteHostService,
   SessionService,
   UnmountReport,
   WorktreeService,
 } from "../core/services.ts";
-import { type KeepAliveRule, resolveWindows, type Worktree, worktreeHost } from "../core/types.ts";
+import {
+  type KeepAliveRule,
+  resolveWindows,
+  type WindowSpec,
+  type Worktree,
+  worktreeHost,
+} from "../core/types.ts";
 
 export interface SessionServiceDependencies {
   tmux: TmuxPort;
@@ -27,6 +33,7 @@ export interface SessionServiceDependencies {
   worktrees: WorktreeService;
   clock: Clock;
   logger: Logger;
+  home: string;
   sleep?: (ms: number) => Promise<void>;
   remoteHosts?: RemoteHostService;
 }
@@ -149,6 +156,7 @@ export function createSessionService({
   worktrees,
   clock,
   logger,
+  home,
   sleep = defaultSleep,
   remoteHosts,
 }: SessionServiceDependencies): SessionService {
@@ -165,6 +173,24 @@ export function createSessionService({
   const mountedSessionName = (worktree: Worktree): string => {
     const hostId = worktreeHost(worktree);
     return hostId === "local" ? worktree.session : proxySessionName(hostId, worktree.session);
+  };
+
+  // A session that fails part-way through its setup must not linger: callers
+  // would otherwise find a half-configured session on the next attempt.
+  const orElseKillSession = async (session: string, setup: () => Promise<void>): Promise<void> => {
+    try {
+      await setup();
+    } catch (error) {
+      try {
+        await tmux.killSessionIfPresent(session);
+      } catch (cleanupError) {
+        logger.warn("Failed to remove tmux session after a mount failure", {
+          session,
+          error: cleanupError,
+        });
+      }
+      throw error;
+    }
   };
 
   const mountRemote = async (worktree: Worktree, hostId: string): Promise<void> => {
@@ -196,43 +222,40 @@ export function createSessionService({
         tmux.newSession({
           name: proxy,
           windowName: "ssh",
-          command: sshInteractiveCommand({ id: hostId, ...host }, worktree.id),
+          command: sshPaneCommand(
+            sshInteractiveCommand({ id: hostId, ...host }, worktree.id, home),
+          ),
         }),
       "tmux",
       `Failed to create tmux session ${proxy}`,
     );
+    // The ssh leg is the pane's only process. Keep the pane (and the session)
+    // around when it exits, and never detach the client because of it, so a
+    // failed remote open shows its message instead of ejecting the user.
+    await orElseKillSession(proxy, async () => {
+      await attempt(
+        () => tmux.setOption(proxy, "remain-on-exit", "on"),
+        "tmux",
+        `Failed to configure tmux session ${proxy}`,
+      );
+      await attempt(
+        () => tmux.setOption(proxy, "detach-on-destroy", "off"),
+        "tmux",
+        `Failed to configure tmux session ${proxy}`,
+      );
+    });
   };
 
-  const mount = async (worktree: Worktree): Promise<void> => {
-    const hostId = worktreeHost(worktree);
-    if (hostId !== "local") return mountRemote(worktree, hostId);
-
-    const cfg = await attempt(() => config.load(), "fs", "Failed to load session config");
-    const windowSpecs = resolveWindows(cfg);
-    const firstSpec = windowSpecs[0];
-    if (!firstSpec) {
-      throw new SwarmError("validation", "At least one configured window is required");
-    }
-
-    const exists = await attempt(
-      () => tmux.hasSession(worktree.session),
-      "tmux",
-      `Failed to inspect tmux session ${worktree.session}`,
-    );
+  const populateLocal = async (
+    worktree: Worktree,
+    windowSpecs: WindowSpec[],
+    firstSpec: WindowSpec,
+    exists: boolean,
+  ): Promise<void> => {
     let windows: TmuxWindow[];
     let mutated = false;
 
     if (!exists) {
-      await attempt(
-        () =>
-          tmux.newSession({
-            name: worktree.session,
-            cwd: worktree.path,
-            windowName: firstSpec.name,
-          }),
-        "tmux",
-        `Failed to create tmux session ${worktree.session}`,
-      );
       mutated = true;
       windows = await attempt(
         () => tmux.listWindows(worktree.session),
@@ -308,6 +331,41 @@ export function createSessionService({
         `Failed to select the first window in ${worktree.session}`,
       );
     }
+  };
+
+  const mount = async (worktree: Worktree): Promise<void> => {
+    const hostId = worktreeHost(worktree);
+    if (hostId !== "local") return mountRemote(worktree, hostId);
+
+    const cfg = await attempt(() => config.load(), "fs", "Failed to load session config");
+    const windowSpecs = resolveWindows(cfg);
+    const firstSpec = windowSpecs[0];
+    if (!firstSpec) {
+      throw new SwarmError("validation", "At least one configured window is required");
+    }
+
+    const exists = await attempt(
+      () => tmux.hasSession(worktree.session),
+      "tmux",
+      `Failed to inspect tmux session ${worktree.session}`,
+    );
+    if (!exists) {
+      await attempt(
+        () =>
+          tmux.newSession({
+            name: worktree.session,
+            cwd: worktree.path,
+            windowName: firstSpec.name,
+          }),
+        "tmux",
+        `Failed to create tmux session ${worktree.session}`,
+      );
+      await orElseKillSession(worktree.session, () =>
+        populateLocal(worktree, windowSpecs, firstSpec, false),
+      );
+      return;
+    }
+    await populateLocal(worktree, windowSpecs, firstSpec, true);
   };
 
   const unmount = async (worktree: Worktree): Promise<UnmountReport> => {
@@ -458,6 +516,26 @@ export function createSessionService({
     }
 
     if ((options.sleepPrevious ?? true) && previous && previous !== targetSession) {
+      // Sleeping the previous session removes the client's fallback. Only do
+      // it once the target is confirmed alive, otherwise a target that died
+      // right after the switch (for example a failed ssh leg) would leave the
+      // client with nowhere to go.
+      let targetAlive = false;
+      try {
+        targetAlive = await tmux.hasSession(targetSession);
+      } catch (error) {
+        logger.warn("Failed to confirm the opened tmux session is alive", {
+          session: targetSession,
+          error,
+        });
+      }
+      if (!targetAlive) {
+        logger.warn("Opened tmux session is gone; keeping the previous session", {
+          session: targetSession,
+          previous,
+        });
+        return;
+      }
       try {
         const currentState = await state.load();
         const previousWorktree = currentState.worktrees.find(

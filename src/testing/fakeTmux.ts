@@ -16,7 +16,16 @@ export type FakeTmux = TmuxPort & {
   windows: Map<string, TmuxWindow[]>;
   switched: string[];
   sentKeys: Array<{ target: string; keys: string[]; enter: boolean }>;
+  options: Map<string, Map<string, string>>;
 };
+
+function paneCommand(command: string): string {
+  // Mirror tmux's pane_current_command for a `sh -c '<cmd> ...'` wrapper: the
+  // foreground process is the wrapped command, not the wrapping shell.
+  const match = /^sh -c '([^\s']+)/u.exec(command);
+  if (match?.[1]) return match[1];
+  return command.split(/\s/u, 1)[0] ?? "";
+}
 
 function copyWindow(window: TmuxWindow): TmuxWindow {
   return { ...window, panes: window.panes.map((pane) => ({ ...pane })) };
@@ -35,6 +44,7 @@ export function createFakeTmux(options: FakeTmuxOptions = {}): FakeTmux {
   }
   const switched: string[] = [];
   const sentKeys: Array<{ target: string; keys: string[]; enter: boolean }> = [];
+  const sessionOptions = new Map<string, Map<string, string>>();
   let activeSession = options.currentSession ?? null;
   const isInside = options.insideTmux ?? true;
 
@@ -49,6 +59,7 @@ export function createFakeTmux(options: FakeTmuxOptions = {}): FakeTmux {
     windows,
     switched,
     sentKeys,
+    options: sessionOptions,
     insideTmux() {
       return isInside;
     },
@@ -90,7 +101,7 @@ export function createFakeTmux(options: FakeTmuxOptions = {}): FakeTmux {
                 {
                   id: "%0",
                   pid: 1,
-                  currentCommand: opts.command.split(/\s/u, 1)[0] ?? "",
+                  currentCommand: paneCommand(opts.command),
                   currentPath: opts.cwd ?? "",
                 },
               ]
@@ -148,13 +159,24 @@ export function createFakeTmux(options: FakeTmuxOptions = {}): FakeTmux {
       }
       sessions.delete(name);
       windows.delete(name);
+      sessionOptions.delete(name);
       if (activeSession === name) activeSession = null;
     },
     async killSessionIfPresent(name) {
       calls.push({ method: "killSessionIfPresent", args: [name] });
       sessions.delete(name);
       windows.delete(name);
+      sessionOptions.delete(name);
       if (activeSession === name) activeSession = null;
+    },
+    async setOption(target, name, value) {
+      calls.push({ method: "setOption", args: [target, name, value] });
+      if (!sessions.has(target)) {
+        throw new SwarmError("tmux", `Session does not exist: ${target}`);
+      }
+      const entry = sessionOptions.get(target) ?? new Map<string, string>();
+      entry.set(name, value);
+      sessionOptions.set(target, entry);
     },
     async switchClient(session) {
       calls.push({ method: "switchClient", args: [session] });

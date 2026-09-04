@@ -31,8 +31,8 @@ test("sshArgv quotes every remote argument for POSIX sh", () => {
     ],
   );
   assert.equal(
-    sshInteractiveCommand(host, "owner/repo#a-slug"),
-    "ssh -t -- devbox swarm open 'owner/repo#a-slug'",
+    sshInteractiveCommand(host, "owner/repo#a-slug", "/home/me/.swarm"),
+    "ssh -t -o 'ConnectTimeout=5' -o 'ControlMaster=auto' -o 'ControlPath=/home/me/.swarm/cache/ssh/%C' -o 'ControlPersist=120' -- devbox swarm open 'owner/repo#a-slug'",
   );
 });
 

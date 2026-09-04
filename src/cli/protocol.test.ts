@@ -132,6 +132,7 @@ function createHarness(initial = makeState()) {
     worktrees: worktreeService,
     clock: createFixedClock(),
     logger: createNullLogger(),
+    home: "/home/test/.swarm",
   });
   const status = createStatusService({
     tmux,

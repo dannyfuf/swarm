@@ -2,7 +2,7 @@ import { chmod, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { SwarmError } from "../core/errors.ts";
 import type { RemoteHostPort, Shell } from "../core/ports.ts";
-import { quotePosixArg } from "../core/remote.ts";
+import { quotePosixArg, sshCommonOptions } from "../core/remote.ts";
 import type { HostConfigEntry, HostId } from "../core/types.ts";
 
 export { quotePosixArg, sshInteractiveCommand } from "../core/remote.ts";
@@ -18,14 +18,7 @@ export function sshArgv(host: ResolvedHost, args: string[], swarmHome: string): 
   return [
     "-o",
     "BatchMode=yes",
-    "-o",
-    "ConnectTimeout=5",
-    "-o",
-    "ControlMaster=auto",
-    "-o",
-    `ControlPath=${join(swarmHome, "cache", "ssh", "%C")}`,
-    "-o",
-    "ControlPersist=120",
+    ...sshCommonOptions(swarmHome),
     "--",
     host.ssh,
     remoteCommand(host, args),

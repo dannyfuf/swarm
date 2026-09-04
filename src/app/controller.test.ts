@@ -422,6 +422,7 @@ function createHarness(
     async killWindow() {},
     async killSession() {},
     async killSessionIfPresent() {},
+    async setOption() {},
     async switchClient() {},
     async attach(): Promise<never> {
       throw new SwarmError("unsupported", "Not used by controller tests");
