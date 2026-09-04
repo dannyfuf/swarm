@@ -7,6 +7,11 @@ export interface FakeGitOptions {
   currentBranches?: Record<string, string>;
   dirtyPaths?: string[];
   revisions?: Record<string, Record<string, string>>;
+  upstreams?: Record<string, { ref: string | null; gone: boolean }>;
+  aheadBehind?: Record<string, { ahead: number; behind: number }>;
+  commitCounts?: Record<string, number>;
+  existingRefs?: Record<string, string[]>;
+  ancestors?: Record<string, boolean>;
 }
 
 export type FakeGitCall = { method: keyof GitPort; args: unknown[] };
@@ -18,6 +23,11 @@ export type FakeGit = GitPort & {
   currentBranches: Map<string, string>;
   dirtyPaths: Set<string>;
   revisions: Map<string, Map<string, string>>;
+  upstreams: Map<string, { ref: string | null; gone: boolean }>;
+  aheadBehindByPath: Map<string, { ahead: number; behind: number }>;
+  commitCounts: Map<string, number>;
+  existingRefs: Map<string, Set<string>>;
+  ancestors: Map<string, boolean>;
 };
 
 export function createFakeGit(options: FakeGitOptions = {}): FakeGit {
@@ -35,6 +45,13 @@ export function createFakeGit(options: FakeGitOptions = {}): FakeGit {
       new Map(Object.entries(refs)),
     ]),
   );
+  const upstreams = new Map(Object.entries(options.upstreams ?? {}));
+  const aheadBehindByPath = new Map(Object.entries(options.aheadBehind ?? {}));
+  const commitCounts = new Map(Object.entries(options.commitCounts ?? {}));
+  const existingRefs = new Map(
+    Object.entries(options.existingRefs ?? {}).map(([path, refs]) => [path, new Set(refs)]),
+  );
+  const ancestors = new Map(Object.entries(options.ancestors ?? {}));
 
   return {
     calls,
@@ -43,6 +60,11 @@ export function createFakeGit(options: FakeGitOptions = {}): FakeGit {
     currentBranches,
     dirtyPaths,
     revisions,
+    upstreams,
+    aheadBehindByPath,
+    commitCounts,
+    existingRefs,
+    ancestors,
     async cloneDetached(url, dest, logPath) {
       calls.push({ method: "cloneDetached", args: [url, dest, logPath] });
       return options.detachedPid ?? 4242;
@@ -103,6 +125,37 @@ export function createFakeGit(options: FakeGitOptions = {}): FakeGit {
     async currentBranch(path) {
       calls.push({ method: "currentBranch", args: [path] });
       return currentBranches.get(path) ?? currentBranches.get(canonicalPath(path)) ?? "main";
+    },
+    async upstream(path) {
+      calls.push({ method: "upstream", args: [path] });
+      return structuredClone(
+        upstreams.get(path) ?? upstreams.get(canonicalPath(path)) ?? { ref: null, gone: false },
+      );
+    },
+    async aheadBehind(path, upstream) {
+      calls.push({ method: "aheadBehind", args: [path, upstream] });
+      return structuredClone(
+        aheadBehindByPath.get(path) ??
+          aheadBehindByPath.get(canonicalPath(path)) ?? { ahead: 0, behind: 0 },
+      );
+    },
+    async commitCount(path, range) {
+      calls.push({ method: "commitCount", args: [path, range] });
+      return commitCounts.get(path) ?? commitCounts.get(canonicalPath(path)) ?? 0;
+    },
+    async refExists(path, ref) {
+      calls.push({ method: "refExists", args: [path, ref] });
+      return (
+        existingRefs.get(path)?.has(ref) ?? existingRefs.get(canonicalPath(path))?.has(ref) ?? false
+      );
+    },
+    async isAncestor(path, ancestor, descendant) {
+      calls.push({ method: "isAncestor", args: [path, ancestor, descendant] });
+      return (
+        ancestors.get(JSON.stringify([path, ancestor, descendant])) ??
+        ancestors.get(JSON.stringify([canonicalPath(path), ancestor, descendant])) ??
+        false
+      );
     },
     async isDirty(path, opts) {
       calls.push({ method: "isDirty", args: [path, opts] });

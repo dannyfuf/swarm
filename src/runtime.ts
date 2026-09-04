@@ -17,6 +17,7 @@ import type { Clock, LifecyclePort, Logger } from "./core/ports.ts";
 import { noStartupTiming, type StartupTiming } from "./core/startup.ts";
 import type { Config } from "./core/types.ts";
 import { createContextService } from "./services/contexts.ts";
+import { createInspectionService } from "./services/inspections.ts";
 import { createPrService } from "./services/prs.ts";
 import { createRemoteHostService } from "./services/remoteHosts.ts";
 import { createRepoService } from "./services/repos.ts";
@@ -39,6 +40,7 @@ export interface Runtime {
   worktrees: ReturnType<typeof createWorktreeService>;
   sessions: ReturnType<typeof createSessionService>;
   status: ReturnType<typeof createStatusService>;
+  inspections: ReturnType<typeof createInspectionService>;
   controller: ReturnType<typeof createController>;
   store: ReturnType<typeof createStore>;
 }
@@ -149,6 +151,15 @@ export async function createRuntime(
     config,
     logger,
   });
+  const inspections = createInspectionService({
+    state,
+    files,
+    git,
+    github,
+    status,
+    clock,
+    remoteHosts,
+  });
   const updater = createUpdater({ shell, files, logger });
   const store = createStore({ config: configValue });
   const controller = createController({
@@ -188,6 +199,7 @@ export async function createRuntime(
     worktrees,
     sessions,
     status,
+    inspections,
     controller,
     store,
   };

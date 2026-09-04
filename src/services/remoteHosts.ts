@@ -9,6 +9,7 @@ import {
   RepoSchema,
   type Worktree,
   WorktreeId,
+  WorktreeInspectionSchema,
   WorktreeSchema,
   worktreeHost,
 } from "../core/types.ts";
@@ -36,9 +37,21 @@ const ListEnvelopeSchema = z.object({
 });
 const WorktreeEnvelopeSchema = z.object({
   protocol: z.number().int(),
+  created: z.boolean().default(true),
   worktree: WorktreeSchema,
 });
 const OkEnvelopeSchema = z.object({ protocol: z.number().int(), ok: z.literal(true) });
+const DeleteEnvelopeSchema = z.object({
+  protocol: z.number().int(),
+  ok: z.boolean(),
+  results: z
+    .array(z.object({ worktreeId: WorktreeId, ok: z.boolean(), reason: z.string().optional() }))
+    .default([]),
+});
+const InspectEnvelopeSchema = z.object({
+  protocol: z.number().int(),
+  worktrees: z.array(WorktreeInspectionSchema),
+});
 const StatusEnvelopeSchema = z.object({
   protocol: z.number().int(),
   statuses: z.array(StatusSchema),
@@ -57,6 +70,7 @@ const ErrorEnvelopeSchema = z.object({
 const errorCodes = new Set<ErrorCode>([
   "not-found",
   "conflict",
+  "refused",
   "git",
   "tmux",
   "fs",
@@ -133,12 +147,12 @@ export function createRemoteHostService({
     hostId: HostId,
     args: string[],
     schema: z.ZodType<T>,
-    opts?: { timeoutMs?: number },
+    opts?: { timeoutMs?: number; allowNonzero?: boolean },
   ): Promise<T> => {
     const host = await resolveHost(hostId);
     let result: ShellResult;
     try {
-      result = await transport.run(host, args, opts);
+      result = await transport.run(host, args, { timeoutMs: opts?.timeoutMs });
     } catch (cause) {
       throw unreachable(hostId, errorMessage(cause), cause);
     }
@@ -154,10 +168,12 @@ export function createRemoteHostService({
     if (result.code !== 0) {
       const remoteError = envelopeError(hostId, value);
       if (remoteError) throw remoteError;
-      throw new SwarmError(
-        "remote",
-        `${hostId}: ${result.stderr.trim() || result.stdout.trim() || `remote swarm exited ${result.code}`}`,
-      );
+      if (!opts?.allowNonzero || value === undefined) {
+        throw new SwarmError(
+          "remote",
+          `${hostId}: ${result.stderr.trim() || result.stdout.trim() || `remote swarm exited ${result.code}`}`,
+        );
+      }
     }
 
     assertProtocol(hostId, value);
@@ -180,8 +196,15 @@ export function createRemoteHostService({
     async create(hostId, { repo, slug, branch, baseRef }) {
       const id = makeWorktreeId(repo.id, slug);
       const current = await state.load();
-      if (current.worktrees.some((worktree) => worktree.id === id)) {
-        throw new SwarmError("validation", `Worktree already exists: ${id}`);
+      const existing = current.worktrees.find((worktree) => worktree.id === id);
+      if (existing) {
+        if (
+          (branch === undefined || existing.branch === branch) &&
+          worktreeHost(existing) === hostId
+        ) {
+          return { created: false, worktree: existing };
+        }
+        throw new SwarmError("conflict", `Worktree already exists with different placement: ${id}`);
       }
       const response = await invoke(
         hostId,
@@ -189,8 +212,7 @@ export function createRemoteHostService({
           "create",
           repo.id,
           slug,
-          "--branch",
-          branch,
+          ...(branch ? ["--branch", branch] : []),
           "--base",
           baseRef,
           "--url",
@@ -203,13 +225,23 @@ export function createRemoteHostService({
         ],
         WorktreeEnvelopeSchema,
       );
-      return response.worktree;
+      return { created: response.created, worktree: response.worktree };
     },
 
-    async delete(hostId, worktreeId) {
-      await invoke(hostId, ["delete", worktreeId, "--json"], OkEnvelopeSchema, {
-        timeoutMs: SHORT_COMMAND_TIMEOUT_MS,
-      });
+    async delete(hostId, worktreeId, opts) {
+      const response = await invoke(
+        hostId,
+        ["delete", worktreeId, ...(opts?.force ? ["--force"] : []), "--json"],
+        DeleteEnvelopeSchema,
+        { timeoutMs: SHORT_COMMAND_TIMEOUT_MS, allowNonzero: true },
+      );
+      const result = response.results.find((candidate) => candidate.worktreeId === worktreeId);
+      return result
+        ? { ok: result.ok, ...(result.reason ? { reason: result.reason } : {}) }
+        : {
+            ok: response.ok,
+            ...(response.ok ? {} : { reason: "remote delete omitted its result" }),
+          };
     },
 
     async kill(hostId, worktreeId) {
@@ -234,6 +266,16 @@ export function createRemoteHostService({
         timeoutMs: SHORT_COMMAND_TIMEOUT_MS,
       });
       return response.statuses;
+    },
+
+    async inspect(hostId, worktreeIds, opts) {
+      const response = await invoke(
+        hostId,
+        ["inspect", ...worktreeIds, ...(opts?.fetch ? ["--fetch"] : []), "--json"],
+        InspectEnvelopeSchema,
+        { timeoutMs: SHORT_COMMAND_TIMEOUT_MS },
+      );
+      return response.worktrees;
     },
 
     async sync(hostId) {

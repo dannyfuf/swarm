@@ -12,6 +12,7 @@ import type {
   RepoId,
   Worktree,
   WorktreeId,
+  WorktreeInspection,
   WorktreeStatus,
 } from "./types.ts";
 
@@ -73,7 +74,7 @@ export interface WorktreeService {
     onEvent?: OnEvent,
   ): Promise<Worktree>;
   runPostCreateHooks(worktreeId: WorktreeId, onEvent?: OnEvent): Promise<void>;
-  delete(worktreeId: WorktreeId, onEvent?: OnEvent): Promise<void>;
+  delete(worktreeId: WorktreeId, onEvent?: OnEvent, opts?: { force?: boolean }): Promise<void>;
   touch(worktreeId: WorktreeId): Promise<void>;
 }
 
@@ -111,12 +112,21 @@ export interface RemoteHostService {
   }>;
   create(
     hostId: HostId,
-    input: { repo: Repo; slug: string; branch: string; baseRef: string },
-  ): Promise<Worktree>;
-  delete(hostId: HostId, worktreeId: WorktreeId): Promise<void>;
+    input: { repo: Repo; slug: string; branch?: string; baseRef: string },
+  ): Promise<{ created: boolean; worktree: Worktree }>;
+  delete(
+    hostId: HostId,
+    worktreeId: WorktreeId,
+    opts?: { force?: boolean },
+  ): Promise<{ ok: boolean; reason?: string }>;
   kill(hostId: HostId, worktreeId: WorktreeId): Promise<void>;
   sleep(hostId: HostId, session: string): Promise<UnmountReport>;
   status(hostId: HostId): Promise<WorktreeStatus[]>;
+  inspect(
+    hostId: HostId,
+    worktreeIds: WorktreeId[],
+    opts?: { fetch?: boolean },
+  ): Promise<WorktreeInspection[]>;
   sync(hostId: HostId): Promise<Worktree[]>;
   syncAll(): Promise<Array<{ hostId: HostId; error?: SwarmError }>>;
   remoteSnapshot(hostId: HostId): Promise<Map<WorktreeId, WorktreeStatus>>;
@@ -125,6 +135,14 @@ export interface RemoteHostService {
 
 export interface StatusService {
   snapshot(worktrees: Worktree[]): Promise<Map<WorktreeId, WorktreeStatus>>;
+}
+
+export interface InspectionService {
+  inspect(input?: {
+    worktreeIds?: WorktreeId[];
+    repoId?: RepoId;
+    fetch?: boolean;
+  }): Promise<WorktreeInspection[]>;
 }
 
 export interface FuzzyMatch<T> {

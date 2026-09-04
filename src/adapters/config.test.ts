@@ -59,6 +59,33 @@ describe("config adapter", () => {
     assert.equal(config.defaultHost, "local");
   });
 
+  test("resolves configured relative repository roots to absolute paths", async () => {
+    const files = createFakeFiles({
+      texts: {
+        [configPath]: JSON.stringify({
+          ...defaultConfig(home),
+          reposDir: "relative-repos",
+          worktreesDir: "relative-worktrees",
+        }),
+      },
+    });
+    const store = createConfigStore(files, configPath, home, createNullLogger());
+
+    const config = await store.load();
+
+    assert.equal(config.reposDir, resolve("relative-repos"));
+    assert.equal(config.worktreesDir, resolve("relative-worktrees"));
+
+    const defaulted = await createConfigStore(
+      createFakeFiles(),
+      configPath,
+      "relative-home",
+      createNullLogger(),
+    ).load();
+    assert.equal(defaulted.reposDir, resolve("relative-home/repos"));
+    assert.equal(defaulted.worktreesDir, resolve("relative-home/worktrees"));
+  });
+
   test("fills defaults around a partial agent command map", async () => {
     const files = createFakeFiles({
       texts: {

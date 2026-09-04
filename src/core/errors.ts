@@ -1,6 +1,7 @@
 export type ErrorCode =
   | "not-found"
   | "conflict"
+  | "refused"
   | "git"
   | "tmux"
   | "fs"

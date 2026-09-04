@@ -1645,7 +1645,7 @@ export function createWorktreeService({
       for (const cancel of [...cancelPolls]) cancel();
     },
 
-    async delete(worktreeId, onEvent) {
+    async delete(worktreeId, onEvent, opts) {
       const registered = (await loadState()).worktrees.find(
         (candidate) => candidate.id === worktreeId,
       );
@@ -1655,7 +1655,13 @@ export function createWorktreeService({
           throw new SwarmError("unsupported", `Remote host service is unavailable: ${hostId}`);
         }
         try {
-          await remoteHosts.delete(hostId, registered.id);
+          const result = await remoteHosts.delete(hostId, registered.id, opts);
+          if (!result.ok) {
+            throw new SwarmError(
+              "refused",
+              result.reason ?? `Remote host refused to delete ${registered.id}`,
+            );
+          }
           const proxy = proxySessionName(hostId, registered.session);
           await tmux.killSessionIfPresent(proxy);
           await mutateState(state, (next) => {

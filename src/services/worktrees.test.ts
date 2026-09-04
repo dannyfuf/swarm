@@ -2662,6 +2662,7 @@ describe("createWorktreeService", () => {
       async delete(hostId: string, worktreeId: string) {
         calls.push(`${hostId}:${worktreeId}`);
         if (failure) throw failure;
+        return { ok: true };
       },
     } as unknown as RemoteHostService;
     const service = createWorktreeService({
@@ -2707,6 +2708,7 @@ describe("createWorktreeService", () => {
     const remoteHosts = {
       async delete() {
         tmux.sessions.delete("devbox/payroll/main");
+        return { ok: true };
       },
     } as unknown as RemoteHostService;
     const service = createWorktreeService({

@@ -1,16 +1,20 @@
 import assert from "node:assert/strict";
+import { resolve } from "node:path";
 import { describe, test } from "node:test";
 import { SwarmError } from "./core/errors.ts";
 import { defaultConfig } from "./core/types.ts";
 import {
+  COMMAND_HELP,
   doctorChecks,
   exitTuiProcess,
   findWorktree,
   formatUnmountReport,
+  localWorktreePath,
   main,
   parseArgv,
   resolveAgentName,
   runAgentCommand,
+  USAGE,
 } from "./main.ts";
 import { createFakeRemoteHost } from "./testing/fakeRemoteHost.ts";
 import { createFakeShell } from "./testing/fakeShell.ts";
@@ -51,7 +55,8 @@ describe("CLI parsing", () => {
     assert.deepEqual(parseArgv(["status"]), { kind: "status", json: false });
     assert.deepEqual(parseArgv(["delete", "--json", "bukhr/payroll#main"]), {
       kind: "delete",
-      worktreeId: "bukhr/payroll#main",
+      worktreeIds: ["bukhr/payroll#main"],
+      force: false,
       json: true,
     });
     assert.deepEqual(parseArgv(["kill", "bukhr/payroll#main", "--json"]), {
@@ -88,6 +93,106 @@ describe("CLI parsing", () => {
         json: true,
       },
     );
+    assert.deepEqual(parseArgv(["prune", "--json"]), {
+      kind: "prune",
+      dryRun: false,
+      noFetch: false,
+      killSessions: false,
+      json: true,
+    });
+  });
+
+  test("parses create defaults, inspect, multi-delete, prune, and path flags", () => {
+    assert.deepEqual(parseArgv(["create", "dannyfuf/swarm", "feat-cli-completeness", "--json"]), {
+      kind: "create",
+      repoId: "dannyfuf/swarm",
+      slug: "feat-cli-completeness",
+      url: undefined,
+      defaultBranch: undefined,
+      hooks: { prepare: [], postCreate: [] },
+      json: true,
+    });
+    assert.deepEqual(
+      parseArgv(["create", "bukhr/payroll", "ticket-42", "--host", "devbox", "--json"]),
+      {
+        kind: "create",
+        repoId: "bukhr/payroll",
+        slug: "ticket-42",
+        host: "devbox",
+        url: undefined,
+        defaultBranch: undefined,
+        hooks: { prepare: [], postCreate: [] },
+        json: true,
+      },
+    );
+    assert.deepEqual(
+      parseArgv(["inspect", "bukhr/payroll#main", "--fetch", "--repo", "bukhr/payroll", "--json"]),
+      {
+        kind: "inspect",
+        worktreeIds: ["bukhr/payroll#main"],
+        fetch: true,
+        repoId: "bukhr/payroll",
+        json: true,
+      },
+    );
+    assert.deepEqual(
+      parseArgv(["delete", "bukhr/payroll#main", "bukhr/platform#feat-api", "--force", "--json"]),
+      {
+        kind: "delete",
+        worktreeIds: ["bukhr/payroll#main", "bukhr/platform#feat-api"],
+        force: true,
+        json: true,
+      },
+    );
+    assert.deepEqual(
+      parseArgv([
+        "prune",
+        "--dry-run",
+        "--no-fetch",
+        "--kill-sessions",
+        "--repo",
+        "bukhr/payroll",
+        "--json",
+      ]),
+      {
+        kind: "prune",
+        dryRun: true,
+        noFetch: true,
+        killSessions: true,
+        repoId: "bukhr/payroll",
+        json: true,
+      },
+    );
+    assert.deepEqual(parseArgv(["path", "bukhr/payroll#main"]), {
+      kind: "path",
+      worktreeId: "bukhr/payroll#main",
+    });
+  });
+
+  test("parses --help for every command", () => {
+    for (const command of Object.keys(COMMAND_HELP)) {
+      assert.deepEqual(parseArgv([command, "--help"]), { kind: "help", command });
+    }
+    assert.deepEqual(parseArgv(["--help"]), { kind: "help" });
+    assert.match(COMMAND_HELP.create, /only explicitly supplied --branch and --host/);
+    assert.match(COMMAND_HELP.inspect, /head/);
+    assert.match(COMMAND_HELP.delete, /cannot determine unique commits/);
+    assert.match(COMMAND_HELP.prune, /--kill-sessions/);
+  });
+
+  test("prints command help to stdout and exits successfully", async () => {
+    const output: string[] = [];
+    const originalWrite = process.stdout.write;
+    process.stdout.write = ((chunk: string | Uint8Array) => {
+      output.push(String(chunk));
+      return true;
+    }) as typeof process.stdout.write;
+    try {
+      assert.equal(await main(["inspect", "--help"]), 0);
+    } finally {
+      process.stdout.write = originalWrite;
+    }
+    assert.equal(output.join(""), `${COMMAND_HELP.inspect}\n`);
   });
 
   test("rejects malformed invocations with a validation error", () => {
@@ -100,11 +205,15 @@ describe("CLI parsing", () => {
       (error: unknown) => error instanceof SwarmError && error.code === "validation",
     );
     assert.throws(
-      () => parseArgv(["create", "bukhr/payroll", "slug", "--branch", "feat/x"]),
+      () => parseArgv(["create", "bukhr/payroll"]),
       (error: unknown) => error instanceof SwarmError && error.code === "validation",
     );
     assert.throws(
       () => parseArgv(["delete", "not-a-worktree", "--json"]),
+      (error: unknown) => error instanceof SwarmError && error.code === "validation",
+    );
+    assert.throws(
+      () => parseArgv(["prune", "--kill-sessions", "--kill-sessions"]),
       (error: unknown) => error instanceof SwarmError && error.code === "validation",
     );
   });
@@ -126,8 +235,7 @@ describe("CLI parsing", () => {
       protocol: 1,
       error: {
         kind: "validation",
-        message:
-          "Usage: swarm [command] Commands: open <owner/name#slug|repo/slug> sleep [session] [--json] agent [claude|opencode] list [--json] create <owner/name> <slug> --branch <name> --base <ref> [--url <url>] [--default-branch <name>] [--hooks <json>] [--json] delete <owner/name#slug> [--json] kill <owner/name#slug> [--json] status [--json] doctor --version",
+        message: USAGE.replace(/\s+/gu, " ").trim(),
       },
     });
   });
@@ -152,6 +260,16 @@ describe("CLI parsing", () => {
     const state = makeState({ worktrees: [remote] });
     assert.deepEqual(findWorktree(state, remote.id), remote);
     assert.deepEqual(findWorktree(state, "devbox/payroll/main"), remote);
+  });
+
+  test("returns only absolute local paths for the path command", () => {
+    const source = worktrees[0];
+    assert.ok(source);
+    assert.equal(localWorktreePath({ ...source, path: "relative/path" }), resolve("relative/path"));
+    assert.throws(
+      () => localWorktreePath({ ...source, host: "devbox" }),
+      (error: unknown) => error instanceof SwarmError && error.code === "unsupported",
+    );
   });
 
   test("flushes stdout and stderr before explicitly exiting the TUI process", async () => {

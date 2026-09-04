@@ -181,6 +181,51 @@ describe("git adapter", () => {
     );
   });
 
+  test("reads upstream divergence and ancestry with exact Git commands", async () => {
+    const shell = createFakeShell([
+      { match: (_cmd, args) => args[0] === "branch", result: { stdout: "feat/x\n" } },
+      {
+        match: (_cmd, args) => args[0] === "for-each-ref",
+        result: { stdout: "origin/feat/x\0[ahead 2, behind 1]\n" },
+      },
+      {
+        match: (_cmd, args) => args[0] === "rev-list",
+        result: (_cmd, args) => ({ stdout: args[1] === "--count" ? "4\n" : "1 2\n" }),
+      },
+      {
+        match: (_cmd, args) => args[0] === "rev-parse",
+        result: (_cmd, args) => ({ code: args.at(-1)?.endsWith("/missing") ? 1 : 0 }),
+      },
+      { match: (_cmd, args) => args[0] === "merge-base", result: { code: 1 } },
+    ]);
+    const git = createGit(shell, createNullLogger());
+
+    assert.deepEqual(await git.upstream("/work/repo"), {
+      ref: "origin/feat/x",
+      gone: false,
+    });
+    assert.deepEqual(await git.aheadBehind("/work/repo", "origin/feat/x"), {
+      ahead: 2,
+      behind: 1,
+    });
+    assert.equal(await git.commitCount("/work/repo", "origin/main..HEAD"), 4);
+    assert.equal(await git.refExists("/work/repo", "refs/remotes/origin/feat/x"), true);
+    assert.equal(await git.refExists("/work/repo", "refs/remotes/origin/missing"), false);
+    assert.equal(await git.isAncestor("/work/repo", "HEAD", "origin/main"), false);
+    assert.deepEqual(
+      shell.calls.map(({ args }) => args),
+      [
+        ["branch", "--show-current"],
+        ["for-each-ref", "--format=%(upstream:short)%00%(upstream:track)", "refs/heads/feat/x"],
+        ["rev-list", "--left-right", "--count", "origin/feat/x...HEAD"],
+        ["rev-list", "--count", "origin/main..HEAD"],
+        ["rev-parse", "--verify", "--quiet", "refs/remotes/origin/feat/x"],
+        ["rev-parse", "--verify", "--quiet", "refs/remotes/origin/missing"],
+        ["merge-base", "--is-ancestor", "HEAD", "origin/main"],
+      ],
+    );
+  });
+
   test("validates pull request fetch inputs before invoking git", async () => {
     const shell = createFakeShell();
     const git = createGit(shell, createNullLogger());

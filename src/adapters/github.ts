@@ -71,6 +71,16 @@ const GithubPullRequestSchema = z.object({
 });
 
 const GithubPullRequestsSchema = z.array(GithubPullRequestSchema);
+const GithubInspectionPullRequestsSchema = z.array(
+  z.object({
+    number: z.number().int().positive(),
+    state: z.enum(["OPEN", "MERGED", "CLOSED"]),
+    url: z.string().url(),
+    baseRefName: z.string().min(1),
+    headRefOid: z.string().min(1),
+    updatedAt: z.string().datetime(),
+  }),
+);
 const PrCacheSchema = z.object({
   fetchedAt: z.string().datetime(),
   prs: z.array(PullRequestSchema),
@@ -362,6 +372,56 @@ export function createGithub(
         throw githubFailure(`Unable to find a pull request for ${repoId}:${branch}`, result);
       }
       return mapPullRequests(result.stdout, repoId)[0];
+    },
+
+    async findLatestPullRequest(repo, branch) {
+      const repoId = `${repo.owner}/${repo.name}`;
+      let result: ShellResult;
+      try {
+        result = await shell.run("gh", [
+          "pr",
+          "list",
+          "--repo",
+          repoId,
+          "--head",
+          branch,
+          "--state",
+          "all",
+          "--limit",
+          "100",
+          "--json",
+          "number,state,url,baseRefName,headRefOid,updatedAt",
+        ]);
+      } catch (cause) {
+        result = {
+          code: 1,
+          stdout: "",
+          stderr: cause instanceof Error ? cause.message : "",
+        };
+      }
+      if (result.code !== 0) {
+        throw githubFailure(`Unable to find a pull request for ${repoId}:${branch}`, result);
+      }
+      try {
+        const [latest] = GithubInspectionPullRequestsSchema.parse(JSON.parse(result.stdout)).sort(
+          (left, right) => right.updatedAt.localeCompare(left.updatedAt),
+        );
+        return latest
+          ? {
+              number: latest.number,
+              state: latest.state,
+              url: latest.url,
+              baseRefName: latest.baseRefName,
+              headRefOid: latest.headRefOid,
+            }
+          : undefined;
+      } catch (cause) {
+        throw new SwarmError(
+          "github",
+          `GitHub returned invalid pull request data for ${repoId}. Authenticate with \`gh auth login\` and try again.`,
+          { cause },
+        );
+      }
     },
 
     async readCachedPullRequests(repo, tab, opts = {}) {
