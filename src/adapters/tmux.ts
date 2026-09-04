@@ -17,6 +17,20 @@ function exactTarget(name: string): string {
   return `=${name}`;
 }
 
+const UTF8_LOCALE = /utf-?8/iu;
+
+/**
+ * tmux sanitizes command output (tabs become `_`) for clients whose locale is
+ * not UTF-8, which breaks the tab-separated formats above. `-u` forces UTF-8
+ * output regardless of the locale; the env tweak below is a belt-and-braces
+ * fallback that only fills in LC_CTYPE when no UTF-8 locale is configured.
+ */
+export function tmuxLocaleEnv(env: NodeJS.ProcessEnv): Record<string, string> | undefined {
+  const locale = env.LC_ALL || env.LC_CTYPE || env.LANG || "";
+  if (UTF8_LOCALE.test(locale)) return undefined;
+  return { LC_CTYPE: "C.UTF-8" };
+}
+
 function failureMessage(args: string[], result: ShellResult): string {
   const detail = result.stderr.trim() || result.stdout.trim() || "no error output";
   return `tmux ${args[0] ?? "command"} failed with exit code ${result.code}: ${detail}`;
@@ -28,10 +42,12 @@ export function createTmux(
   env: NodeJS.ProcessEnv = process.env,
 ): TmuxPort {
   const log = logger.child("tmux");
+  const localeEnv = tmuxLocaleEnv(env);
+  const runOptions = localeEnv ? { env: localeEnv } : undefined;
 
   const invoke = async (args: string[]): Promise<ShellResult> => {
     try {
-      return await shell.run("tmux", args);
+      return await shell.run("tmux", ["-u", ...args], runOptions);
     } catch (cause) {
       log.error("tmux command could not be run", { args, cause });
       throw new SwarmError("tmux", `tmux ${args[0] ?? "command"} could not be run`, { cause });
@@ -234,12 +250,16 @@ export function createTmux(
       throw new SwarmError("tmux", failureMessage(args, result), { cause: result });
     },
 
+    async setOption(target, name, value) {
+      await run(["set-option", "-t", exactTarget(target), name, value]);
+    },
+
     async switchClient(session) {
       await run(["switch-client", "-t", exactTarget(session)]);
     },
 
     async attach(session): Promise<never> {
-      const args = ["attach-session", "-t", exactTarget(session)];
+      const args = ["-u", "attach-session", "-t", exactTarget(session)];
       try {
         return await shell.exec("tmux", args);
       } catch (cause) {
