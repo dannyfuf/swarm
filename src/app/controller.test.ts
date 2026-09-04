@@ -145,10 +145,10 @@ function fakeRemoteHosts(overrides: Partial<RemoteHostService> = {}): RemoteHost
       if (overrides.create) return overrides.create(...args);
       const fallback = worktrees[0];
       assert.ok(fallback);
-      return { ...fallback, host: args[0] };
+      return { created: true, worktree: { ...fallback, host: args[0] } };
     },
     async delete(hostId, worktreeId) {
-      return overrides.delete?.(hostId, worktreeId);
+      return (await overrides.delete?.(hostId, worktreeId)) ?? { ok: true };
     },
     async kill(hostId, worktreeId) {
       return overrides.kill?.(hostId, worktreeId);
@@ -159,6 +159,9 @@ function fakeRemoteHosts(overrides: Partial<RemoteHostService> = {}): RemoteHost
     },
     async status(hostId) {
       return (await overrides.status?.(hostId)) ?? [];
+    },
+    async inspect(hostId, worktreeIds, opts) {
+      return (await overrides.inspect?.(hostId, worktreeIds, opts)) ?? [];
     },
     async sync(hostId) {
       calls.syncs.push(hostId);

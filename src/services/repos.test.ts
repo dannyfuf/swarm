@@ -141,6 +141,9 @@ describe("createRepoService", () => {
       async findPullRequest() {
         return undefined;
       },
+      async findLatestPullRequest() {
+        return undefined;
+      },
       async readCachedPullRequests() {
         return undefined;
       },

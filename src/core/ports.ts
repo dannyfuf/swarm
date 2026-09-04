@@ -2,6 +2,7 @@ import type {
   Config,
   HostConfigEntry,
   HostId,
+  InspectionPullRequest,
   PrTab,
   PullRequest,
   RemoteRepo,
@@ -81,6 +82,11 @@ export interface GitPort {
   remoteBranches(repoPath: string, signal?: AbortSignal): Promise<string[]>;
   revision(path: string, ref: string, signal?: AbortSignal): Promise<string>;
   currentBranch(path: string): Promise<string>;
+  upstream(path: string): Promise<{ ref: string | null; gone: boolean }>;
+  aheadBehind(path: string, upstream: string): Promise<{ ahead: number; behind: number }>;
+  commitCount(path: string, range: string): Promise<number>;
+  refExists(path: string, ref: string): Promise<boolean>;
+  isAncestor(path: string, ancestor: string, descendant: string): Promise<boolean>;
   isDirty(path: string, opts?: { signal?: AbortSignal }): Promise<boolean>;
 }
 
@@ -173,6 +179,10 @@ export interface GithubPort {
     repo: { owner: string; name: string },
     branch: string,
   ): Promise<PullRequest | undefined>;
+  findLatestPullRequest(
+    repo: { owner: string; name: string },
+    branch: string,
+  ): Promise<InspectionPullRequest | undefined>;
   readCachedPullRequests(
     repo: { owner: string; name: string },
     tab: PrTab,

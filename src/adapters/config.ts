@@ -1,4 +1,4 @@
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { z } from "zod";
 import { SwarmError } from "../core/errors.ts";
 import type { ConfigPort, FilesPort, Logger } from "../core/ports.ts";
@@ -24,6 +24,14 @@ function expandHome(value: string, home: string): string {
   if (value === "~") return home;
   if (value.startsWith("~/")) return join(home, value.slice(2));
   return value;
+}
+
+function absolutePaths(config: Config, userHome: string): Config {
+  return {
+    ...config,
+    reposDir: resolve(expandHome(config.reposDir, userHome)),
+    worktreesDir: resolve(expandHome(config.worktreesDir, userHome)),
+  };
 }
 
 function formatValidationError(error: unknown): string {
@@ -67,7 +75,7 @@ export function createConfigStore(
     async load() {
       const text = await files.readText(path);
       if (text === null) {
-        const config = defaultConfig(home);
+        const config = absolutePaths(defaultConfig(home), userHome);
         await files.writeTextAtomic(path, JSON.stringify(config, null, 2));
         logger.info("Created default config file", { path });
         return config;
@@ -87,11 +95,7 @@ export function createConfigStore(
       const config = normalizeLegacyAgentWindow(
         validateConfig(deepMerge(defaultConfig(home), parsed), `Invalid config file ${path}`),
       );
-      return {
-        ...config,
-        reposDir: expandHome(config.reposDir, userHome),
-        worktreesDir: expandHome(config.worktreesDir, userHome),
-      };
+      return absolutePaths(config, userHome);
     },
 
     async save(config) {

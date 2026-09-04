@@ -61,12 +61,17 @@ swarm                                  Open the TUI
 swarm open owner/repo#slug             Mount and open a worktree by id
 swarm open repo/slug                   Mount and open a worktree by tmux session
 swarm list --json                      Print registered repos and worktrees
-swarm create owner/repo slug --branch name --base ref [--url url]
-             [--default-branch name] [--hooks json] --json
+swarm create owner/repo slug [--branch name] [--base ref] [--host id] [--url url]
+             [--default-branch name] [--hooks json] [--json]
                                        Clone if needed, then create and publish a worktree
-swarm delete owner/repo#slug --json    Kill its session and delete the worktree
+swarm inspect [id...] [--fetch] [--repo owner/name] [--json]
+                                       Inspect Git, PR, and tmux safety facts
+swarm delete <id>... [--json]           Unconditionally delete one or more worktrees
+swarm prune [--dry-run] [--no-fetch] [--kill-sessions] [--repo owner/name] [--json]
+                                       Safely delete every eligible merged worktree
 swarm kill owner/repo#slug --json      Kill its session if present
 swarm status --json                    Print status for every worktree
+swarm path owner/repo#slug             Print a local worktree's absolute path
 swarm sleep [session] [--json]         Apply the sleep policy and print a JSON report
 swarm agent [claude|opencode]          Create or reopen a persistent agent tmux session
 swarm doctor                           Check runtime dependencies
@@ -75,6 +80,64 @@ swarm --version                        Print the installed version
 
 `swarm --version` includes the package version and the Git commit baked into the build, such as
 `swarm 0.1.0+f1ad163`.
+
+## Driving swarm from an agent
+
+For one worktree per ticket, first use `swarm list --json` and select the repository from its
+`repos` array. For each ticket run:
+
+```sh
+swarm create <owner/repo> <slug> --json
+```
+
+Collect `worktree.path` from each response. The slug is also the default branch name, the base is
+`origin/<repo default branch>`, and an existing worktree is returned without rerunning hooks.
+Existing records are constrained only by flags supplied explicitly: an omitted `--branch` accepts
+the recorded branch, and an omitted `--host` accepts the recorded host:
+
+```text
+{ protocol: 1, created: boolean, worktree: Worktree }
+```
+
+For cleanup, preview and then apply the same eligibility rules:
+
+```sh
+swarm prune --dry-run --json
+swarm prune --json
+swarm prune --kill-sessions --json  # only when the remaining skips are running sessions
+```
+
+Use `swarm inspect --json` to review every worktree before hand-picking IDs. The `swarm delete`
+command is unconditional: every named worktree is destroyed regardless of dirty state, merge
+state, unique commits, or tmux session state. Use prune as the safe bulk command. Their envelopes
+are:
+
+```text
+inspect -> {
+  protocol: 1,
+  worktrees: [{ worktreeId, repoId, host, path, branch, baseRef, head, targetBranch,
+    upstream, ahead, behind, upstreamGone, dirty, mergedIntoTarget, uniqueCommits,
+    published, merged, pr, session, running, inspectedAt, warnings, error }]
+}
+prune  -> { protocol: 1, dryRun, deleted: string[], skipped: [{ worktreeId, reason,
+            merged, dirty, uniqueCommits, running }] }
+delete -> { protocol: 1, ok, results: [{ worktreeId, ok, reason? }] }
+create -> { protocol: 1, created, worktree }
+```
+
+Delete continues through all requested IDs; `reason` appears only on actual failures such as an
+unknown ID or unreachable host, and any failed result makes the command exit 1.
+
+`pr` is either `null` or `{ number, state, url, baseRefName, headRefOid }`. Inspect does not fetch by default;
+prune fetches with pruning by default. `mergedIntoTarget` is raw Git ancestry; `published` records
+whether the branch was pushed. `merged` requires both ancestry and publication, or a merged PR
+whose `headRefOid` equals or contains the inspected local `head`; commits added after a PR merge do
+not inherit that PR's merged status. Prune selects only clean worktrees with `merged: true` and a
+session state of `none` or `detached`; by default it also requires no running commands. Use
+`--kill-sessions` only after reviewing the normal prune output: it permits running commands in
+otherwise eligible detached sessions, requires a known unique-commit count, and hard-kills the
+session. Attached and unknown sessions remain protected by prune. Delete has no eligibility checks;
+inspect first or use `swarm prune --dry-run --json` when deletion needs a safety decision.
 
 ## Configuration
 

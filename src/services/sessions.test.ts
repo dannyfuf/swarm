@@ -114,9 +114,11 @@ function fakeRemoteHostService(): RemoteHostService & {
       return { protocol: 1, version: "swarm test", repos: [], worktrees: [] };
     },
     async create() {
-      return target;
+      return { created: true, worktree: target };
     },
-    async delete() {},
+    async delete() {
+      return { ok: true };
+    },
     async kill(hostId, worktreeId) {
       calls.push({ method: "kill", hostId, target: worktreeId });
     },
@@ -129,6 +131,9 @@ function fakeRemoteHostService(): RemoteHostService & {
       };
     },
     async status() {
+      return [];
+    },
+    async inspect() {
       return [];
     },
     async sync() {

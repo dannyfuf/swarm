@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   CLI_VERSION,
@@ -18,6 +19,7 @@ import { createStartupProfiler } from "./core/startup.ts";
 import {
   agentCommand,
   type Config,
+  HostId,
   type RepoHooks,
   RepoHooksSchema,
   RepoId,
@@ -49,8 +51,23 @@ export type CliCommand =
   | { kind: "agent"; agent?: AgentName }
   | { kind: "doctor" }
   | { kind: "version" }
-  | { kind: "help" }
+  | { kind: "path"; worktreeId: Worktree["id"] }
+  | { kind: "help"; command?: CommandName }
   | ProtocolCommand;
+
+export type CommandName =
+  | "open"
+  | "sleep"
+  | "agent"
+  | "list"
+  | "create"
+  | "inspect"
+  | "delete"
+  | "prune"
+  | "kill"
+  | "status"
+  | "path"
+  | "doctor";
 
 export interface DoctorCheck {
   name: string;
@@ -86,16 +103,125 @@ export async function exitTuiProcess(
 export const USAGE = `Usage: swarm [command]
 
 Commands:
-  open <owner/name#slug|repo/slug>
-  sleep [session] [--json]
-  agent [claude|opencode]
-  list [--json]
-  create <owner/name> <slug> --branch <name> --base <ref> [--url <url>] [--default-branch <name>] [--hooks <json>] [--json]
-  delete <owner/name#slug> [--json]
-  kill <owner/name#slug> [--json]
-  status [--json]
-  doctor
-  --version`;
+  open       Mount and open a worktree
+  sleep      Apply the sleep policy to a session
+  agent      Open a persistent agent session
+  list       List registered repositories and worktrees
+  create     Create or return a worktree
+  inspect    Inspect Git, PR, and tmux safety facts
+  delete     Unconditionally delete one or more worktrees
+  prune      Safely delete every eligible merged worktree
+  kill       Hard-kill a worktree session
+  status     Show tmux status for local worktrees
+  path       Print a local worktree's absolute path
+  doctor     Check runtime dependencies and remote hosts
+  --version  Print the installed version
+
+Run swarm <command> --help for command details.`;
+
+export const COMMAND_HELP: Record<CommandName, string> = {
+  open: `Usage: swarm open <owner/name#slug|repo/slug>
+
+Flags:
+  --help  Show this help [default: false]
+
+Output: opens the worktree's tmux session; no JSON envelope.
+Remote: remote worktrees open through a local SSH proxy session.`,
+  sleep: `Usage: swarm sleep [session] [--json]
+
+Flags:
+  --json  Emit {protocol, kept, closed, sessionKilled} [default: false]
+  --help  Show this help [default: false]
+
+Default session: the current tmux session.
+Remote: recorded remote worktrees are routed to their host.`,
+  agent: `Usage: swarm agent [claude|opencode]
+
+Flags:
+  --help  Show this help [default: false]
+
+Default agent: config.agent. Output is the attached tmux session; no JSON envelope.
+Remote: agent sessions are local only.`,
+  list: `Usage: swarm list [--json]
+
+Flags:
+  --json  Emit {protocol, version, repos, worktrees} [default: false]
+  --help  Show this help [default: false]
+
+Default output: a human-readable count. All JSON paths are absolute.
+Remote: mirrored remote worktrees retain their host paths.`,
+  create: `Usage: swarm create <owner/name> <slug> [--branch <name>] [--base <ref>] [--host <id>] [--url <url>] [--default-branch <name>] [--hooks <json>] [--json]
+
+Flags:
+  --branch <name>         Branch name [default: <slug>]
+  --base <ref>            Starting ref [default: origin/<repo default branch>]
+  --host <id>             Remote placement [default: local]
+  --url <url>             Clone URL for an unregistered repo [default: none]
+  --default-branch <name> Clone default-branch hint [default: resolved origin/HEAD]
+  --hooks <json>          Repo prepare/postCreate hooks [default: {"prepare":[],"postCreate":[]}]
+  --json                  Emit {protocol, created, worktree} [default: false]
+  --help                  Show this help [default: false]
+
+Existing ids: only explicitly supplied --branch and --host values must match; hooks do not rerun.
+Remote: --host invokes swarm on that host without forwarding --host, and preserves whether --branch was omitted.`,
+  inspect: `Usage: swarm inspect [id...] [--fetch] [--repo <owner/name>] [--json]
+
+Flags:
+  --fetch               Fetch and prune origin once per repo first [default: false]
+  --repo <owner/name>   Restrict repositories [default: all]
+  --json                Emit {protocol,worktrees:[{...,head,uniqueCommits,published,merged,pr,...}]} [default: false]
+  --help                Show this help [default: false]
+
+Default ids: every worktree. A merged PR counts only when its head contains the inspected local HEAD; otherwise merged requires both mergedIntoTarget and publication.
+Remote worktrees are inspected on their recorded host; offline hosts produce per-worktree errors.`,
+  delete: `Usage: swarm delete <id>... [--json]
+
+Flags:
+  --json  Emit {protocol, ok, results:[{worktreeId,ok,reason?}]} [default: false]
+  --help  Show this help [default: false]
+
+Delete is unconditional: each named worktree is destroyed regardless of Git or tmux state. Inspect first with swarm inspect --json, or use swarm prune --dry-run --json for safe bulk cleanup.
+Remote: each remote worktree is deleted on its recorded host.`,
+  prune: `Usage: swarm prune [--dry-run] [--no-fetch] [--kill-sessions] [--repo <owner/name>] [--json]
+
+Flags:
+  --dry-run             Select without deleting [default: false]
+  --no-fetch            Skip the default fetch and prune [default: false]
+  --kill-sessions       Delete eligible detached sessions even when commands are running [default: false]
+  --repo <owner/name>   Restrict repositories [default: all]
+  --json                Emit {protocol,dryRun,deleted,skipped:[{worktreeId,reason,merged,dirty,uniqueCommits,running}]} [default: false]
+  --help                Show this help [default: false]
+
+Eligibility: clean, known session state, and merged:true. By default, running commands are skipped. --kill-sessions requires a known unique-commit count and permits running commands only in detached sessions (or no session); attached and unknown sessions remain protected.
+Prune is the safe bulk deletion command; use --dry-run --json to preview its selection.
+Remote: remote worktrees are inspected and deleted on their recorded hosts; selected worktrees use the same unconditional delete operation.`,
+  kill: `Usage: swarm kill <owner/name#slug> [--json]
+
+Flags:
+  --json  Emit {protocol, ok:true} [default: false]
+  --help  Show this help [default: false]
+
+Remote: recorded remote worktrees are routed to their host.`,
+  status: `Usage: swarm status [--json]
+
+Flags:
+  --json  Emit {protocol, statuses} [default: false]
+  --help  Show this help [default: false]
+
+Default output: one worktree and session state per line. Remote mirrors are omitted; their host serves status.`,
+  path: `Usage: swarm path <owner/name#slug>
+
+Flags:
+  --help  Show this help [default: false]
+
+Output: the absolute local path as plain text. Remote worktrees are refused.`,
+  doctor: `Usage: swarm doctor
+
+Flags:
+  --help  Show this help [default: false]
+
+Output: dependency and configured-host checks as plain text.`,
+};
 
 function validation(message: string = USAGE): never {
   throw new SwarmError("validation", message);
@@ -135,7 +261,14 @@ function parseHooks(value: string | undefined): RepoHooks {
 function parseCreate(args: string[], json: boolean): ProtocolCommand {
   const positional: string[] = [];
   const options = new Map<string, string>();
-  const supported = new Set(["--branch", "--base", "--url", "--default-branch", "--hooks"]);
+  const supported = new Set([
+    "--branch",
+    "--base",
+    "--host",
+    "--url",
+    "--default-branch",
+    "--hooks",
+  ]);
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
     if (!arg) validation();
@@ -154,18 +287,83 @@ function parseCreate(args: string[], json: boolean): ProtocolCommand {
   const slug = positional[1];
   const branch = options.get("--branch");
   const baseRef = options.get("--base");
-  if (!slug || !branch || !baseRef) validation();
+  if (!slug) validation();
   if (!isWorktreeSlug(slug)) validation(`Invalid worktree slug: ${slug}`);
-  validateBranch(branch);
+  if (branch) validateBranch(branch);
   return {
     kind: "create",
     repoId,
     slug,
-    branch,
-    baseRef,
+    ...(branch ? { branch } : {}),
+    ...(baseRef ? { baseRef } : {}),
+    ...(options.has("--host") ? { host: parseId(options.get("--host"), HostId, "host id") } : {}),
     url: options.get("--url"),
     defaultBranch: options.get("--default-branch"),
     hooks: parseHooks(options.get("--hooks")),
+    json,
+  };
+}
+
+function parseInspect(args: string[], json: boolean): ProtocolCommand {
+  const worktreeIds: Worktree["id"][] = [];
+  let fetch = false;
+  let repoId: ReturnType<typeof RepoId.parse> | undefined;
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (!arg) validation();
+    if (arg === "--fetch") {
+      if (fetch) validation("--fetch may only be specified once");
+      fetch = true;
+      continue;
+    }
+    if (arg === "--repo") {
+      if (repoId) validation("--repo may only be specified once");
+      repoId = parseId(args[index + 1], RepoId, "repository id");
+      index += 1;
+      continue;
+    }
+    if (arg.startsWith("--")) validation(`Invalid option: ${arg}`);
+    worktreeIds.push(parseId(arg, WorktreeId, "worktree id"));
+  }
+  return { kind: "inspect", worktreeIds, fetch, ...(repoId ? { repoId } : {}), json };
+}
+
+function parsePrune(args: string[], json: boolean): ProtocolCommand {
+  let dryRun = false;
+  let noFetch = false;
+  let killSessions = false;
+  let repoId: ReturnType<typeof RepoId.parse> | undefined;
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === "--dry-run") {
+      if (dryRun) validation("--dry-run may only be specified once");
+      dryRun = true;
+      continue;
+    }
+    if (arg === "--no-fetch") {
+      if (noFetch) validation("--no-fetch may only be specified once");
+      noFetch = true;
+      continue;
+    }
+    if (arg === "--kill-sessions") {
+      if (killSessions) validation("--kill-sessions may only be specified once");
+      killSessions = true;
+      continue;
+    }
+    if (arg === "--repo") {
+      if (repoId) validation("--repo may only be specified once");
+      repoId = parseId(args[index + 1], RepoId, "repository id");
+      index += 1;
+      continue;
+    }
+    validation(`Invalid option: ${arg ?? "<missing>"}`);
+  }
+  return {
+    kind: "prune",
+    dryRun,
+    noFetch,
+    killSessions,
+    ...(repoId ? { repoId } : {}),
     json,
   };
 }
@@ -178,6 +376,14 @@ export function parseArgv(argv: string[]): CliCommand {
   }
   if ((command === "--help" || command === "-h") && args.length === 0) {
     return { kind: "help" };
+  }
+  const commandNames = new Set<CommandName>(Object.keys(COMMAND_HELP) as CommandName[]);
+  if (
+    commandNames.has(command as CommandName) &&
+    args.length === 1 &&
+    (args[0] === "--help" || args[0] === "-h")
+  ) {
+    return { kind: "help", command: command as CommandName };
   }
   if (command === "doctor" && args.length === 0) return { kind: "doctor" };
   if (command === "open" && args.length === 1 && args[0]) {
@@ -199,18 +405,33 @@ export function parseArgv(argv: string[]): CliCommand {
     if (args.length === 0) return { kind: "agent" };
     if (isAgentName(args[0])) return { kind: "agent", agent: args[0] };
   }
+  if (command === "path" && args.length === 1) {
+    return { kind: "path", worktreeId: parseId(args[0], WorktreeId, "worktree id") };
+  }
   if (
     command === "list" ||
     command === "create" ||
     command === "delete" ||
     command === "kill" ||
-    command === "status"
+    command === "status" ||
+    command === "inspect" ||
+    command === "prune"
   ) {
     const parsed = takeJsonFlag(args);
     if (command === "create") return parseCreate(parsed.args, parsed.json);
+    if (command === "inspect") return parseInspect(parsed.args, parsed.json);
+    if (command === "prune") return parsePrune(parsed.args, parsed.json);
     if (command === "list" || command === "status") {
       if (parsed.args.length > 0) validation();
       return { kind: command, json: parsed.json };
+    }
+    if (command === "delete") {
+      if (parsed.args.length === 0 || parsed.args.some((arg) => arg.startsWith("--"))) validation();
+      return {
+        kind: "delete",
+        worktreeIds: parsed.args.map((id) => parseId(id, WorktreeId, "worktree id")),
+        json: parsed.json,
+      };
     }
     if (parsed.args.length !== 1) validation();
     return {
@@ -255,6 +476,16 @@ export function findWorktree(state: State, target: string): Worktree {
   );
   if (!worktree) throw new SwarmError("not-found", `Worktree not found: ${target}`);
   return worktree;
+}
+
+export function localWorktreePath(worktree: Worktree): string {
+  if (worktreeHost(worktree) !== "local") {
+    throw new SwarmError(
+      "unsupported",
+      `Worktree ${worktree.id} is remote on ${worktreeHost(worktree)}`,
+    );
+  }
+  return resolve(worktree.path);
 }
 
 export function formatUnmountReport(report: UnmountReport): string {
@@ -403,6 +634,12 @@ function printDoctor(checks: DoctorCheck[]): void {
 }
 
 async function runRuntimeCommand(runtime: Runtime, command: CliCommand): Promise<void> {
+  if (command.kind === "path") {
+    const worktree = findWorktree(await runtime.state.load(), command.worktreeId);
+    process.stdout.write(`${localWorktreePath(worktree)}\n`);
+    return;
+  }
+
   if (command.kind === "open") {
     const worktree = findWorktree(await runtime.state.load(), command.target);
     await runtime.sessions.open(worktree);
@@ -487,7 +724,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
       return 0;
     }
     if (command.kind === "help") {
-      process.stdout.write(`${USAGE}\n`);
+      process.stdout.write(`${command.command ? COMMAND_HELP[command.command] : USAGE}\n`);
       return 0;
     }
     if (command.kind === "doctor") {
@@ -553,7 +790,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
         ? JSON.stringify(response)
         : humanProtocolResponse(command, response);
       process.stdout.write(`${output}\n`);
-      return 0;
+      return command.kind === "delete" && "ok" in response && !response.ok ? 1 : 0;
     }
     if (command.kind === "agent") {
       return await runAgentCommand(

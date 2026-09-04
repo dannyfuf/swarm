@@ -1,5 +1,5 @@
 import type { GithubPort } from "../core/ports.ts";
-import type { PrTab, PullRequest, RemoteRepo } from "../core/types.ts";
+import type { InspectionPullRequest, PrTab, PullRequest, RemoteRepo } from "../core/types.ts";
 
 export type FakeGithub = GithubPort & {
   calls: Array<{ method: keyof GithubPort; args: unknown[] }>;
@@ -7,6 +7,7 @@ export type FakeGithub = GithubPort & {
   prsByRepoTab: Map<string, PullRequest[]>;
   prCacheByRepoTab: Map<string, { prs: PullRequest[]; fetchedAt: string; stale: boolean }>;
   prsByRepoBranch: Map<string, PullRequest>;
+  inspectionPrsByRepoBranch: Map<string, InspectionPullRequest>;
   prErrors: Map<string, Error>;
 };
 
@@ -15,6 +16,7 @@ export interface FakeGithubOptions {
   prsByRepoTab?: Record<string, PullRequest[]>;
   prCacheByRepoTab?: Record<string, { prs: PullRequest[]; fetchedAt: string; stale: boolean }>;
   prsByRepoBranch?: Record<string, PullRequest>;
+  inspectionPrsByRepoBranch?: Record<string, InspectionPullRequest>;
   prErrors?: Record<string, Error>;
   viewerLogin?: string;
 }
@@ -31,6 +33,7 @@ function isOptions(
     "prsByRepoTab" in input ||
     "prCacheByRepoTab" in input ||
     "prsByRepoBranch" in input ||
+    "inspectionPrsByRepoBranch" in input ||
     "prErrors" in input ||
     "viewerLogin" in input
   );
@@ -63,6 +66,12 @@ export function createFakeGithub(
       { ...item, labels: [...item.labels] },
     ]),
   );
+  const inspectionPrsByRepoBranch = new Map(
+    Object.entries(options.inspectionPrsByRepoBranch ?? {}).map(([key, item]) => [
+      key,
+      { ...item },
+    ]),
+  );
   const prCache = new Map(
     Object.entries(options.prCacheByRepoTab ?? {}).map(([key, entry]) => [
       key,
@@ -78,6 +87,7 @@ export function createFakeGithub(
     reposByOwner: repos,
     prsByRepoTab: prs,
     prsByRepoBranch,
+    inspectionPrsByRepoBranch,
     prCacheByRepoTab: prCache,
     prErrors,
     async viewer() {
@@ -95,6 +105,14 @@ export function createFakeGithub(
       if (error) throw error;
       const item = prsByRepoBranch.get(`${repoId}:${branch}`);
       return item ? { ...item, labels: [...item.labels] } : undefined;
+    },
+    async findLatestPullRequest(repo, branch) {
+      calls.push({ method: "findLatestPullRequest", args: [repo, branch] });
+      const repoId = `${repo.owner}/${repo.name}`;
+      const error = prErrors.get(`${repoId}:${branch}`) ?? prErrors.get(repoId);
+      if (error) throw error;
+      const item = inspectionPrsByRepoBranch.get(`${repoId}:${branch}`);
+      return item ? { ...item } : undefined;
     },
     async readCachedPullRequests(repo, tab, opts) {
       calls.push({ method: "readCachedPullRequests", args: [repo, tab, opts] });

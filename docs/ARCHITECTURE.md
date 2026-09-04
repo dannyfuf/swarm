@@ -68,7 +68,7 @@ PATH binary needs a version-probe process.
 ```
 bin/swarm                 launcher (runs dist or src, restarts in place when the TUI returns 75)
 tmux/tmux.conf            full tmux config (theme, persistence) with swarm and persistent agent popup bindings
-src/main.ts               thin CLI entry: TUI/open/sleep/agent/doctor plus JSON list/create/delete/kill/status protocol commands
+src/main.ts               thin CLI entry: TUI/open/sleep/agent/doctor/path plus JSON list/create/inspect/delete/prune/kill/status protocol commands
 src/cli/protocol.ts       host-agnostic protocol handlers shared by local CLI execution and remote transport
 src/core/                 contracts and pure helpers; no I/O
   types.ts                domain zod schemas + inferred types, agent names, window resolution (section 4)
@@ -253,6 +253,11 @@ export interface GitPort {
   remoteBranches(repoPath: string, signal?: AbortSignal): Promise<string[]>; // "origin/x" names, without HEAD
   revision(path: string, ref: string, signal?: AbortSignal): Promise<string>; // rev-parse --verify
   currentBranch(path: string): Promise<string>;
+  upstream(path: string): Promise<{ref: string | null; gone: boolean}>;
+  aheadBehind(path: string, upstream: string): Promise<{ahead: number; behind: number}>;
+  commitCount(path: string, range: string): Promise<number>; // git rev-list --count
+  refExists(path: string, ref: string): Promise<boolean>; // git rev-parse --verify --quiet
+  isAncestor(path: string, ancestor: string, descendant: string): Promise<boolean>;
   isDirty(path: string, opts?: { signal?: AbortSignal }): Promise<boolean>;
 }
 export interface FilesPort {
@@ -298,6 +303,7 @@ export interface GithubPort {
   viewer(): Promise<{ login: string }>;
   listRepos(owner: string, opts?: { signal?: AbortSignal; force?: boolean }): Promise<RemoteRepo[]>;  // force bypasses the cache
   findPullRequest(repo: { owner: string; name: string }, branch: string): Promise<PullRequest | undefined>; // targeted open-PR lookup by head branch
+  findLatestPullRequest(repo: { owner: string; name: string }, branch: string): Promise<InspectionPullRequest | undefined>; // latest open/merged/closed PR, including headRefOid
 }
 export interface StatePort  { load(): Promise<State>;  save(state: State): Promise<void> }   // validated, atomic
 export interface ConfigPort { load(): Promise<Config>; save(config: Config): Promise<void> }
@@ -348,7 +354,7 @@ export interface WorktreeService {
     // fallback: cloneTree(base, private attempt) → refresh/checkout/hooks → publish+persist
   runPostCreateHooks(worktreeId: WorktreeId, onEvent?: OnEvent): Promise<void>;
   dispose?(): void; // cancels only local, unref'd completion pollers; detached workers continue
-  delete(worktreeId: WorktreeId, onEvent?: OnEvent): Promise<void>;           // killSession → move to trash → removeDetached → persist
+  delete(worktreeId: WorktreeId, onEvent?: OnEvent): Promise<void>; // unconditional: killSession → move to trash → removeDetached → persist
   touch(worktreeId: WorktreeId): Promise<void>;                                // lastOpenedAt = now
 }
 export interface PrService {
@@ -365,13 +371,17 @@ export interface UnmountReport { kept: Array<{ window: string; reason: string }>
 export interface StatusService {
   snapshot(worktrees: Worktree[]): Promise<Map<WorktreeId, WorktreeStatus>>;  // local only: 1 tmux call + 1 ps + ≤1 lsof
 }
+export interface InspectionService {
+  inspect(input?: {worktreeIds?: WorktreeId[]; repoId?: RepoId; fetch?: boolean}): Promise<WorktreeInspection[]>;
+}
 export interface RemoteHostService {
   list(hostId: HostId): Promise<{protocol: number; version: string; repos: Repo[]; worktrees: Worktree[]}>;
-  create(hostId: HostId, input: {repo: Repo; slug: string; branch: string; baseRef: string}): Promise<Worktree>;
-  delete(hostId: HostId, worktreeId: WorktreeId): Promise<void>;
+  create(hostId: HostId, input: {repo: Repo; slug: string; branch?: string; baseRef: string}): Promise<{created: boolean; worktree: Worktree}>;
+  delete(hostId: HostId, worktreeId: WorktreeId): Promise<{ok: boolean; reason?: string}>;
   kill(hostId: HostId, worktreeId: WorktreeId): Promise<void>;
   sleep(hostId: HostId, session: string): Promise<UnmountReport>;
   status(hostId: HostId): Promise<WorktreeStatus[]>;
+  inspect(hostId: HostId, worktreeIds: WorktreeId[], opts?: {fetch?: boolean}): Promise<WorktreeInspection[]>;
   sync(hostId: HostId): Promise<Worktree[]>;
   syncAll(): Promise<Array<{hostId: HostId; error?: SwarmError}>>;
   remoteSnapshot(hostId: HostId): Promise<Map<WorktreeId, WorktreeStatus>>;
@@ -518,6 +528,17 @@ Default keep-alive rules: `{id:"claude", label:"claude", kind:"process", pattern
 `$SWARM_HOME/cache/ssh`; remote argv elements are POSIX-single-quoted into one SSH command.
 `RemoteHostService` validates every JSON protocol envelope, translates transport/protocol/remote
 errors, and atomically replaces one host's mirrors through `stateMutation.ts`.
+
+`InspectionService` is the shared fact boundary for the CLI. It combines local HEAD, Git
+upstream/divergence, dirty state, target ancestry and unique-commit count, branch publication, the
+latest PR across all states (including its head OID), and the existing status snapshot.
+`mergedIntoTarget` remains raw ancestry, while `merged` requires either both ancestry and
+`published`, or a merged PR whose head equals or contains the local HEAD. A missing PR-head object
+fails that comparison closed. Prune is the safety boundary: it selects only eligible worktrees from
+one inspection snapshot, and `--kill-sessions` may ignore running commands only for none/detached
+sessions with a known unique count. The selected IDs then use unconditional deletion. Direct delete
+does not inspect or refuse based on Git or tmux facts. Remote records are grouped by host; transport
+failures become per-worktree errors.
 
 Remote sessions are local tmux proxies named `<host>/<remote session>`. Their single `ssh` window
 starts with the interactive SSH command as the `tmux new-session` command, so no configured local
@@ -673,6 +694,17 @@ worktree rows append an `@host` badge, while their detail pane includes the host
 the latest one-line host error when offline.
 
 ## 10. Integration notes
+
+- 2026-09-04: CLI completeness adds `inspect`, unconditional multi-`delete`, safe `prune`, and `path`; defaults
+  create branch/base, supports `create --host`, and makes create idempotent against only the branch
+  and placement flags the caller supplied explicitly. `InspectionService` centralizes Git/PR/tmux
+  facts for inspection and prune selection, including `uniqueCommits`, `published`, and the derived `merged`
+  policy fact, remote routing, and offline entries. Protocol 1 remains compatible through additive
+  envelope fields and commands; create retains `worktree` and adds `created`, while delete retains
+  `ok` and adds per-id `results`.
+  Follow-up prune hardening ties merged PRs to their head OID, fails closed on unknown commit counts
+  and attached/unknown tmux state, and adds opt-in `prune --kill-sessions` for detached agent
+  sessions. Direct delete remains unconditional.
 
 - 2026-09-03: Remote-host phase 2 adds the multiplexed SSH port/adapter, validated protocol client,
   atomic per-host mirror sync, command-backed tmux proxy sessions, host-aware worktree/session

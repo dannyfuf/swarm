@@ -1,27 +1,33 @@
+import { resolve } from "node:path";
 import { setTimeout as wait } from "node:timers/promises";
 import { SwarmError } from "../core/errors.ts";
-import { isWorktreeSlug } from "../core/paths.ts";
+import { isWorktreeSlug, worktreeId as makeWorktreeId } from "../core/paths.ts";
 import type { StatePort } from "../core/ports.ts";
 import { PROTOCOL_VERSION } from "../core/protocol.ts";
 import { validateBranch } from "../core/prs.ts";
 import type {
   ContextService,
+  InspectionService,
+  RemoteHostService,
   RepoService,
   SessionService,
   StatusService,
   WorktreeService,
 } from "../core/services.ts";
 import {
+  type HostId,
   type Repo,
   type RepoHooks,
   type RepoId,
   type Worktree,
   type WorktreeId,
   WorktreeId as WorktreeIdSchema,
+  type WorktreeInspection,
   type WorktreeStatus,
   worktreeHost,
 } from "../core/types.ts";
 import { VERSION } from "../core/version.ts";
+import { pruneIneligibilityReason } from "../services/inspections.ts";
 import { mutateState } from "../services/stateMutation.ts";
 
 export { PROTOCOL_VERSION } from "../core/protocol.ts";
@@ -38,15 +44,44 @@ export type ProtocolCommand =
       kind: "create";
       repoId: RepoId;
       slug: string;
-      branch: string;
-      baseRef: string;
+      branch?: string;
+      baseRef?: string;
+      host?: HostId;
       url?: string;
       defaultBranch?: string;
       hooks: RepoHooks;
     } & JsonOption)
-  | ({ kind: "delete"; worktreeId: WorktreeId } & JsonOption)
+  | ({ kind: "delete"; worktreeIds: WorktreeId[] } & JsonOption)
   | ({ kind: "kill"; worktreeId: WorktreeId } & JsonOption)
-  | ({ kind: "status" } & JsonOption);
+  | ({ kind: "status" } & JsonOption)
+  | ({
+      kind: "inspect";
+      worktreeIds: WorktreeId[];
+      fetch: boolean;
+      repoId?: RepoId;
+    } & JsonOption)
+  | ({
+      kind: "prune";
+      dryRun: boolean;
+      noFetch: boolean;
+      killSessions: boolean;
+      repoId?: RepoId;
+    } & JsonOption);
+
+export interface DeleteResult {
+  worktreeId: WorktreeId;
+  ok: boolean;
+  reason?: string;
+}
+
+export interface PruneSkipped {
+  worktreeId: WorktreeId;
+  reason: string;
+  merged: boolean;
+  dirty: boolean;
+  uniqueCommits: number | null;
+  running: string[];
+}
 
 export type ProtocolResponse =
   | {
@@ -55,11 +90,19 @@ export type ProtocolResponse =
       repos: Repo[];
       worktrees: Worktree[];
     }
-  | { protocol: typeof PROTOCOL_VERSION; worktree: Worktree }
+  | { protocol: typeof PROTOCOL_VERSION; created: boolean; worktree: Worktree }
   | { protocol: typeof PROTOCOL_VERSION; ok: true }
   | {
       protocol: typeof PROTOCOL_VERSION;
       statuses: WorktreeStatus[];
+    }
+  | { protocol: typeof PROTOCOL_VERSION; worktrees: WorktreeInspection[] }
+  | { protocol: typeof PROTOCOL_VERSION; ok: boolean; results: DeleteResult[] }
+  | {
+      protocol: typeof PROTOCOL_VERSION;
+      dryRun: boolean;
+      deleted: WorktreeId[];
+      skipped: PruneSkipped[];
     };
 
 export interface ProtocolDependencies {
@@ -69,6 +112,8 @@ export interface ProtocolDependencies {
   worktrees: WorktreeService;
   sessions: SessionService;
   status: StatusService;
+  inspections: InspectionService;
+  remoteHosts?: RemoteHostService;
   waitForClonePoll?: (milliseconds: number) => Promise<void>;
 }
 
@@ -78,7 +123,7 @@ export interface ProtocolErrorEnvelope {
 }
 
 export function isProtocolCommand(command: { kind: string }): command is ProtocolCommand {
-  return ["list", "create", "delete", "kill", "status"].includes(command.kind);
+  return ["list", "create", "delete", "kill", "status", "inspect", "prune"].includes(command.kind);
 }
 
 function messageOf(error: unknown): string {
@@ -183,23 +228,80 @@ async function registerRepo(
 async function createWorktree(
   command: Extract<ProtocolCommand, { kind: "create" }>,
   deps: ProtocolDependencies,
-): Promise<Worktree> {
-  validateBranch(command.branch);
+): Promise<{ created: boolean; worktree: Worktree }> {
+  const branch = command.branch ?? command.slug;
+  validateBranch(branch);
   if (!isWorktreeSlug(command.slug)) {
     throw new SwarmError("validation", `Invalid worktree slug: ${command.slug}`);
   }
+  const id = makeWorktreeId(command.repoId, command.slug);
   const state = await deps.state.load();
+  const existing = state.worktrees.find((candidate) => candidate.id === id);
+  if (existing) {
+    const branchMatches = command.branch === undefined || existing.branch === command.branch;
+    const hostMatches = command.host === undefined || worktreeHost(existing) === command.host;
+    if (branchMatches && hostMatches) {
+      return { created: false, worktree: existing };
+    }
+    throw new SwarmError(
+      "conflict",
+      `Worktree ${id} already exists with branch ${existing.branch} on ${worktreeHost(existing)}`,
+    );
+  }
   const repo =
     state.repos.find((candidate) => candidate.id === command.repoId) ??
     (await registerRepo(command, deps));
+  const baseRef = command.baseRef ?? `origin/${repo.defaultBranch}`;
+  if (command.host) {
+    if (!deps.remoteHosts) {
+      throw new SwarmError("unsupported", "Remote host service is unavailable");
+    }
+    const response = await deps.remoteHosts.create(command.host, {
+      repo,
+      slug: command.slug,
+      ...(command.branch ? { branch: command.branch } : {}),
+      baseRef,
+    });
+    const synced = await deps.remoteHosts.sync(command.host);
+    return {
+      created: response.created,
+      worktree: synced.find((worktree) => worktree.id === response.worktree.id) ?? {
+        ...response.worktree,
+        host: command.host,
+      },
+    };
+  }
   const created = await deps.worktrees.create({
     repoId: repo.id,
     slug: command.slug,
-    branch: command.branch,
-    baseRef: command.baseRef,
+    branch,
+    baseRef,
   });
   await deps.worktrees.runPostCreateHooks(created.id);
-  return created;
+  return { created: true, worktree: created };
+}
+
+async function deleteOne(
+  worktreeId: WorktreeId,
+  deps: ProtocolDependencies,
+): Promise<DeleteResult> {
+  try {
+    await deps.worktrees.delete(worktreeId);
+    return { worktreeId, ok: true };
+  } catch (error) {
+    return { worktreeId, ok: false, reason: messageOf(error) };
+  }
+}
+
+function pruneSkipped(inspection: WorktreeInspection, reason: string): PruneSkipped {
+  return {
+    worktreeId: inspection.worktreeId,
+    reason,
+    merged: inspection.merged,
+    dirty: inspection.dirty,
+    uniqueCommits: inspection.uniqueCommits,
+    running: [...inspection.running],
+  };
 }
 
 export async function handleProtocolCommand(
@@ -211,13 +313,72 @@ export async function handleProtocolCommand(
     return {
       protocol: PROTOCOL_VERSION,
       version: CLI_VERSION,
-      repos: state.repos,
-      worktrees: state.worktrees,
+      repos: state.repos.map((repo) => ({ ...repo, path: resolve(repo.path) })),
+      worktrees: state.worktrees.map((worktree) => ({
+        ...worktree,
+        path: worktreeHost(worktree) === "local" ? resolve(worktree.path) : worktree.path,
+      })),
     };
   }
 
   if (command.kind === "create") {
-    return { protocol: PROTOCOL_VERSION, worktree: await createWorktree(command, deps) };
+    return { protocol: PROTOCOL_VERSION, ...(await createWorktree(command, deps)) };
+  }
+
+  if (command.kind === "inspect") {
+    return {
+      protocol: PROTOCOL_VERSION,
+      worktrees: await deps.inspections.inspect({
+        ...(command.worktreeIds.length > 0 ? { worktreeIds: command.worktreeIds } : {}),
+        ...(command.repoId ? { repoId: command.repoId } : {}),
+        fetch: command.fetch,
+      }),
+    };
+  }
+
+  if (command.kind === "delete") {
+    const results: DeleteResult[] = [];
+    for (const worktreeId of command.worktreeIds) {
+      results.push(await deleteOne(worktreeId, deps));
+    }
+    return {
+      protocol: PROTOCOL_VERSION,
+      ok: results.every(({ ok }) => ok),
+      results,
+    };
+  }
+
+  if (command.kind === "prune") {
+    const inspections = await deps.inspections.inspect({
+      ...(command.repoId ? { repoId: command.repoId } : {}),
+      fetch: !command.noFetch,
+    });
+    const deleted: WorktreeId[] = [];
+    const skipped: PruneSkipped[] = [];
+    const eligible: WorktreeId[] = [];
+    const byId = new Map(inspections.map((inspection) => [inspection.worktreeId, inspection]));
+    for (const inspection of inspections) {
+      const reason = pruneIneligibilityReason(inspection, {
+        allowRunning: command.killSessions,
+        requireKnownUniqueCommits: command.killSessions,
+      });
+      if (reason) skipped.push(pruneSkipped(inspection, reason));
+      else eligible.push(inspection.worktreeId);
+    }
+    if (command.dryRun) {
+      deleted.push(...eligible);
+    } else {
+      for (const worktreeId of eligible) {
+        const result = await deleteOne(worktreeId, deps);
+        if (result.ok) deleted.push(worktreeId);
+        else {
+          const inspection = byId.get(worktreeId);
+          if (!inspection) throw new SwarmError("not-found", `Worktree not found: ${worktreeId}`);
+          skipped.push(pruneSkipped(inspection, result.reason ?? "delete failed"));
+        }
+      }
+    }
+    return { protocol: PROTOCOL_VERSION, dryRun: command.dryRun, deleted, skipped };
   }
 
   const state = await deps.state.load();
@@ -243,7 +404,6 @@ export async function handleProtocolCommand(
   const id = parsedId.data;
   const worktree = requireWorktree(state.worktrees, id);
   await deps.sessions.kill(worktree);
-  if (command.kind === "delete") await deps.worktrees.delete(worktree.id);
   return { protocol: PROTOCOL_VERSION, ok: true };
 }
 
@@ -255,12 +415,36 @@ export function humanProtocolResponse(
     return `${response.repos.length} repos, ${response.worktrees.length} worktrees`;
   }
   if (command.kind === "create" && "worktree" in response) {
-    return `Created ${response.worktree.id}`;
+    return `${response.created ? "Created" : "Existing"} ${response.worktree.id}`;
   }
-  if (command.kind === "delete") return `Deleted ${command.worktreeId}`;
+  if (command.kind === "delete" && "results" in response) {
+    return response.results
+      .map((result) =>
+        result.ok
+          ? `Deleted ${result.worktreeId}`
+          : `Failed ${result.worktreeId}: ${result.reason}`,
+      )
+      .join("\n");
+  }
   if (command.kind === "kill") return `Killed ${command.worktreeId}`;
   if (command.kind === "status" && "statuses" in response) {
     return response.statuses.map((status) => `${status.worktreeId} ${status.session}`).join("\n");
+  }
+  if (command.kind === "inspect" && "worktrees" in response && !("repos" in response)) {
+    return response.worktrees
+      .map((inspection) =>
+        inspection.error
+          ? `${inspection.worktreeId} error: ${inspection.error}`
+          : `${inspection.worktreeId} ${inspection.dirty ? "dirty" : "clean"} ${inspection.session}`,
+      )
+      .join("\n");
+  }
+  if (command.kind === "prune" && "deleted" in response) {
+    const verb = response.dryRun ? "Would delete" : "Deleted";
+    return [
+      ...response.deleted.map((worktreeId) => `${verb} ${worktreeId}`),
+      ...response.skipped.map(({ worktreeId, reason }) => `Skipped ${worktreeId}: ${reason}`),
+    ].join("\n");
   }
   throw new SwarmError("unsupported", `Unsupported protocol command: ${command.kind}`);
 }

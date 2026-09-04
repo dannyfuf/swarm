@@ -63,7 +63,7 @@ describe("RemoteHostService protocol", () => {
     transport.script(
       "devbox",
       "create",
-      response({ protocol: PROTOCOL_VERSION, worktree: created }),
+      response({ protocol: PROTOCOL_VERSION, created: true, worktree: created }),
     );
     const repo = repos[0];
     assert.ok(repo);
@@ -76,7 +76,7 @@ describe("RemoteHostService protocol", () => {
         branch: "feat/remote",
         baseRef: "origin/main",
       }),
-      created,
+      { created: true, worktree: created },
     );
     assert.deepEqual(transport.calls[1]?.args, [
       "create",
@@ -113,12 +113,48 @@ describe("RemoteHostService protocol", () => {
       }),
       (error: unknown) => {
         assert.ok(error instanceof SwarmError);
-        assert.equal(error.code, "validation");
-        assert.equal(error.message, `Worktree already exists: ${existing.id}`);
+        assert.equal(error.code, "conflict");
+        assert.equal(
+          error.message,
+          `Worktree already exists with different placement: ${existing.id}`,
+        );
         return true;
       },
     );
     assert.deepEqual(transport.calls, []);
+  });
+
+  test("returns a matching mirror idempotently without invoking ssh", async () => {
+    const existing = remoteWorktree({ host: "devbox" });
+    const { service, transport } = createHarness(makeState({ worktrees: [existing] }));
+    const repo = repos[0];
+    assert.ok(repo);
+
+    assert.deepEqual(
+      await service.create("devbox", {
+        repo,
+        slug: existing.slug,
+        baseRef: existing.baseRef,
+      }),
+      { created: false, worktree: existing },
+    );
+    assert.deepEqual(transport.calls, []);
+  });
+
+  test("omits a defaulted branch from the recursive remote create invocation", async () => {
+    const { service, transport } = createHarness(makeState({ worktrees: [] }));
+    const created = remoteWorktree({ id: "bukhr/payroll#ticket-42", slug: "ticket-42" });
+    transport.script(
+      "devbox",
+      "create",
+      response({ protocol: PROTOCOL_VERSION, created: true, worktree: created }),
+    );
+    const repo = repos[0];
+    assert.ok(repo);
+
+    await service.create("devbox", { repo, slug: "ticket-42", baseRef: "origin/main" });
+
+    assert.equal(transport.calls[0]?.args.includes("--branch"), false);
   });
 
   test("maps unreachable, protocol mismatch, and remote error envelopes", async () => {
@@ -140,21 +176,46 @@ describe("RemoteHostService protocol", () => {
 
     transport.script(
       "devbox",
-      "delete",
+      "kill",
       response({ protocol: 1, error: { kind: "conflict", message: "still busy" } }, 1),
     );
-    await assert.rejects(service.delete("devbox", "bukhr/payroll#main"), (error: unknown) => {
+    await assert.rejects(service.kill("devbox", "bukhr/payroll#main"), (error: unknown) => {
       assert.ok(error instanceof SwarmError);
       assert.equal(error.code, "conflict");
       assert.equal(error.message, "devbox: still busy");
       return true;
     });
+
+    transport.script(
+      "devbox",
+      "delete",
+      response(
+        {
+          protocol: 1,
+          ok: false,
+          results: [{ worktreeId: "bukhr/payroll#main", ok: false, reason: "worktree not found" }],
+        },
+        1,
+      ),
+    );
+    assert.deepEqual(await service.delete("devbox", "bukhr/payroll#main"), {
+      ok: false,
+      reason: "worktree not found",
+    });
   });
 
-  test("routes delete, kill, sleep, and status subcommands", async () => {
+  test("routes delete, kill, sleep, inspect, and status subcommands", async () => {
     const { service, transport } = createHarness();
     const ok = response({ protocol: 1, ok: true });
-    transport.script("devbox", "delete", ok);
+    transport.script(
+      "devbox",
+      "delete",
+      response({
+        protocol: 1,
+        ok: true,
+        results: [{ worktreeId: "bukhr/payroll#main", ok: true }],
+      }),
+    );
     transport.script("devbox", "kill", ok);
     transport.script(
       "devbox",
@@ -173,8 +234,36 @@ describe("RemoteHostService protocol", () => {
       running: ["claude"],
     };
     transport.script("devbox", "status", response({ protocol: 1, statuses: [status] }));
+    const inspected = {
+      worktreeId: "bukhr/payroll#main",
+      repoId: "bukhr/payroll",
+      host: "local",
+      path: "/srv/swarm/worktrees/bukhr/payroll/main",
+      branch: "main",
+      baseRef: "origin/main",
+      head: "1".repeat(40),
+      targetBranch: "main",
+      upstream: "origin/main",
+      ahead: 0,
+      behind: 0,
+      upstreamGone: false,
+      dirty: false,
+      mergedIntoTarget: true,
+      uniqueCommits: 0,
+      published: true,
+      merged: true,
+      pr: null,
+      session: "none" as const,
+      running: [],
+      inspectedAt: "2026-09-04T00:00:00.000Z",
+      warnings: [],
+      error: null,
+    };
+    transport.script("devbox", "inspect", response({ protocol: 1, worktrees: [inspected] }));
 
-    await service.delete("devbox", "bukhr/payroll#main");
+    assert.deepEqual(await service.delete("devbox", "bukhr/payroll#main"), {
+      ok: true,
+    });
     await service.kill("devbox", "bukhr/payroll#main");
     assert.deepEqual(await service.sleep("devbox", "payroll/main"), {
       kept: [{ window: "cc", reason: "claude" }],
@@ -182,13 +271,23 @@ describe("RemoteHostService protocol", () => {
       sessionKilled: false,
     });
     assert.deepEqual(await service.status("devbox"), [status]);
+    assert.deepEqual(await service.inspect("devbox", ["bukhr/payroll#main"], { fetch: true }), [
+      inspected,
+    ]);
     assert.deepEqual(
       transport.calls.map(({ args, timeoutMs }) => ({ args, timeoutMs })),
       [
-        { args: ["delete", "bukhr/payroll#main", "--json"], timeoutMs: 30_000 },
+        {
+          args: ["delete", "bukhr/payroll#main", "--json"],
+          timeoutMs: 30_000,
+        },
         { args: ["kill", "bukhr/payroll#main", "--json"], timeoutMs: 30_000 },
         { args: ["sleep", "payroll/main", "--json"], timeoutMs: 30_000 },
         { args: ["status", "--json"], timeoutMs: 30_000 },
+        {
+          args: ["inspect", "bukhr/payroll#main", "--fetch", "--json"],
+          timeoutMs: 30_000,
+        },
       ],
     );
   });

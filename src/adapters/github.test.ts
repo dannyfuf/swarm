@@ -271,6 +271,60 @@ describe("GitHub adapter", () => {
     );
   });
 
+  test("finds the most recently updated pull request across all states", async () => {
+    const shell = createFakeShell([
+      {
+        match: (cmd) => cmd === "gh",
+        result: {
+          stdout: JSON.stringify([
+            {
+              number: 70,
+              state: "CLOSED",
+              url: "https://github.com/acme/app/pull/70",
+              baseRefName: "main",
+              headRefOid: "7".repeat(40),
+              updatedAt: "2026-01-01T10:00:00.000Z",
+            },
+            {
+              number: 71,
+              state: "MERGED",
+              url: "https://github.com/acme/app/pull/71",
+              baseRefName: "release",
+              headRefOid: "8".repeat(40),
+              updatedAt: "2026-01-02T10:00:00.000Z",
+            },
+          ]),
+        },
+      },
+    ]);
+    const { github } = createAdapter(createFakeFiles(), shell);
+
+    assert.deepEqual(
+      await github.findLatestPullRequest({ owner: "acme", name: "app" }, "feat/exports"),
+      {
+        number: 71,
+        state: "MERGED",
+        url: "https://github.com/acme/app/pull/71",
+        baseRefName: "release",
+        headRefOid: "8".repeat(40),
+      },
+    );
+    assert.deepEqual(shell.calls[0]?.args, [
+      "pr",
+      "list",
+      "--repo",
+      "acme/app",
+      "--head",
+      "feat/exports",
+      "--state",
+      "all",
+      "--limit",
+      "100",
+      "--json",
+      "number,state,url,baseRefName,headRefOid,updatedAt",
+    ]);
+  });
+
   test("maps review decisions, fork metadata, labels, and check rollups", async () => {
     const shell = createFakeShell([
       {

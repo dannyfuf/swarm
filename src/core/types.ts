@@ -78,6 +78,42 @@ export function worktreeHost(worktree: Pick<Worktree, "host">): string {
   return worktree.host ?? "local";
 }
 
+export const InspectionPullRequestSchema = z.object({
+  number: z.number().int().positive(),
+  state: z.enum(["OPEN", "MERGED", "CLOSED"]),
+  url: z.string().url(),
+  baseRefName: z.string().min(1),
+  headRefOid: z.string().min(1),
+});
+export type InspectionPullRequest = z.infer<typeof InspectionPullRequestSchema>;
+
+export const WorktreeInspectionSchema = z.object({
+  worktreeId: WorktreeId,
+  repoId: RepoId,
+  host: z.string(),
+  path: z.string(),
+  branch: z.string(),
+  baseRef: z.string(),
+  head: z.string().nullable().default(null),
+  targetBranch: z.string(),
+  upstream: z.string().nullable(),
+  ahead: z.number().int().nonnegative().nullable(),
+  behind: z.number().int().nonnegative().nullable(),
+  upstreamGone: z.boolean(),
+  dirty: z.boolean(),
+  mergedIntoTarget: z.boolean(),
+  uniqueCommits: z.number().int().nonnegative().nullable().default(null),
+  published: z.boolean().default(false),
+  merged: z.boolean().default(false),
+  pr: InspectionPullRequestSchema.nullable(),
+  session: z.enum(["none", "detached", "attached", "unknown"]),
+  running: z.array(z.string()),
+  inspectedAt: z.string().datetime(),
+  warnings: z.array(z.string()),
+  error: z.string().nullable(),
+});
+export type WorktreeInspection = z.infer<typeof WorktreeInspectionSchema>;
+
 export const PrTabSchema = z.enum(["mine", "review"]);
 export type PrTab = z.infer<typeof PrTabSchema>;
 

@@ -61,7 +61,8 @@ Non-goals:
 Authentication is SSH's job. swarm uses `BatchMode=yes`, so keys must be loaded in an agent or
 be passwordless. Multiplexing is enabled with `ControlMaster=auto`,
 `ControlPath=$SWARM_HOME/cache/ssh/%C`, `ControlPersist=120`, so repeated status calls reuse one
-connection. List, status, sleep, kill, and delete have a 30-second timeout; create is unbounded.
+connection. List, inspect, status, sleep, kill, and delete have a 30-second timeout; create is
+unbounded.
 
 ## CLI protocol
 
@@ -74,15 +75,39 @@ that take `--json` print exactly one JSON document on stdout and use exit code 0
 swarm list --json
   -> { protocol: 1, version: "<swarm --version>", repos: Repo[], worktrees: Worktree[] }
 
-swarm create <owner/name> <slug> --branch <name> --base <ref> [--url <clone url>]
+swarm create <owner/name> <slug> [--branch <name>] [--base <ref>] [--url <clone url>]
              [--default-branch <name>] [--hooks <json>] --json
-  -> { protocol: 1, worktree: Worktree }
+  -> { protocol: 1, created: boolean, worktree: Worktree }
   Registers and clones the repo synchronously when it is not registered yet (requires --url).
   Runs prepare/postCreate hooks like the TUI create flow. Blocks until the worktree is published.
+  Branch defaults to the slug and base defaults to origin/<resolved default branch>. An existing
+  worktree returns created:false without rerunning hooks when every explicitly supplied --branch
+  or --host matches; omitted placement flags accept the recorded values. A recursive invocation
+  omits --branch when the client omitted it, preserving that idempotency rule on the host.
 
-swarm delete <owner/name#slug> --json
-  -> { protocol: 1, ok: true }
-  Kills the session if present and deletes the worktree.
+swarm inspect [<owner/name#slug>...] [--fetch] [--repo <owner/name>] --json
+  -> { protocol: 1, worktrees: WorktreeInspection[] }
+  Returns the local HEAD (`head`), Git divergence, dirty state, raw mergedIntoTarget ancestry,
+  uniqueCommits, published and merged policy facts, latest PR (including `headRefOid`),
+  session/running state, warnings, and a per-worktree error. A merged PR sets merged only when its
+  head equals or contains the local HEAD; ancestry sets merged only for a published branch. Remote
+  clients send explicit ids to the owning host. --fetch is off by default.
+
+swarm delete <owner/name#slug>... --json
+  -> { protocol: 1, ok: boolean, results: [{ worktreeId, ok, reason? }] }
+  Unconditionally hard-kills the session, trashes the directory, and unregisters each named
+  worktree. It continues after real failures such as an unknown id or unreachable host and exits 1
+  when any result failed. Inspect first, or use prune --dry-run for a safe selection.
+
+swarm prune [--dry-run] [--no-fetch] [--kill-sessions] [--repo <owner/name>] --json
+  -> { protocol: 1, dryRun: boolean, deleted: string[],
+       skipped: [{ worktreeId, reason, merged, dirty, uniqueCommits, running }] }
+  Selects clean worktrees with merged:true and a session state of none or detached. By default,
+  running commands are skipped. --kill-sessions permits them only for otherwise eligible
+  worktrees, requires a known unique-commit count, and hard-kills the session; attached and unknown
+  sessions remain protected. A fresh unpublished branch and upstreamGone alone are never eligible.
+  For remote mirrors, the client selects from the inspection facts and then forwards plain
+  unconditional `delete` to the owning host.
 
 swarm kill <owner/name#slug> --json
   -> { protocol: 1, ok: true }
@@ -97,8 +122,10 @@ swarm open <owner/name#slug>
   Mounts and attaches (already exists; attaches when not inside tmux).
 ```
 
-`protocol` is bumped when the shape changes. The local swarm refuses a host whose `protocol`
-differs and reports it in `swarm doctor` and in the list as offline.
+`protocol` is bumped for an incompatible removal, rename, or semantic replacement. Additive
+commands and fields retain the current version, so these additions remain protocol 1. The local
+swarm refuses a host whose `protocol` differs and reports it in `swarm doctor` and in the list as
+offline.
 
 `Repo.hooks` is passed as JSON in `--hooks` so the dev-box runs the same prepare/postCreate
 commands. The dev-box may override them in its own state later.
@@ -112,15 +139,20 @@ commands. The dev-box may override them in its own state later.
   merged into the same status map as local worktrees. An unreachable host or a protocol
   mismatch yields `session: "unknown"` for that host's worktrees, never `"none"`, because
   `"none"` means a successful observation found no session.
-- **Create**: the create dialog gains a host field (shown only when `hosts` is non-empty).
+- **Create**: the create dialog and `swarm create --host <id>` support remote placement. The host
+  invocation never receives `--host`, and it receives `--branch` only when the caller supplied the
+  flag explicitly. The create dialog gains a host field (shown only when `hosts` is non-empty).
   Remote create runs in the background like a local create and shows a "creating on <host>"
   state until the CLI returns. `Tab` focuses the picker, `←`/`→` cycles it, and remote rows carry
   an `@host` badge. Base refs come from the local clone of the repo.
 - **Open**: create or reuse the proxy session, then switch to it. `swarm open <id>` from the CLI
   follows the same path.
+- **Inspect / prune**: group mirrored worktrees by host and invoke the same protocol commands on
+  each host. An unreachable host becomes a per-worktree inspection error and is skipped by prune;
+  prune is the safe bulk deletion command.
 - **Sleep / kill / delete**: delegate to the host. Kill and delete then kill the local proxy
-  session; sleep deliberately leaves the SSH pane alive. Delete also removes the mirror record and
-  re-syncs.
+  session; sleep deliberately leaves the SSH pane alive. Delete is unconditional and also removes
+  the mirror record and re-syncs.
 - **Copy path**: `y` copies `<host>:<remote path>` for remote worktrees.
 - **Doctor**: for each host, checks
   `ssh -o BatchMode=yes -o ConnectTimeout=5 -- <target> true`, then
