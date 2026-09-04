@@ -1483,8 +1483,12 @@ export function createWorktreeService({
           resolvedBaseRef = `pull/${pullNumber}/head`;
           try {
             await timed("Fetching PR head", onEvent, async () => {
-              await git.fetchPullHead(attemptPath, pullNumber, input.branch);
-              await git.checkoutTracking(attemptPath, input.branch);
+              await git.fetchPullHead(attemptPath, pullNumber);
+              await git.checkoutResetBranch(
+                attemptPath,
+                input.branch,
+                `refs/swarm/pulls/${pullNumber}/head`,
+              );
             });
           } catch (error) {
             throw toSwarmError(error, "git", `Failed to fetch pull request head: ${id}`);
