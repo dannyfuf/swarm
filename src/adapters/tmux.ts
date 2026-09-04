@@ -250,8 +250,11 @@ export function createTmux(
       throw new SwarmError("tmux", failureMessage(args, result), { cause: result });
     },
 
-    async setOption(target, name, value) {
-      await run(["set-option", "-t", exactTarget(target), name, value]);
+    async setOption(session, name, value) {
+      // set-option parses -t as a pane target even when it infers a session or
+      // window option. The trailing colon selects the current window in this
+      // exact session instead of treating the session name as a window name.
+      await run(["set-option", "-t", `${exactTarget(session)}:`, name, value]);
     },
 
     async switchClient(session) {

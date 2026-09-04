@@ -205,7 +205,7 @@ describe("tmux adapter", () => {
         ["tmux", ["-u", "kill-window", "-t", "=repo/feature:4"]],
         ["tmux", ["-u", "kill-session", "-t", "=repo/feature"]],
         ["tmux", ["-u", "kill-session", "-t", "=repo/feature"]],
-        ["tmux", ["-u", "set-option", "-t", "=devbox/repo/feature", "remain-on-exit", "on"]],
+        ["tmux", ["-u", "set-option", "-t", "=devbox/repo/feature:", "remain-on-exit", "on"]],
         ["tmux", ["-u", "switch-client", "-t", "=repo/feature"]],
         ["tmux", ["-u", "display-message", "hello there"]],
         ["tmux", ["-u", "attach-session", "-t", "=repo/feature"]],
