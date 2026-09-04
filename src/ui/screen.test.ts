@@ -468,7 +468,7 @@ test("the pr detail pane offers to create the worktree the PR has no link to", (
   const text = buildScreen(prScreen({ prCursor: 1 }), context()).map(lineText);
   assert.ok(text.some((line) => line.includes("#1201 fix: nil guard")));
   assert.ok(text.some((line) => line.includes("worktree  none") && line.includes("Enter creates")));
-  assert.ok(text.some((line) => line.includes("from origin/fix/nil-guard")));
+  assert.ok(text.some((line) => line.includes("from pull/1201/head")));
   assert.ok(text.some((line) => line.includes("https://github.com/")));
 });
 

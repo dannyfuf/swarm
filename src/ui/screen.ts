@@ -1317,11 +1317,7 @@ function prDetailLines(state: AppState, layout: ScreenLayout, context: ScreenCon
       }),
     );
     worktreeLine.push(cell(" from ", { fg: theme.dim }));
-    worktreeLine.push(
-      cell(pr.isCrossRepository ? `pull/${pr.number}/head` : `origin/${pr.headRefName}`, {
-        fg: theme.cyan,
-      }),
-    );
+    worktreeLine.push(cell(`pull/${pr.number}/head`, { fg: theme.cyan }));
     if (pr.isCrossRepository && pr.headRepo) {
       worktreeLine.push(cell(` ${glyphs.sep} fork `, { fg: theme.dim }));
       worktreeLine.push(cell(pr.headRepo, { fg: theme.muted }));

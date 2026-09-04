@@ -1,6 +1,5 @@
 import { SwarmError } from "../core/errors.ts";
 import type { GitPort, Logger, RunOptions, Shell, ShellResult } from "../core/ports.ts";
-import { validateBranch } from "../core/prs.ts";
 
 function commandLabel(args: string[]): string {
   return `git ${args.join(" ")}`;
@@ -136,16 +135,19 @@ export function createGit(shell: Shell, logger: Logger): GitPort {
       await run(["checkout", "-b", branch, from], { cwd: path });
     },
 
+    async checkoutResetBranch(path, branch, from): Promise<void> {
+      await run(["checkout", "-B", branch, from], { cwd: path });
+    },
+
     async checkoutTracking(path, branch): Promise<void> {
       await run(["checkout", branch], { cwd: path });
     },
 
-    async fetchPullHead(path, number, localBranch): Promise<void> {
+    async fetchPullHead(path, number): Promise<void> {
       if (!Number.isInteger(number) || number <= 0) {
         throw new SwarmError("validation", `Invalid pull request number: ${number}`);
       }
-      validateBranch(localBranch);
-      await run(["fetch", "origin", `+refs/pull/${number}/head:refs/heads/${localBranch}`], {
+      await run(["fetch", "origin", `+refs/pull/${number}/head:refs/swarm/pulls/${number}/head`], {
         cwd: path,
       });
     },

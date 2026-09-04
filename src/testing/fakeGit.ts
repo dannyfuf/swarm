@@ -102,13 +102,16 @@ export function createFakeGit(options: FakeGitOptions = {}): FakeGit {
       calls.push({ method: "checkoutNewBranch", args: [path, branch, from] });
       currentBranches.set(path, branch);
     },
+    async checkoutResetBranch(path, branch, from) {
+      calls.push({ method: "checkoutResetBranch", args: [path, branch, from] });
+      currentBranches.set(path, branch);
+    },
     async checkoutTracking(path, branch) {
       calls.push({ method: "checkoutTracking", args: [path, branch] });
       currentBranches.set(path, branch.replace(/^origin\//, ""));
     },
-    async fetchPullHead(path, number, localBranch) {
-      calls.push({ method: "fetchPullHead", args: [path, number, localBranch] });
-      currentBranches.set(path, localBranch);
+    async fetchPullHead(path, number) {
+      calls.push({ method: "fetchPullHead", args: [path, number] });
     },
     async remoteBranches(repoPath, signal) {
       calls.push({ method: "remoteBranches", args: [repoPath, signal] });

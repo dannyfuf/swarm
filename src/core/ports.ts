@@ -77,8 +77,9 @@ export interface GitPort {
   ): Promise<string>;
   resetToRemote(repoPath: string, branch: string, signal?: AbortSignal): Promise<void>;
   checkoutNewBranch(path: string, branch: string, from: string): Promise<void>;
+  checkoutResetBranch(path: string, branch: string, from: string): Promise<void>;
   checkoutTracking(path: string, branch: string): Promise<void>;
-  fetchPullHead(path: string, number: number, localBranch: string): Promise<void>;
+  fetchPullHead(path: string, number: number): Promise<void>;
   remoteBranches(repoPath: string, signal?: AbortSignal): Promise<string[]>;
   revision(path: string, ref: string, signal?: AbortSignal): Promise<string>;
   currentBranch(path: string): Promise<string>;

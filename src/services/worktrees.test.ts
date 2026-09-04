@@ -1507,7 +1507,7 @@ describe("createWorktreeService", () => {
     assert.equal(checkoutArgs?.[1], "feat/existing");
   });
 
-  test("fetches a same-repo PR head before checkout and persists its pull ref", async () => {
+  test("fetches a same-repo PR head before resetting its branch and persists its pull ref", async () => {
     const repo = repos[0];
     assert.ok(repo);
     const destination = "/home/test/.swarm/worktrees/bukhr/payroll/feat-same-repo";
@@ -1540,14 +1540,14 @@ describe("createWorktreeService", () => {
     assert.ok(steps.includes("Fetching PR head"));
     assert.equal(steps.includes("Creating branch"), false);
     const branchCalls = git.calls.filter(({ method }) =>
-      ["fetchPullHead", "checkoutTracking"].includes(method),
+      ["fetchPullHead", "checkoutResetBranch"].includes(method),
     );
     assert.equal(branchCalls[0]?.method, "fetchPullHead");
     assert.ok(isAttemptPath(branchCalls[0]?.args[0], destination));
-    assert.deepEqual(branchCalls[0]?.args.slice(1), [77, "feat/same-repo"]);
-    assert.equal(branchCalls[1]?.method, "checkoutTracking");
+    assert.deepEqual(branchCalls[0]?.args.slice(1), [77]);
+    assert.equal(branchCalls[1]?.method, "checkoutResetBranch");
     assert.ok(isAttemptPath(branchCalls[1]?.args[0], destination));
-    assert.deepEqual(branchCalls[1]?.args.slice(1), ["feat/same-repo"]);
+    assert.deepEqual(branchCalls[1]?.args.slice(1), ["feat/same-repo", "refs/swarm/pulls/77/head"]);
     assert.equal(state.state.worktrees[0]?.baseRef, "pull/77/head");
   });
 

@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, test } from "node:test";
 import { SwarmError } from "../core/errors.ts";
 import { createFakeShell } from "../testing/fakeShell.ts";
 import { createNullLogger } from "../testing/nullLogger.ts";
 import { createGit } from "./git.ts";
+import { createShell } from "./shell.ts";
 
 describe("git adapter", () => {
   test("uses exact argv and launches clones detached with a log file", async () => {
@@ -33,7 +37,8 @@ describe("git adapter", () => {
     await git.resetToRemote("/repos/repo", "main");
     await git.checkoutNewBranch("/work/repo", "feature/new", "origin/main");
     await git.checkoutTracking("/work/repo", "feature/x");
-    await git.fetchPullHead("/work/repo", 42, "pr/42");
+    await git.fetchPullHead("/work/repo", 42);
+    await git.checkoutResetBranch("/work/repo", "pr/42", "refs/swarm/pulls/42/head");
     assert.deepEqual(await git.remoteBranches("/repos/repo"), ["origin/main", "origin/feature/x"]);
     assert.equal(await git.revision("/work/repo", "origin/main"), "0123456789abcdef");
     assert.equal(await git.currentBranch("/work/repo"), "feature/x");
@@ -58,7 +63,8 @@ describe("git adapter", () => {
         ["git", ["clean", "-fd"]],
         ["git", ["checkout", "-b", "feature/new", "origin/main"]],
         ["git", ["checkout", "feature/x"]],
-        ["git", ["fetch", "origin", "+refs/pull/42/head:refs/heads/pr/42"]],
+        ["git", ["fetch", "origin", "+refs/pull/42/head:refs/swarm/pulls/42/head"]],
+        ["git", ["checkout", "-B", "pr/42", "refs/swarm/pulls/42/head"]],
         ["git", ["for-each-ref", "--format=%(refname:short)", "refs/remotes/origin"]],
         ["git", ["rev-parse", "--verify", "origin/main"]],
         ["git", ["branch", "--show-current"]],
@@ -230,13 +236,53 @@ describe("git adapter", () => {
     const shell = createFakeShell();
     const git = createGit(shell, createNullLogger());
     await assert.rejects(
-      git.fetchPullHead("/repo", 0, "pr/0"),
-      (error) => error instanceof SwarmError && error.code === "validation",
-    );
-    await assert.rejects(
-      git.fetchPullHead("/repo", 1, "bad branch"),
+      git.fetchPullHead("/repo", 0),
       (error) => error instanceof SwarmError && error.code === "validation",
     );
     assert.equal(shell.calls.length, 0);
+  });
+
+  test("checks out a PR whose local branch is already checked out", async () => {
+    const root = await mkdtemp(join(tmpdir(), "swarm-git-pr-"));
+    const origin = join(root, "origin.git");
+    const source = join(root, "source");
+    const clone = join(root, "clone");
+    const shell = createShell(createNullLogger());
+    const runGit = async (args: string[], cwd = root): Promise<string> => {
+      const result = await shell.run("git", args, { cwd });
+      assert.equal(result.code, 0, result.stderr);
+      return result.stdout.trim();
+    };
+
+    try {
+      await runGit(["init", "--bare", "--initial-branch=main", origin]);
+      await runGit(["init", "--initial-branch=main", source]);
+      await runGit(["config", "user.name", "Swarm Test"], source);
+      await runGit(["config", "user.email", "swarm@example.test"], source);
+      await runGit(["config", "commit.gpgsign", "false"], source);
+      await writeFile(join(source, "tracked.txt"), "base\n", "utf8");
+      await runGit(["add", "tracked.txt"], source);
+      await runGit(["commit", "-m", "base"], source);
+      await runGit(["remote", "add", "origin", origin], source);
+      await runGit(["push", "-u", "origin", "main"], source);
+
+      await writeFile(join(source, "tracked.txt"), "pull request\n", "utf8");
+      await runGit(["add", "tracked.txt"], source);
+      await runGit(["commit", "-m", "pull request"], source);
+      const pullCommit = await runGit(["rev-parse", "HEAD"], source);
+      await runGit(["push", "origin", "HEAD:refs/pull/1/head"], source);
+      await runGit(["clone", origin, clone]);
+
+      const git = createGit(shell, createNullLogger());
+      assert.equal(await git.currentBranch(clone), "main");
+      assert.notEqual(await git.revision(clone, "HEAD"), pullCommit);
+      await git.fetchPullHead(clone, 1);
+      await git.checkoutResetBranch(clone, "main", "refs/swarm/pulls/1/head");
+
+      assert.equal(await git.currentBranch(clone), "main");
+      assert.equal(await git.revision(clone, "HEAD"), pullCommit);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });

@@ -248,8 +248,9 @@ export interface GitPort {
   defaultBranch(repoPath: string, hint?: string, signal?: AbortSignal, knownRemoteBranches?: string[]): Promise<string>; // origin/HEAD, fallback hint/main/master/known refs
   resetToRemote(repoPath: string, branch: string, signal?: AbortSignal): Promise<void>; // checkout -B + reset --hard + clean -fd
   checkoutNewBranch(path: string, branch: string, from: string): Promise<void>;  // checkout -b branch from
+  checkoutResetBranch(path: string, branch: string, from: string): Promise<void>; // checkout -B branch from
   checkoutTracking(path: string, branch: string): Promise<void>;    // checkout branch (tracks origin/branch)
-  fetchPullHead(path: string, number: number, localBranch: string): Promise<void>;
+  fetchPullHead(path: string, number: number): Promise<void>; // refs/pull/<n>/head -> refs/swarm/pulls/<n>/head
   remoteBranches(repoPath: string, signal?: AbortSignal): Promise<string[]>; // "origin/x" names, without HEAD
   revision(path: string, ref: string, signal?: AbortSignal): Promise<string>; // rev-parse --verify
   currentBranch(path: string): Promise<string>;
