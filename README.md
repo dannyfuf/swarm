@@ -66,10 +66,9 @@ swarm create owner/repo slug [--branch name] [--base ref] [--host id] [--url url
                                        Clone if needed, then create and publish a worktree
 swarm inspect [id...] [--fetch] [--repo owner/name] [--json]
                                        Inspect Git, PR, and tmux safety facts
-swarm delete <id>... [--force] [--json]
-                                       Safely delete one or more worktrees
+swarm delete <id>... [--json]           Unconditionally delete one or more worktrees
 swarm prune [--dry-run] [--no-fetch] [--kill-sessions] [--repo owner/name] [--json]
-                                       Delete every eligible merged worktree
+                                       Safely delete every eligible merged worktree
 swarm kill owner/repo#slug --json      Kill its session if present
 swarm status --json                    Print status for every worktree
 swarm path owner/repo#slug             Print a local worktree's absolute path
@@ -108,8 +107,10 @@ swarm prune --json
 swarm prune --kill-sessions --json  # only when the remaining skips are running sessions
 ```
 
-Use `swarm inspect --json` to review every worktree, or
-`swarm delete <id>... --json` for hand-picked deletion. Their envelopes are:
+Use `swarm inspect --json` to review every worktree before hand-picking IDs. The `swarm delete`
+command is unconditional: every named worktree is destroyed regardless of dirty state, merge
+state, unique commits, or tmux session state. Use prune as the safe bulk command. Their envelopes
+are:
 
 ```text
 inspect -> {
@@ -124,6 +125,9 @@ delete -> { protocol: 1, ok, results: [{ worktreeId, ok, reason? }] }
 create -> { protocol: 1, created, worktree }
 ```
 
+Delete continues through all requested IDs; `reason` appears only on actual failures such as an
+unknown ID or unreachable host, and any failed result makes the command exit 1.
+
 `pr` is either `null` or `{ number, state, url, baseRefName, headRefOid }`. Inspect does not fetch by default;
 prune fetches with pruning by default. `mergedIntoTarget` is raw Git ancestry; `published` records
 whether the branch was pushed. `merged` requires both ancestry and publication, or a merged PR
@@ -132,10 +136,8 @@ not inherit that PR's merged status. Prune selects only clean worktrees with `me
 session state of `none` or `detached`; by default it also requires no running commands. Use
 `--kill-sessions` only after reviewing the normal prune output: it permits running commands in
 otherwise eligible detached sessions, requires a known unique-commit count, and hard-kills the
-session. Attached and unknown sessions remain protected. Delete without `--force` applies the same
-tmux protections, refuses dirty or running worktrees, and fails closed when an unmerged worktree's
-unique-commit count is positive or unavailable. A clean, idle fresh worktree with zero unique
-commits can be deleted explicitly without force.
+session. Attached and unknown sessions remain protected by prune. Delete has no eligibility checks;
+inspect first or use `swarm prune --dry-run --json` when deletion needs a safety decision.
 
 ## Configuration
 

@@ -193,14 +193,14 @@ describe("RemoteHostService protocol", () => {
         {
           protocol: 1,
           ok: false,
-          results: [{ worktreeId: "bukhr/payroll#main", ok: false, reason: "worktree is dirty" }],
+          results: [{ worktreeId: "bukhr/payroll#main", ok: false, reason: "worktree not found" }],
         },
         1,
       ),
     );
     assert.deepEqual(await service.delete("devbox", "bukhr/payroll#main"), {
       ok: false,
-      reason: "worktree is dirty",
+      reason: "worktree not found",
     });
   });
 
@@ -261,7 +261,7 @@ describe("RemoteHostService protocol", () => {
     };
     transport.script("devbox", "inspect", response({ protocol: 1, worktrees: [inspected] }));
 
-    assert.deepEqual(await service.delete("devbox", "bukhr/payroll#main", { force: true }), {
+    assert.deepEqual(await service.delete("devbox", "bukhr/payroll#main"), {
       ok: true,
     });
     await service.kill("devbox", "bukhr/payroll#main");
@@ -278,7 +278,7 @@ describe("RemoteHostService protocol", () => {
       transport.calls.map(({ args, timeoutMs }) => ({ args, timeoutMs })),
       [
         {
-          args: ["delete", "bukhr/payroll#main", "--force", "--json"],
+          args: ["delete", "bukhr/payroll#main", "--json"],
           timeoutMs: 30_000,
         },
         { args: ["kill", "bukhr/payroll#main", "--json"], timeoutMs: 30_000 },

@@ -74,7 +74,7 @@ export interface WorktreeService {
     onEvent?: OnEvent,
   ): Promise<Worktree>;
   runPostCreateHooks(worktreeId: WorktreeId, onEvent?: OnEvent): Promise<void>;
-  delete(worktreeId: WorktreeId, onEvent?: OnEvent, opts?: { force?: boolean }): Promise<void>;
+  delete(worktreeId: WorktreeId, onEvent?: OnEvent): Promise<void>;
   touch(worktreeId: WorktreeId): Promise<void>;
 }
 
@@ -114,11 +114,7 @@ export interface RemoteHostService {
     hostId: HostId,
     input: { repo: Repo; slug: string; branch?: string; baseRef: string },
   ): Promise<{ created: boolean; worktree: Worktree }>;
-  delete(
-    hostId: HostId,
-    worktreeId: WorktreeId,
-    opts?: { force?: boolean },
-  ): Promise<{ ok: boolean; reason?: string }>;
+  delete(hostId: HostId, worktreeId: WorktreeId): Promise<{ ok: boolean; reason?: string }>;
   kill(hostId: HostId, worktreeId: WorktreeId): Promise<void>;
   sleep(hostId: HostId, session: string): Promise<UnmountReport>;
   status(hostId: HostId): Promise<WorktreeStatus[]>;

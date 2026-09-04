@@ -56,52 +56,25 @@ function baseInspection(
   };
 }
 
-interface SafetyPolicyOptions {
+interface PrunePolicyOptions {
   allowRunning?: boolean;
   requireKnownUniqueCommits?: boolean;
 }
 
-function sessionRefusalReason(inspection: WorktreeInspection): string | undefined {
+function sessionIneligibilityReason(inspection: WorktreeInspection): string | undefined {
   if (inspection.session === "attached") return "tmux session is attached";
   if (inspection.session === "unknown") return "tmux session state is unknown";
   return undefined;
 }
 
-export function deleteRefusalReason(
-  inspection: WorktreeInspection,
-  options: SafetyPolicyOptions = {},
-): string | undefined {
-  if (inspection.error) return inspection.error;
-  const reasons: string[] = [];
-  if (inspection.dirty) reasons.push("worktree has uncommitted changes");
-  const sessionReason = sessionRefusalReason(inspection);
-  if (sessionReason) reasons.push(sessionReason);
-  if (!options.allowRunning && inspection.running.length > 0) {
-    reasons.push(`tmux session has running commands: ${inspection.running.join(", ")}`);
-  }
-  if (
-    inspection.uniqueCommits === null &&
-    (!inspection.merged || options.requireKnownUniqueCommits)
-  ) {
-    reasons.push("cannot determine unique commits");
-  } else if (
-    inspection.uniqueCommits !== null &&
-    inspection.uniqueCommits > 0 &&
-    !inspection.merged
-  ) {
-    reasons.push(`${inspection.uniqueCommits} unique commits are not merged`);
-  }
-  return reasons.length > 0 ? reasons.join("; ") : undefined;
-}
-
 export function pruneIneligibilityReason(
   inspection: WorktreeInspection,
-  options: SafetyPolicyOptions = {},
+  options: PrunePolicyOptions = {},
 ): string | undefined {
   if (inspection.error) return inspection.error;
   const reasons: string[] = [];
   if (inspection.dirty) reasons.push("worktree has uncommitted changes");
-  const sessionReason = sessionRefusalReason(inspection);
+  const sessionReason = sessionIneligibilityReason(inspection);
   if (sessionReason) reasons.push(sessionReason);
   if (!options.allowRunning && inspection.running.length > 0) {
     reasons.push(`tmux session has running commands: ${inspection.running.join(", ")}`);

@@ -70,7 +70,6 @@ const ErrorEnvelopeSchema = z.object({
 const errorCodes = new Set<ErrorCode>([
   "not-found",
   "conflict",
-  "refused",
   "git",
   "tmux",
   "fs",
@@ -228,10 +227,10 @@ export function createRemoteHostService({
       return { created: response.created, worktree: response.worktree };
     },
 
-    async delete(hostId, worktreeId, opts) {
+    async delete(hostId, worktreeId) {
       const response = await invoke(
         hostId,
-        ["delete", worktreeId, ...(opts?.force ? ["--force"] : []), "--json"],
+        ["delete", worktreeId, "--json"],
         DeleteEnvelopeSchema,
         { timeoutMs: SHORT_COMMAND_TIMEOUT_MS, allowNonzero: true },
       );

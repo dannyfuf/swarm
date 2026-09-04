@@ -8,11 +8,7 @@ import { createFakeGithub } from "../testing/fakeGithub.ts";
 import { createFixedClock } from "../testing/fixedClock.ts";
 import { makeState, repos, worktrees } from "../testing/fixtures.ts";
 import { createMemoryState } from "../testing/memoryState.ts";
-import {
-  createInspectionService,
-  deleteRefusalReason,
-  pruneIneligibilityReason,
-} from "./inspections.ts";
+import { createInspectionService, pruneIneligibilityReason } from "./inspections.ts";
 
 function statusService(statuses: WorktreeStatus[] = []): StatusService {
   return {
@@ -333,10 +329,6 @@ describe("InspectionService", () => {
     assert.equal(matchingInspection?.merged, true);
     assert.equal(newerInspection?.merged, false);
     assert.match(
-      deleteRefusalReason(newerInspection as WorktreeInspection) ?? "",
-      /2 unique commits/,
-    );
-    assert.match(
       pruneIneligibilityReason(newerInspection as WorktreeInspection) ?? "",
       /not merged/,
     );
@@ -396,7 +388,6 @@ describe("InspectionService", () => {
     assert.equal(inspected.published, false);
     assert.equal(inspected.merged, false);
     assert.ok(inspected.warnings.includes("gh unavailable"));
-    assert.match(deleteRefusalReason(inspected) ?? "", /2 unique commits/);
     assert.match(pruneIneligibilityReason(inspected) ?? "", /not merged/);
   });
 
@@ -419,10 +410,6 @@ describe("InspectionService", () => {
     assert.equal(inspected?.uniqueCommits, null);
     assert.equal(inspected?.mergedIntoTarget, false);
     assert.ok(inspected?.warnings.includes("target ref missing"));
-    assert.equal(
-      deleteRefusalReason(inspected as WorktreeInspection),
-      "cannot determine unique commits",
-    );
     assert.equal(
       pruneIneligibilityReason(inspected as WorktreeInspection),
       "cannot determine unique commits",
@@ -454,7 +441,6 @@ describe("InspectionService", () => {
     assert.ok(inspected);
     assert.equal(inspected.uniqueCommits, null);
     assert.ok(inspected.warnings.includes("unique commit count unavailable"));
-    assert.equal(deleteRefusalReason(inspected), "cannot determine unique commits");
     assert.equal(pruneIneligibilityReason(inspected), "cannot determine unique commits");
   });
 });
@@ -490,18 +476,16 @@ function inspection(overrides: Partial<WorktreeInspection> = {}): WorktreeInspec
   };
 }
 
-test("delete and prune distinguish fresh, published, and pull-request merges", () => {
+test("prune distinguishes fresh, published, and pull-request merges", () => {
   const fresh = inspection({
     mergedIntoTarget: true,
     uniqueCommits: 0,
     published: false,
     merged: false,
   });
-  assert.equal(deleteRefusalReason(fresh), undefined);
   assert.match(pruneIneligibilityReason(fresh) ?? "", /not merged/);
 
   const pushedAncestor = inspection({ published: true, mergedIntoTarget: true, merged: true });
-  assert.equal(deleteRefusalReason(pushedAncestor), undefined);
   assert.equal(pruneIneligibilityReason(pushedAncestor), undefined);
 
   const mergedPullRequest = inspection({
@@ -516,7 +500,6 @@ test("delete and prune distinguish fresh, published, and pull-request merges", (
       headRefOid: "1".repeat(40),
     },
   });
-  assert.equal(deleteRefusalReason(mergedPullRequest), undefined);
   assert.equal(pruneIneligibilityReason(mergedPullRequest), undefined);
 
   const openPullRequest = inspection({
@@ -531,7 +514,6 @@ test("delete and prune distinguish fresh, published, and pull-request merges", (
       headRefOid: "1".repeat(40),
     },
   });
-  assert.match(deleteRefusalReason(openPullRequest) ?? "", /3 unique commits/);
   assert.match(pruneIneligibilityReason(openPullRequest) ?? "", /not merged/);
 });
 
@@ -543,33 +525,20 @@ test("safety reasons list every applicable blocker", () => {
     running: ["server"],
   });
   assert.equal(
-    deleteRefusalReason(blocked),
-    "worktree has uncommitted changes; tmux session has running commands: server; 2 unique commits are not merged",
-  );
-  assert.equal(
     pruneIneligibilityReason(blocked),
     "worktree has uncommitted changes; tmux session has running commands: server; worktree is not merged",
   );
 });
 
-test("non-force safety protects attached and unknown sessions but allows an idle detached one", () => {
-  assert.equal(
-    deleteRefusalReason(inspection({ session: "attached" })),
-    "tmux session is attached",
-  );
+test("prune protects attached and unknown sessions but allows an idle detached one", () => {
   assert.equal(
     pruneIneligibilityReason(inspection({ session: "attached" })),
     "tmux session is attached",
   );
   assert.equal(
-    deleteRefusalReason(inspection({ session: "unknown" })),
-    "tmux session state is unknown",
-  );
-  assert.equal(
     pruneIneligibilityReason(inspection({ session: "unknown" })),
     "tmux session state is unknown",
   );
-  assert.equal(deleteRefusalReason(inspection({ session: "detached", running: [] })), undefined);
   assert.equal(
     pruneIneligibilityReason(inspection({ session: "detached", running: [] })),
     undefined,

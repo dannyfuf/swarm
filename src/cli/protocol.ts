@@ -27,7 +27,7 @@ import {
   worktreeHost,
 } from "../core/types.ts";
 import { VERSION } from "../core/version.ts";
-import { deleteRefusalReason, pruneIneligibilityReason } from "../services/inspections.ts";
+import { pruneIneligibilityReason } from "../services/inspections.ts";
 import { mutateState } from "../services/stateMutation.ts";
 
 export { PROTOCOL_VERSION } from "../core/protocol.ts";
@@ -51,7 +51,7 @@ export type ProtocolCommand =
       defaultBranch?: string;
       hooks: RepoHooks;
     } & JsonOption)
-  | ({ kind: "delete"; worktreeIds: WorktreeId[]; force: boolean } & JsonOption)
+  | ({ kind: "delete"; worktreeIds: WorktreeId[] } & JsonOption)
   | ({ kind: "kill"; worktreeId: WorktreeId } & JsonOption)
   | ({ kind: "status" } & JsonOption)
   | ({
@@ -283,43 +283,13 @@ async function createWorktree(
 
 async function deleteOne(
   worktreeId: WorktreeId,
-  force: boolean,
   deps: ProtocolDependencies,
-  pruneOptions?: { killSessions: boolean },
-): Promise<{ result: DeleteResult; inspection?: WorktreeInspection }> {
-  const refusalReason = (inspection: WorktreeInspection): string | undefined =>
-    pruneOptions
-      ? pruneIneligibilityReason(inspection, {
-          allowRunning: pruneOptions.killSessions,
-          requireKnownUniqueCommits: pruneOptions.killSessions,
-        })
-      : deleteRefusalReason(inspection);
-  let latest: WorktreeInspection | undefined;
+): Promise<DeleteResult> {
   try {
-    const [initial] = await deps.inspections.inspect({ worktreeIds: [worktreeId] });
-    if (!initial) throw new SwarmError("not-found", `Worktree not found: ${worktreeId}`);
-    latest = initial;
-    if (!force) {
-      const reason = refusalReason(initial);
-      if (reason) return { result: { worktreeId, ok: false, reason }, inspection: initial };
-    }
-
-    const [rechecked] = await deps.inspections.inspect({ worktreeIds: [worktreeId] });
-    if (!rechecked) throw new SwarmError("not-found", `Worktree not found: ${worktreeId}`);
-    latest = rechecked;
-    if (!force) {
-      const reason = refusalReason(rechecked);
-      if (reason) return { result: { worktreeId, ok: false, reason }, inspection: rechecked };
-    }
-    await deps.worktrees.delete(worktreeId, undefined, {
-      force: force || pruneOptions?.killSessions === true,
-    });
-    return { result: { worktreeId, ok: true }, inspection: latest };
+    await deps.worktrees.delete(worktreeId);
+    return { worktreeId, ok: true };
   } catch (error) {
-    return {
-      result: { worktreeId, ok: false, reason: messageOf(error) },
-      ...(latest ? { inspection: latest } : {}),
-    };
+    return { worktreeId, ok: false, reason: messageOf(error) };
   }
 }
 
@@ -369,7 +339,7 @@ export async function handleProtocolCommand(
   if (command.kind === "delete") {
     const results: DeleteResult[] = [];
     for (const worktreeId of command.worktreeIds) {
-      results.push((await deleteOne(worktreeId, command.force, deps)).result);
+      results.push(await deleteOne(worktreeId, deps));
     }
     return {
       protocol: PROTOCOL_VERSION,
@@ -399,13 +369,10 @@ export async function handleProtocolCommand(
       deleted.push(...eligible);
     } else {
       for (const worktreeId of eligible) {
-        const attempt = await deleteOne(worktreeId, false, deps, {
-          killSessions: command.killSessions,
-        });
-        const { result } = attempt;
+        const result = await deleteOne(worktreeId, deps);
         if (result.ok) deleted.push(worktreeId);
         else {
-          const inspection = attempt.inspection ?? byId.get(worktreeId);
+          const inspection = byId.get(worktreeId);
           if (!inspection) throw new SwarmError("not-found", `Worktree not found: ${worktreeId}`);
           skipped.push(pruneSkipped(inspection, result.reason ?? "delete failed"));
         }
@@ -455,7 +422,7 @@ export function humanProtocolResponse(
       .map((result) =>
         result.ok
           ? `Deleted ${result.worktreeId}`
-          : `Skipped ${result.worktreeId}: ${result.reason}`,
+          : `Failed ${result.worktreeId}: ${result.reason}`,
       )
       .join("\n");
   }

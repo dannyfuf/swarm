@@ -93,12 +93,11 @@ swarm inspect [<owner/name#slug>...] [--fetch] [--repo <owner/name>] --json
   head equals or contains the local HEAD; ancestry sets merged only for a published branch. Remote
   clients send explicit ids to the owning host. --fetch is off by default.
 
-swarm delete <owner/name#slug>... [--force] --json
+swarm delete <owner/name#slug>... --json
   -> { protocol: 1, ok: boolean, results: [{ worktreeId, ok, reason? }] }
-  Rechecks safety immediately before each deletion, continues after failures, and exits 1 when any
-  result failed. Without --force it refuses dirty, attached, unknown-session, or running
-  worktrees. An unmerged worktree is also refused when uniqueCommits is positive or unavailable.
-  --force bypasses refusals and hard-kills the session.
+  Unconditionally hard-kills the session, trashes the directory, and unregisters each named
+  worktree. It continues after real failures such as an unknown id or unreachable host and exits 1
+  when any result failed. Inspect first, or use prune --dry-run for a safe selection.
 
 swarm prune [--dry-run] [--no-fetch] [--kill-sessions] [--repo <owner/name>] --json
   -> { protocol: 1, dryRun: boolean, deleted: string[],
@@ -107,8 +106,8 @@ swarm prune [--dry-run] [--no-fetch] [--kill-sessions] [--repo <owner/name>] --j
   running commands are skipped. --kill-sessions permits them only for otherwise eligible
   worktrees, requires a known unique-commit count, and hard-kills the session; attached and unknown
   sessions remain protected. A fresh unpublished branch and upstreamGone alone are never eligible.
-  For remote mirrors, the client performs the same two safety snapshots and then forwards the
-  hard-kill as `delete --force` to the owning host.
+  For remote mirrors, the client selects from the inspection facts and then forwards plain
+  unconditional `delete` to the owning host.
 
 swarm kill <owner/name#slug> --json
   -> { protocol: 1, ok: true }
@@ -149,10 +148,11 @@ commands. The dev-box may override them in its own state later.
 - **Open**: create or reuse the proxy session, then switch to it. `swarm open <id>` from the CLI
   follows the same path.
 - **Inspect / prune**: group mirrored worktrees by host and invoke the same protocol commands on
-  each host. An unreachable host becomes a per-worktree inspection error and is skipped by prune.
+  each host. An unreachable host becomes a per-worktree inspection error and is skipped by prune;
+  prune is the safe bulk deletion command.
 - **Sleep / kill / delete**: delegate to the host. Kill and delete then kill the local proxy
-  session; sleep deliberately leaves the SSH pane alive. Delete also removes the mirror record and
-  re-syncs.
+  session; sleep deliberately leaves the SSH pane alive. Delete is unconditional and also removes
+  the mirror record and re-syncs.
 - **Copy path**: `y` copies `<host>:<remote path>` for remote worktrees.
 - **Doctor**: for each host, checks
   `ssh -o BatchMode=yes -o ConnectTimeout=5 -- <target> true`, then

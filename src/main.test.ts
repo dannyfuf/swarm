@@ -56,7 +56,6 @@ describe("CLI parsing", () => {
     assert.deepEqual(parseArgv(["delete", "--json", "bukhr/payroll#main"]), {
       kind: "delete",
       worktreeIds: ["bukhr/payroll#main"],
-      force: false,
       json: true,
     });
     assert.deepEqual(parseArgv(["kill", "bukhr/payroll#main", "--json"]), {
@@ -136,11 +135,10 @@ describe("CLI parsing", () => {
       },
     );
     assert.deepEqual(
-      parseArgv(["delete", "bukhr/payroll#main", "bukhr/platform#feat-api", "--force", "--json"]),
+      parseArgv(["delete", "bukhr/payroll#main", "bukhr/platform#feat-api", "--json"]),
       {
         kind: "delete",
         worktreeIds: ["bukhr/payroll#main", "bukhr/platform#feat-api"],
-        force: true,
         json: true,
       },
     );
@@ -176,8 +174,10 @@ describe("CLI parsing", () => {
     assert.deepEqual(parseArgv(["--help"]), { kind: "help" });
     assert.match(COMMAND_HELP.create, /only explicitly supplied --branch and --host/);
     assert.match(COMMAND_HELP.inspect, /head/);
-    assert.match(COMMAND_HELP.delete, /cannot determine unique commits/);
+    assert.match(COMMAND_HELP.delete, /unconditional/);
+    assert.match(COMMAND_HELP.delete, /prune --dry-run --json/);
     assert.match(COMMAND_HELP.prune, /--kill-sessions/);
+    assert.match(COMMAND_HELP.prune, /safe bulk deletion/);
   });
 
   test("prints command help to stdout and exits successfully", async () => {
@@ -210,6 +210,10 @@ describe("CLI parsing", () => {
     );
     assert.throws(
       () => parseArgv(["delete", "not-a-worktree", "--json"]),
+      (error: unknown) => error instanceof SwarmError && error.code === "validation",
+    );
+    assert.throws(
+      () => parseArgv(["delete", "bukhr/payroll#main", "--force"]),
       (error: unknown) => error instanceof SwarmError && error.code === "validation",
     );
     assert.throws(

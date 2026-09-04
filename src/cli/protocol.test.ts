@@ -31,7 +31,6 @@ function createHarness(initial = makeState()) {
   const createdInputs: Parameters<WorktreeService["create"]>[0][] = [];
   const postCreate: string[] = [];
   const deleted: string[] = [];
-  const deleteOptions: Array<{ force?: boolean } | undefined> = [];
 
   const worktreeService: WorktreeService = {
     async reconcileCreating() {},
@@ -72,9 +71,10 @@ function createHarness(initial = makeState()) {
     async runPostCreateHooks(id) {
       postCreate.push(id);
     },
-    async delete(id, _onEvent, opts) {
+    async delete(id) {
+      const worktree = state.state.worktrees.find((candidate) => candidate.id === id);
+      if (!worktree) throw new SwarmError("not-found", `Worktree not found: ${id}`);
       deleted.push(id);
-      deleteOptions.push(opts);
       await state.mutate((next) => {
         next.worktrees = next.worktrees.filter((worktree) => worktree.id !== id);
       });
@@ -191,7 +191,7 @@ function createHarness(initial = makeState()) {
     status,
     inspections,
   };
-  return { deps, state, tmux, createdInputs, postCreate, deleted, deleteOptions };
+  return { deps, state, tmux, createdInputs, postCreate, deleted };
 }
 
 function inspectionFor(
@@ -677,7 +677,6 @@ describe("CLI protocol handlers", () => {
         {
           kind: "delete",
           worktreeIds: ["bukhr/payroll#main"],
-          force: false,
           json: true,
         },
         deleteHarness.deps,
@@ -692,81 +691,41 @@ describe("CLI protocol handlers", () => {
     assert.equal(deleteHarness.state.state.worktrees.length, 0);
   });
 
-  test("delete refuses unsafe worktrees independently and rechecks before deletion", async () => {
-    const selected = worktrees.slice(0, 3);
+  test("delete is unconditional, supports multiple ids, and reports failures per id", async () => {
+    const selected = worktrees.slice(0, 2);
     const harness = createHarness(makeState({ worktrees: selected }));
-    let snapshots = 0;
-    harness.deps.inspections.inspect = async ({ worktreeIds } = {}) => {
-      snapshots += 1;
-      return selected
-        .filter((worktree) => worktreeIds?.includes(worktree.id) ?? true)
-        .map((worktree, index) =>
-          inspectionFor(worktree, {
-            dirty: index === 0,
-            mergedIntoTarget: index !== 1,
-            uniqueCommits: index === 1 ? 2 : 0,
-            merged: index !== 1,
-            running: index === 2 ? ["server"] : [],
-          }),
-        );
+    harness.deps.inspections.inspect = async () => {
+      throw new Error("delete must not inspect worktrees");
     };
+    const missing = "bukhr/payroll#missing";
 
     const response = await handleProtocolCommand(
       {
         kind: "delete",
-        worktreeIds: selected.map(({ id }) => id),
-        force: false,
+        worktreeIds: [selected[0]?.id ?? "bukhr/payroll#main", missing, selected[1]?.id ?? missing],
         json: true,
       },
       harness.deps,
     );
 
-    assert.equal("ok" in response && response.ok, false);
-    assert.equal("results" in response ? response.results.length : 0, 3);
-    assert.deepEqual(harness.deleted, []);
-    assert.equal(snapshots, 3);
-
-    let calls = 0;
-    harness.deps.inspections.inspect = async ({ worktreeIds } = {}) => {
-      calls += 1;
-      const worktree = selected.find(({ id }) => id === worktreeIds?.[0]);
-      assert.ok(worktree);
-      return [inspectionFor(worktree, { dirty: calls === 2 })];
-    };
-    const raced = await handleProtocolCommand(
-      {
-        kind: "delete",
-        worktreeIds: [selected[2]?.id ?? "bukhr/payroll#fix-1234"],
-        force: false,
-        json: true,
-      },
-      harness.deps,
+    assert.deepEqual(response, {
+      protocol: 1,
+      ok: false,
+      results: [
+        { worktreeId: selected[0]?.id, ok: true },
+        { worktreeId: missing, ok: false, reason: `Worktree not found: ${missing}` },
+        { worktreeId: selected[1]?.id, ok: true },
+      ],
+    });
+    assert.deepEqual(
+      harness.deleted,
+      selected.map(({ id }) => id),
     );
-    assert.equal("ok" in raced && raced.ok, false);
-    assert.equal(calls, 2);
-    assert.deepEqual(harness.deleted, []);
+    assert.equal(harness.state.state.worktrees.length, 0);
   });
 
-  test("force delete bypasses safety and prune selects only clean merged worktrees", async () => {
+  test("prune selects only clean merged worktrees", async () => {
     const selected = worktrees.slice(0, 4);
-    const forceHarness = createHarness(makeState({ worktrees: selected }));
-    forceHarness.deps.inspections.inspect = async ({ worktreeIds } = {}) => {
-      const worktree = selected.find(({ id }) => id === worktreeIds?.[0]);
-      assert.ok(worktree);
-      return [inspectionFor(worktree, { dirty: true, running: ["server"] })];
-    };
-    const forced = await handleProtocolCommand(
-      {
-        kind: "delete",
-        worktreeIds: [selected[0]?.id ?? "bukhr/payroll#main"],
-        force: true,
-        json: true,
-      },
-      forceHarness.deps,
-    );
-    assert.equal("ok" in forced && forced.ok, true);
-    assert.deepEqual(forceHarness.deleted, [selected[0]?.id]);
-
     const pruneHarness = createHarness(makeState({ worktrees: selected }));
     pruneHarness.deps.inspections.inspect = async () => [
       inspectionFor(selected[0] as Worktree, {
@@ -845,26 +804,27 @@ describe("CLI protocol handlers", () => {
     };
     const selected = [eligible, attached, unknown, dirty, unmerged, unknownCommits];
     const harness = createHarness(makeState({ worktrees: selected }));
-    harness.deps.inspections.inspect = async ({ worktreeIds } = {}) =>
-      selected
-        .filter((worktree) => worktreeIds?.includes(worktree.id) ?? true)
-        .map((worktree) => {
-          const common = { session: "detached" as const, running: ["claude"] };
-          if (worktree.id === attached.id) {
-            return inspectionFor(worktree, { ...common, session: "attached" });
-          }
-          if (worktree.id === unknown.id) {
-            return inspectionFor(worktree, { ...common, session: "unknown", running: [] });
-          }
-          if (worktree.id === dirty.id) return inspectionFor(worktree, { ...common, dirty: true });
-          if (worktree.id === unmerged.id) {
-            return inspectionFor(worktree, { ...common, merged: false, uniqueCommits: 2 });
-          }
-          if (worktree.id === unknownCommits.id) {
-            return inspectionFor(worktree, { ...common, uniqueCommits: null });
-          }
-          return inspectionFor(worktree, common);
-        });
+    let inspectionCalls = 0;
+    harness.deps.inspections.inspect = async () => {
+      inspectionCalls += 1;
+      return selected.map((worktree) => {
+        const common = { session: "detached" as const, running: ["claude"] };
+        if (worktree.id === attached.id) {
+          return inspectionFor(worktree, { ...common, session: "attached" });
+        }
+        if (worktree.id === unknown.id) {
+          return inspectionFor(worktree, { ...common, session: "unknown", running: [] });
+        }
+        if (worktree.id === dirty.id) return inspectionFor(worktree, { ...common, dirty: true });
+        if (worktree.id === unmerged.id) {
+          return inspectionFor(worktree, { ...common, merged: false, uniqueCommits: 2 });
+        }
+        if (worktree.id === unknownCommits.id) {
+          return inspectionFor(worktree, { ...common, uniqueCommits: null });
+        }
+        return inspectionFor(worktree, common);
+      });
+    };
 
     const response = await handleProtocolCommand(
       {
@@ -879,7 +839,7 @@ describe("CLI protocol handlers", () => {
 
     assert.equal("deleted" in response ? response.deleted[0] : undefined, eligible.id);
     assert.deepEqual(harness.deleted, [eligible.id]);
-    assert.deepEqual(harness.deleteOptions, [{ force: true }]);
+    assert.equal(inspectionCalls, 1);
     assert.deepEqual(
       "skipped" in response
         ? response.skipped.map(({ worktreeId, reason }) => [worktreeId, reason])

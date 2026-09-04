@@ -2594,7 +2594,7 @@ describe("createWorktreeService", () => {
     );
   });
 
-  test("lists and sorts remote branches, touches, and deletes a worktree with its session", async () => {
+  test("lists, touches, and unconditionally deletes a dirty worktree with an attached session", async () => {
     const target = worktrees[0];
     const repo = repos[0];
     assert.ok(target);
@@ -2606,11 +2606,12 @@ describe("createWorktreeService", () => {
       remoteBranches: {
         [repo.path]: ["origin/zeta", "origin/HEAD", "origin/alpha"],
       },
+      dirtyPaths: [target.path],
     });
     const files = createFakeFiles({ paths: [target.path] });
     const session: TmuxSession = {
       name: target.session,
-      attached: false,
+      attached: true,
       windows: 1,
       createdAt: 0,
       lastActivityAt: 0,

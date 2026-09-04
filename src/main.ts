@@ -109,8 +109,8 @@ Commands:
   list       List registered repositories and worktrees
   create     Create or return a worktree
   inspect    Inspect Git, PR, and tmux safety facts
-  delete     Safely delete one or more worktrees
-  prune      Delete every eligible merged worktree
+  delete     Unconditionally delete one or more worktrees
+  prune      Safely delete every eligible merged worktree
   kill       Hard-kill a worktree session
   status     Show tmux status for local worktrees
   path       Print a local worktree's absolute path
@@ -174,15 +174,14 @@ Flags:
 
 Default ids: every worktree. A merged PR counts only when its head contains the inspected local HEAD; otherwise merged requires both mergedIntoTarget and publication.
 Remote worktrees are inspected on their recorded host; offline hosts produce per-worktree errors.`,
-  delete: `Usage: swarm delete <id>... [--force] [--json]
+  delete: `Usage: swarm delete <id>... [--json]
 
 Flags:
-  --force  Delete despite Git, tmux-session, or running-command safety facts [default: false]
-  --json   Emit {protocol, ok, results:[{worktreeId,ok,reason?}]} [default: false]
-  --help   Show this help [default: false]
+  --json  Emit {protocol, ok, results:[{worktreeId,ok,reason?}]} [default: false]
+  --help  Show this help [default: false]
 
-Safety: without --force, dirty, attached, unknown-session, or running worktrees are refused. An unmerged worktree is also refused when uniqueCommits is positive; when the count is unavailable the reason is "cannot determine unique commits". A clean, idle fresh worktree with zero unique commits is allowed.
-Remote: each remote worktree is rechecked and deleted on its recorded host.`,
+Delete is unconditional: each named worktree is destroyed regardless of Git or tmux state. Inspect first with swarm inspect --json, or use swarm prune --dry-run --json for safe bulk cleanup.
+Remote: each remote worktree is deleted on its recorded host.`,
   prune: `Usage: swarm prune [--dry-run] [--no-fetch] [--kill-sessions] [--repo <owner/name>] [--json]
 
 Flags:
@@ -194,7 +193,8 @@ Flags:
   --help                Show this help [default: false]
 
 Eligibility: clean, known session state, and merged:true. By default, running commands are skipped. --kill-sessions requires a known unique-commit count and permits running commands only in detached sessions (or no session); attached and unknown sessions remain protected.
-Remote: remote worktrees are inspected and deleted on their recorded hosts; --kill-sessions uses the remote forced-delete path after local safety checks.`,
+Prune is the safe bulk deletion command; use --dry-run --json to preview its selection.
+Remote: remote worktrees are inspected and deleted on their recorded hosts; selected worktrees use the same unconditional delete operation.`,
   kill: `Usage: swarm kill <owner/name#slug> [--json]
 
 Flags:
@@ -426,14 +426,10 @@ export function parseArgv(argv: string[]): CliCommand {
       return { kind: command, json: parsed.json };
     }
     if (command === "delete") {
-      const forceFlags = parsed.args.filter((arg) => arg === "--force").length;
-      if (forceFlags > 1) validation("--force may only be specified once");
-      const ids = parsed.args.filter((arg) => arg !== "--force");
-      if (ids.length === 0 || ids.some((arg) => arg.startsWith("--"))) validation();
+      if (parsed.args.length === 0 || parsed.args.some((arg) => arg.startsWith("--"))) validation();
       return {
         kind: "delete",
-        worktreeIds: ids.map((id) => parseId(id, WorktreeId, "worktree id")),
-        force: forceFlags === 1,
+        worktreeIds: parsed.args.map((id) => parseId(id, WorktreeId, "worktree id")),
         json: parsed.json,
       };
     }
